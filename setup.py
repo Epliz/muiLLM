@@ -38,8 +38,9 @@ setup(
     packages=find_packages(),
     ext_modules=[
         CUDAExtension('muillm_ext', [
-            'csrc/linear.cpp',
+            'csrc/module.cpp',
             'csrc/linear_kernels.cu',
+            'csrc/rmsnorm_kernels.cu',
         ])
     ],
     cmdclass={

@@ -1,6 +1,4 @@
 
-from muillm.engine import init_engine
-
 import os
 
 os.environ["ROCR_VISIBLE_DEVICES"] = "0"
@@ -73,6 +71,7 @@ print("[Original] Completion: ", text)
 print("[Original] Time: ", time)
 text, time = profile_func(lambda: time_func(lambda: generate(model, "Hello my name is", 50)), trace_path="trace_orig.json")
 
+from muillm.engine import init_engine
 model = init_engine(model)
 
 print("Optimized models: ", model)

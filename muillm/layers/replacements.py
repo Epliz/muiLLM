@@ -4,8 +4,9 @@ import torch.nn as nn
 from muillm.layers.linear import MuiLinear
 from muillm.memorymanagement.gc import trigger_gc
 
+
 _LAYER_REPLACEMENTS = {
-    nn.Linear: MuiLinear
+    nn.Linear: MuiLinear,
 }
 
 def _recursive_setattr(model: nn.Module, module_name: str, new_module: nn.Module):
