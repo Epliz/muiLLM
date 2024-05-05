@@ -2,11 +2,20 @@ import torch
 import torch.nn as nn
 
 from muillm.layers.linear import MuiLinear
+from muillm.layers.rmsnorm import MuiRMSNorm
 from muillm.memorymanagement.gc import trigger_gc
+
+from transformers.models.mistral.modeling_mistral import MistralRMSNorm
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 
 _LAYER_REPLACEMENTS = {
     nn.Linear: MuiLinear,
+
+    # TODO: import dynamically to avoid dependency on transformers
+    ## Transformers
+    MistralRMSNorm: MuiRMSNorm,
+    LlamaRMSNorm: MuiRMSNorm,
 }
 
 def _recursive_setattr(model: nn.Module, module_name: str, new_module: nn.Module):
