@@ -62,7 +62,7 @@ static inline void __device__ dot4(float& acc, const float4& a, const float4& b)
 }
 
 template <typename T>
-const T* __device__ addr(const T* p, unsigned index) {
+static inline const T* __device__ addr(const T* p, unsigned index) {
   // helps the AMDGPU compiler understand it can use the sgrp pair + single vgpr addressing mode
   unsigned byte_offset = sizeof(T) * index;
   const uint8_t* p8 = (const uint8_t*)p;

@@ -45,15 +45,19 @@ class MuiLinear(nn.Linear):
         out_features = prev_module.out_features
 
         new_module = MuiLinear(in_features=in_features, out_features=out_features, bias=has_bias, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
-
-        new_module.weight = nn.Parameter(prev_module.weight.detach())
-        new_module.weight.requires_grad = prev_module.weight.requires_grad
-
-        if has_bias:
-            new_module.bias = nn.Parameter(prev_module.bias.detach())
-            new_module.bias.requires_grad = prev_module.bias.requires_grad
+        new_module.copy_module(prev_module=prev_module)
 
         return new_module
+
+    def copy_module(self, prev_module: nn.Linear):
+        has_bias = prev_module.bias is not None
+
+        self.weight = nn.Parameter(prev_module.weight.detach())
+        self.weight.requires_grad = prev_module.weight.requires_grad
+
+        if has_bias:
+            self.bias = nn.Parameter(prev_module.bias.detach())
+            self.bias.requires_grad = prev_module.bias.requires_grad
 
     def forward(self, input: Tensor) -> Tensor:
         if self.dispatchable and (input.numel() == input.shape[-1]):
