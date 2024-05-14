@@ -3,11 +3,13 @@ import torch.nn as nn
 
 from muillm.layers.linear import MuiLinear
 from muillm.layers.rmsnorm import MuiRMSNorm
+from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
 from muillm.layers.attention.mistral.sdpaattention import MuiMistralSdpaAttention
 from muillm.memorymanagement.gc import trigger_gc
 
-from transformers.models.mistral.modeling_mistral import MistralRMSNorm, MistralSdpaAttention
+from transformers.models.mistral.modeling_mistral import MistralRMSNorm, MistralSdpaAttention, MistralMLP
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
+
 
 
 
@@ -18,6 +20,8 @@ _LAYER_REPLACEMENTS = {
     ## Transformers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
+
+    MistralMLP: MuiGateUpDownMLP,
 
     MistralSdpaAttention: MuiMistralSdpaAttention,
 }
