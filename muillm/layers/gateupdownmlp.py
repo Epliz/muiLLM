@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Optional, Union
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -56,10 +56,13 @@ class MuiGateUpDownMLP(nn.Module):
         self.up_proj.copy_module(prev_module.up_proj)
         self.down_proj.copy_module(prev_module.down_proj)
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
             gateup = _MuiGateUpSiLU.apply(input, self.gate_proj.weight, self.up_proj.weight)
-            return self.down_proj(gateup)
+            return self.down_proj(gateup, residual=residual)
         else:
-            return self.down_proj(self.activation_function(self.gate_proj(input)) * self.up_proj(input))
+            output = self.down_proj(self.activation_function(self.gate_proj(input)) * self.up_proj(input))
+            if residual is not None:
+                output = output + residual
+            return output

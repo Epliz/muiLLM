@@ -7,8 +7,10 @@ from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
 from muillm.layers.attention.mistral.sdpaattention import MuiMistralSdpaAttention
 from muillm.memorymanagement.gc import trigger_gc
 
-from transformers.models.mistral.modeling_mistral import MistralRMSNorm, MistralSdpaAttention, MistralMLP
+from transformers.models.mistral.modeling_mistral import MistralRMSNorm, MistralSdpaAttention, MistralMLP, MistralDecoderLayer
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
+
+from muillm.layers.transformer.decoder import MuiDecoderLayer
 
 
 
@@ -24,6 +26,8 @@ _LAYER_REPLACEMENTS = {
     MistralMLP: MuiGateUpDownMLP,
 
     MistralSdpaAttention: MuiMistralSdpaAttention,
+
+    MistralDecoderLayer : MuiDecoderLayer,
 }
 
 def _recursive_setattr(model: nn.Module, module_name: str, new_module: nn.Module):

@@ -1,3 +1,4 @@
+from typing import Optional
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -7,7 +8,13 @@ import muillm_ext
 
 class _MuiLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inputs, weights, bias):
+    def forward(ctx, inputs, residual, weights, bias):
+        if (bias is not None) and (residual is not None):
+            raise ValueError("bias and residual at the same time is not supported")
+
+        if residual is not None:
+            bias = residual
+
         if bias is not None:
             output = muillm_ext.muillm_linear_forward(weights, bias, inputs)
         else:
@@ -59,9 +66,12 @@ class MuiLinear(nn.Linear):
             self.bias = nn.Parameter(prev_module.bias.detach())
             self.bias.requires_grad = prev_module.bias.requires_grad
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
-            return _MuiLinear.apply(input, self.weight, self.bias)
+            return _MuiLinear.apply(input, residual, self.weight, self.bias)
         else:
-            return F.linear(input, self.weight, self.bias)
+            output = F.linear(input, self.weight, self.bias)
+            if residual is not None:
+                output = output + residual
+            return output

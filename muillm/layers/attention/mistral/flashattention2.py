@@ -80,6 +80,7 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        residual: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         if "padding_mask" in kwargs:
@@ -201,7 +202,7 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
         )
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output, residual=residual)
 
         if not output_attentions:
             attn_weights = None

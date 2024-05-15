@@ -42,6 +42,7 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        residual: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
@@ -107,6 +108,6 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.hidden_size)
 
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output, residual=residual)
 
         return attn_output, None, past_key_value
