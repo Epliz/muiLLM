@@ -56,9 +56,7 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
 
         new_module = MuiMistralFlashAttention2(config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
 
-        new_module.q_proj.copy_module(prev_module=prev_module.q_proj)
-        new_module.k_proj.copy_module(prev_module=prev_module.k_proj)
-        new_module.v_proj.copy_module(prev_module=prev_module.v_proj)
+        new_module.qkv_proj.copy_modules(prev_module=[prev_module.q_proj, prev_module.k_proj, prev_module.v_proj])
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 
         return new_module
@@ -92,9 +90,7 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
             attention_mask = kwargs.pop("padding_mask")
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        query_states, key_states, value_states = self.qkv_proj(hidden_states)
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -112,9 +108,8 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
 
         # Because the input can be padded, the absolute sequence length depends on the max position id.
         rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item()) + 1
-        cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
 
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = self.rotary_emb.apply_rotary_pos_emb(query_states, key_states, position_ids, rotary_seq_len)
 
         use_sliding_windows = (
             _flash_supports_window_size
@@ -155,7 +150,8 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
                     attention_mask = torch.cat([attention_mask, torch.ones_like(attention_mask[:, -1:])], dim=-1)
 
             # TODO: bug here static cache not getting cache_position, need to get latest transformer library
-            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+            #cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+            cache_kwargs = {}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads

@@ -42,6 +42,7 @@ setup(
             'csrc/linear_kernels.cu',
             'csrc/gateup_kernels.cu',
             'csrc/rmsnorm_kernels.cu',
+            'csrc/rotary_kernels.cu',
         ])
     ],
     cmdclass={

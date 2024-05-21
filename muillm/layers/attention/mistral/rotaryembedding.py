@@ -1,45 +1,11 @@
+from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-# TODO: use custom kernel
+from transformers.cache_utils import Cache, DynamicCache
 
-class MuiMistralRotaryEmbedding(nn.Module):
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None, dtype=None):
-        super().__init__()
+import muillm_ext
 
-        dtype = dtype if dtype is not None else torch.get_default_dtype()
-
-        self.dim = dim
-        self.max_position_embeddings = max_position_embeddings
-        self.base = base
-        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-        # Build here to make `torch.jit.trace` work.
-        self._set_cos_sin_cache(
-            seq_len=max_position_embeddings, device=self.inv_freq.device, dtype=dtype
-        )
-
-    def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
-        t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
-
-        freqs = torch.outer(t, self.inv_freq)
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
-
-    def forward(self, x, seq_len=None):
-        # x: [bs, num_attention_heads, seq_len, head_size]
-        if seq_len > self.max_seq_len_cached:
-            # TODO: amortize resizing?
-            self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
-
-        return (
-            self.cos_cached[:seq_len].to(dtype=x.dtype),
-            self.sin_cached[:seq_len].to(dtype=x.dtype),
-        )
     
 # Copied from transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x):
@@ -83,3 +49,126 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim:int=1):
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
+
+class _MuiRotaryNoCache(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, positions_ids, cos_cached, sin_cached, q, k):
+        output = muillm_ext.muillm_rope_forward_no_cache(positions_ids, cos_cached, sin_cached, q, k)
+
+        ctx.save_for_backward(positions_ids, cos_cached, sin_cached, q, k)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("rotary backward not implemented")
+
+
+class _MuiRotaryDynamicCache(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, positions_ids, cos_cached, sin_cached, q, k, v, prev_k_cache, prev_v_cache):
+        output = muillm_ext.muillm_rope_forward_dynamic_cache(positions_ids, cos_cached, sin_cached, q, k, v, prev_k_cache, prev_v_cache)
+
+        ctx.save_for_backward(positions_ids, cos_cached, sin_cached, q, k)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("rotary backward not implemented")
+
+class MuiMistralRotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, layer_idx: int = None, device=None, dtype=None):
+        super().__init__()
+
+        self.layer_idx = layer_idx
+
+        dtype = dtype if dtype is not None else torch.get_default_dtype()
+
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+        # Build here to make `torch.jit.trace` work.
+        self._set_cos_sin_cache(
+            seq_len=max_position_embeddings, device=self.inv_freq.device, dtype=dtype
+        )
+
+        dispatchable_type = (dtype == torch.float16)
+        dispatchable_device = inv_freq.is_cuda
+        self.dispatchable = dispatchable_device and dispatchable_type
+
+    def _set_cos_sin_cache(self, seq_len, device, dtype):
+        self.max_seq_len_cached = seq_len
+        t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
+
+        freqs = torch.outer(t, self.inv_freq)
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
+        self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
+
+    def forward(self, x, seq_len=None):
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        if seq_len > self.max_seq_len_cached:
+            # TODO: amortize resizing?
+            self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
+
+        return (
+            self.cos_cached[:seq_len].to(dtype=x.dtype),
+            self.sin_cached[:seq_len].to(dtype=x.dtype),
+        )
+    
+    def apply_rotary_pos_emb_write_kv_cache(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor, kv_seq_len: int, v: Optional[torch.Tensor] = None, cache: Optional[Cache] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        cos, sin = self.forward(k, seq_len=kv_seq_len)
+
+        if self.dispatchable:
+            if isinstance(cache, DynamicCache):
+                layer_idx = self.layer_idx
+                if layer_idx == 0:
+                    cache._seen_tokens = cache._seen_tokens + k.shape[-2]
+
+                # Update the cache
+                if len(cache.key_cache) <= layer_idx:
+                    query_states, key_states = _MuiRotaryNoCache.apply(position_ids, cos, sin, q, k)
+                    # we need the kv caches to be contiguous at all times, so need to make sure they are
+                    # when we first create them
+                    cache.key_cache.append(key_states.contiguous())
+                    cache.value_cache.append(v.contiguous())
+                else:
+                    prev_k_cache = cache.key_cache[layer_idx]
+                    prev_v_cache = cache.value_cache[layer_idx]
+
+                    query_states, key_states, k_cache_out, v_cache_out = _MuiRotaryDynamicCache.apply(position_ids, cos, sin, q, k, v, prev_k_cache, prev_v_cache)
+                    cache.key_cache[layer_idx] = k_cache_out
+                    cache.value_cache[layer_idx] = v_cache_out
+
+                key_states = cache.key_cache[layer_idx]
+                value_states = cache.value_cache[layer_idx]
+
+                return query_states, key_states, value_states
+            else:
+                # Not supporting this type of cache
+                query_states, key_states = _MuiRotaryNoCache.apply(position_ids, cos, sin, q, k)
+                # might need to return if if there is no cache
+                value_states = v
+
+        else:
+            query_states, key_states = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
+            # might need to return if if there is no cache
+            value_states = v
+
+        if cache is not None:
+            # TODO: bug here static cache not getting cache_position, need to get latest transformer library
+            #cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+            cache_kwargs = {}
+            key_states, value_states = cache.update(key_states, v, self.layer_idx, cache_kwargs)
+
+        return query_states, key_states, value_states
+
+
+    def apply_rotary_pos_emb(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor, kv_seq_len: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        query_states, key_states, _ = self.apply_rotary_pos_emb_write_kv_cache(q, k, position_ids, kv_seq_len, v=None, cache=None)
+        return query_states, key_states

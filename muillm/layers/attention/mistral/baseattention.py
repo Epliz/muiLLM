@@ -57,6 +57,7 @@ class MuiMistralAttention(nn.Module):
             self.head_dim,
             max_position_embeddings=self.max_position_embeddings,
             base=self.rope_theta,
+            layer_idx=layer_idx,
             device=device,
             dtype=dtype,
         )
@@ -108,13 +109,8 @@ class MuiMistralAttention(nn.Module):
                     "with a layer index."
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
-        if past_key_value is not None:
-            # TODO: bug here static cache not getting cache_position, need to get latest transformer library
-            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(query_states, key_states, position_ids, kv_seq_len, value_states, past_key_value)
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
