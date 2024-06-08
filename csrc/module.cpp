@@ -41,6 +41,22 @@ std::vector<at::Tensor> muillm_rope_forward_dynamic_cache(
     torch::Tensor& prev_v_cache
 );
 
+at::Tensor muillm_causal_transformer_compute_softmax_scores_no_mask(
+    torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
+    torch::Tensor& k // [B, num_k_heads, NEW_T, embed_dim]
+);
+
+at::Tensor muillm_causal_transformer_apply_softmax_scores(
+    torch::Tensor& attention_weights, // [B, num_q_heads, T, NEW_T]
+    torch::Tensor& v // [B, num_v_heads, NEW_T, embed_dim]
+);
+
+at::Tensor muillm_causal_transformer_decoding_no_mask(
+    torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
+    torch::Tensor& k, // [B, num_k_heads, NEW_T, embed_dim]
+    torch::Tensor& v  // [B, num_v_heads, NEW_T, embed_dim]
+);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_forward", &muillm_linear_forward, "muillm linear forward");
   m.def("muillm_linear_forward_no_bias", &muillm_linear_forward_no_bias, "muillm linear forward no bias");
@@ -49,4 +65,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // rotary
   m.def("muillm_rope_forward_no_cache", &muillm_rope_forward_no_cache, "muillm rotary forward no cache");
   m.def("muillm_rope_forward_dynamic_cache", &muillm_rope_forward_dynamic_cache, "muillm rotary forward dynamic cache");
+  // causal transformer decoding
+  m.def("muillm_causal_transformer_compute_softmax_scores_no_mask", &muillm_causal_transformer_compute_softmax_scores_no_mask, "muillm causal transformer compute softmax scores no mask");
+  m.def("muillm_causal_transformer_apply_softmax_scores", &muillm_causal_transformer_apply_softmax_scores, "muillm causal transformer apply softmax scores");
+  m.def("muillm_causal_transformer_decoding_no_mask", &muillm_causal_transformer_decoding_no_mask, "muillm causal transformer decoding no mask");
 }

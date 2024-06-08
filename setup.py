@@ -43,6 +43,7 @@ setup(
             'csrc/gateup_kernels.cu',
             'csrc/rmsnorm_kernels.cu',
             'csrc/rotary_kernels.cu',
+            'csrc/causal_transformer_decoding.cu',
         ])
     ],
     cmdclass={

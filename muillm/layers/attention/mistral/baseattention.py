@@ -10,6 +10,7 @@ from transformers.models.mistral.configuration_mistral import MistralConfig
 from transformers.models.mistral.modeling_mistral import MistralAttention
 
 from muillm.layers.attention.mistral.rotaryembedding import MuiMistralRotaryEmbedding, apply_rotary_pos_emb
+from muillm.layers.attention.mistral.causaltransformerdecoding import mui_causally_decode
 from muillm.layers.attention.mistral.kvcache import repeat_kv
 from muillm.layers.linear import MuiLinear
 
@@ -112,38 +113,49 @@ class MuiMistralAttention(nn.Module):
 
         query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(query_states, key_states, position_ids, kv_seq_len, value_states, past_key_value)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        # at this point, we have the following shapes:
+        #  q: [B, num_q_heads, T, embed_dim]
+        #  k: [B, num_k_heads, NEW_T, embed_dim]
+        #  v: [B, num_v_heads, NEW_T, embed_dim]
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        if (bsz == 1) and (q_len == 1) and (attention_mask is None) and (hidden_states.dtype == torch.float16):
+            #
+            attn_output = mui_causally_decode(query_states, key_states, value_states)
+        else:
+            # repeat k/v heads if n_kv_heads < n_heads
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-                f" {attn_weights.size()}"
-            )
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
                 raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+                    f" {attn_weights.size()}"
                 )
 
-            attn_weights = attn_weights + attention_mask
+            if attention_mask is not None:
+                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                    raise ValueError(
+                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    )
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
+                attn_weights = attn_weights + attention_mask
 
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_output = torch.matmul(attn_weights, value_states)
 
+            if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+                raise ValueError(
+                    f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                    f" {attn_output.size()}"
+                )
+
+        # from shape [B, num_q_heads, T, embed_dim], go to [B, T, num_q_heads, embed_dim]
         attn_output = attn_output.transpose(1, 2).contiguous()
+        # from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         attn_output = self.o_proj(attn_output, residual=residual)

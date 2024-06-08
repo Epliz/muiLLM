@@ -9,6 +9,7 @@ from transformers.cache_utils import Cache
 from transformers.models.mistral.modeling_mistral import MistralSdpaAttention
 
 from muillm.layers.attention.mistral.rotaryembedding import apply_rotary_pos_emb
+from muillm.layers.attention.mistral.causaltransformerdecoding import mui_causally_decode
 from muillm.layers.attention.mistral.kvcache import repeat_kv
 from muillm.layers.attention.mistral.baseattention import MuiMistralAttention
 
@@ -73,35 +74,47 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
 
         query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(query_states, key_states, position_ids, kv_seq_len, value_states, past_key_value)
 
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        # at this point, we have the following shapes:
+        #  q: [B, num_q_heads, T, embed_dim]
+        #  k: [B, num_k_heads, NEW_T, embed_dim]
+        #  v: [B, num_v_heads, NEW_T, embed_dim]
+        if (bsz == 1) and (q_len == 1) and (attention_mask is None) and (hidden_states.dtype == torch.float16):
+            #
+            attn_output = mui_causally_decode(query_states, key_states, value_states)
+        else:
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                )
+            if attention_mask is not None:
+                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                    raise ValueError(
+                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    )
 
-        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
-        # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
+            # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
+            # Reference: https://github.com/pytorch/pytorch/issues/112577.
+            if query_states.device.type == "cuda" and attention_mask is not None:
+                query_states = query_states.contiguous()
+                key_states = key_states.contiguous()
+                value_states = value_states.contiguous()
 
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=attention_mask,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
-            is_causal=self.is_causal and attention_mask is None and q_len > 1,
-        )
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=attention_mask,
+                dropout_p=self.attention_dropout if self.training else 0.0,
+                # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
+                is_causal=self.is_causal and attention_mask is None and q_len > 1,
+            )
 
+        # from shape [B, num_q_heads, T, embed_dim], go to [B, T, num_q_heads, embed_dim]
         attn_output = attn_output.transpose(1, 2).contiguous()
+        # from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
         attn_output = attn_output.view(bsz, q_len, self.hidden_size)
 
+        # when non-batched, could push the o_proj into v?
+        # TODO: could be made 2x faster?
         attn_output = self.o_proj(attn_output, residual=residual)
 
         return attn_output, None, past_key_value
