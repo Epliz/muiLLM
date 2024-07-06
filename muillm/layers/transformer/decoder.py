@@ -7,43 +7,39 @@ from muillm.layers.attention.mistral.baseattention import MuiMistralAttention
 from muillm.layers.attention.mistral.sdpaattention import MuiMistralSdpaAttention
 from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
 from muillm.layers.rmsnorm import MuiRMSNorm
+from muillm.layers.multilinear import MuiMultiLinear
 
-from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralSdpaAttention, MISTRAL_ATTENTION_CLASSES
+from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralAttention, MistralSdpaAttention, MISTRAL_ATTENTION_CLASSES
+
 
 class MuiDecoderLayer(nn.Module):
-    def __init__(self, self_attn: MuiMistralAttention, mlp: MuiGateUpDownMLP, input_layernorm: MuiRMSNorm, post_attention_layernorm: MuiRMSNorm):
+    def __init__(self, qkv_proj: MuiMultiLinear, self_attn: MuiMistralAttention, mlp: MuiGateUpDownMLP):
         super().__init__()
+
+        self.qkv_proj = qkv_proj
         self.self_attn = self_attn
 
         self.mlp = mlp
-        self.input_layernorm = input_layernorm
-        self.post_attention_layernorm = post_attention_layernorm
 
     @staticmethod
     def replace(prev_module: MistralDecoderLayer) -> "MuiDecoderLayer":
+        prev_attn = prev_module.self_attn
 
+        input_layernorm = prev_module.input_layernorm
+        qkv_proj = None
         self_attn = None
-        if isinstance(prev_module.self_attn, MuiMistralAttention):
-            # already replaced
-            self_attn = prev_module.self_attn
-        elif isinstance(prev_module.self_attn, MistralSdpaAttention):
+        if isinstance(prev_attn, MistralSdpaAttention):
+            qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], prev_layernorm_module=input_layernorm)
             self_attn = MuiMistralSdpaAttention.replace(prev_module.self_attn)
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
 
+        post_attention_layernorm = prev_module.post_attention_layernorm
         mlp = prev_module.mlp
         if not isinstance(prev_module.mlp, MuiGateUpDownMLP):
-            mlp = MuiGateUpDownMLP.replace(prev_module.mlp)
+            mlp = MuiGateUpDownMLP.replace(prev_module=prev_module.mlp, prev_layernorm_module=post_attention_layernorm)
 
-        input_layernorm = prev_module.input_layernorm
-        if not isinstance(prev_module.input_layernorm, MuiRMSNorm):
-            input_layernorm = MuiRMSNorm.replace(prev_module.input_layernorm)
-
-        post_attention_layernorm = prev_module.post_attention_layernorm
-        if not isinstance(prev_module.post_attention_layernorm, MuiRMSNorm):
-            post_attention_layernorm = MuiRMSNorm.replace(prev_module.post_attention_layernorm)
-
-        return MuiDecoderLayer(self_attn=self_attn, mlp=mlp, input_layernorm=input_layernorm, post_attention_layernorm=post_attention_layernorm)
+        return MuiDecoderLayer(qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp)
 
     
     def forward(
@@ -76,11 +72,15 @@ class MuiDecoderLayer(nn.Module):
 
         residual = hidden_states
 
-        hidden_states = self.input_layernorm(hidden_states)
+        # Transform q, k, v
+        # input layer norm is fused
+        query_states, key_states, value_states = self.qkv_proj(hidden_states)
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
-            hidden_states=hidden_states,
+            query_states=query_states,
+            key_states=key_states,
+            value_states=value_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
@@ -91,7 +91,7 @@ class MuiDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        # post attention layer norm is fused in the MLP
         hidden_states = self.mlp(hidden_states, residual=residual)
 
         outputs = (hidden_states,)

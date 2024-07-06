@@ -30,39 +30,36 @@ from typing import List, Union
 
 
 def generate(model, prompt:Union[str, List[str]], max_new_tokens=20) -> Union[str, List[str]]:
-  single_prompt = isinstance(prompt, str)
-  if single_prompt:
-    prompts = [prompt]
-  else:
-    prompts = prompt
-
-  with torch.no_grad():
-    inputs = tokenizer(prompts, return_tensors="pt", padding="longest").to(device="cuda")
-    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True)
-    texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
-  texts = [text[len(prompts[i]):] for i, text in enumerate(texts)]
-
-  if single_prompt:
-    return texts[0]
-  else:
-    return texts
+    single_prompt = isinstance(prompt, str)
+    if single_prompt:
+        prompts = [prompt]
+    else:
+        prompts = prompt
+    with torch.no_grad():
+       inputs = tokenizer(prompts, return_tensors="pt", padding="longest").to(device="cuda")
+       outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True)
+       texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    texts = [text[len(prompts[i]):] for i, text in enumerate(texts)]
+    if single_prompt:
+        return texts[0]
+    else:
+        return texts
   
 
 def time_func(f):
-  import time
-  start_time = time.time()
-  ret = f()
-  end_time = time.time()
-  elapsed_time = end_time - start_time
-  return ret, elapsed_time
+    import time
+    start_time = time.time()
+    ret = f()
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    return ret, elapsed_time
 
 def profile_func(f, trace_path= "trace.json"):
-  from torch.profiler import profile, ProfilerActivity
-  with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-    ret = f()
-  prof.export_chrome_trace(trace_path)
-  return ret
+    from torch.profiler import profile, ProfilerActivity
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        ret = f()
+    prof.export_chrome_trace(trace_path)
+    return ret
 
 text, time = time_func(lambda: generate(model, "Hello my name is", 50))
 text, time = time_func(lambda: generate(model, "Hello my name is", 50))

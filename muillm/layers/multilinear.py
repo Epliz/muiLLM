@@ -1,10 +1,12 @@
 
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Tuple, Union
 import torch
 from  torch import Tensor
 import torch.nn as nn
 
 from muillm.layers.linear import MuiLinear
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
+from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
 def _all_or_none(it: Iterable[bool], exception_message) -> bool:
     has_all = all([i for i in it])
@@ -16,10 +18,10 @@ def _all_or_none(it: Iterable[bool], exception_message) -> bool:
 
 class MuiMultiLinear(nn.Module):
     def __init__(self, in_features: int, out_features: List[int], bias: bool = True,
-                 device=None, dtype=None) -> None:
+                 variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
         super().__init__()
 
-        self.linear = MuiLinear(in_features=in_features, out_features=sum(out_features), bias=bias, device=device, dtype=dtype)
+        self.linear = MuiLinear(in_features=in_features, out_features=sum(out_features), bias=bias, variance_epsilon=variance_epsilon, normalize=normalize, device=device, dtype=dtype)
 
         self.slice_starts = []
         self.slice_ends = []
@@ -34,7 +36,7 @@ class MuiMultiLinear(nn.Module):
             current_start = current_end
 
     @staticmethod
-    def replace(prev_modules: List[nn.Linear]) -> "MuiMultiLinear":
+    def replace(prev_modules: List[nn.Linear], prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiMultiLinear":
         if len(prev_modules) < 1:
             raise ValueError("MuiMultiLinear needs some linear layers passed in but none were provided")
         
@@ -45,12 +47,16 @@ class MuiMultiLinear(nn.Module):
         dtype = prev_modules[0].weight.dtype
         device = prev_modules[0].weight.device
 
-        new_module = MuiMultiLinear(in_features=in_features, out_features=out_features, bias=has_bias, dtype=dtype, device=device)
-        new_module.copy_modules(prev_modules=prev_modules)
+        normalize = prev_layernorm_module is not None
+        variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
+        norm_weights = prev_layernorm_module.weight if normalize else None
+
+        new_module = MuiMultiLinear(in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
+        new_module.copy_modules(prev_modules=prev_modules, norm_weights=norm_weights)
 
         return new_module
 
-    def copy_modules(self, prev_modules: List[nn.Linear]):
+    def copy_modules(self, prev_modules: List[nn.Linear], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
         has_bias = self.linear.bias is not None
 
         self.linear.weight = nn.Parameter(torch.cat([prev_module.weight.detach() for prev_module in prev_modules], dim=0))
@@ -59,6 +65,16 @@ class MuiMultiLinear(nn.Module):
         if has_bias:
             self.linear.bias = nn.Parameter(torch.cat([prev_module.bias.detach() for prev_module in prev_modules], dim=0))
             self.linear.bias.requires_grad = _all_or_none([prev_module.bias.requires_grad for prev_module in prev_modules], "all or none biases must required grads but got a mix")
+
+
+        if norm_weights is not None:
+            # the rescaling weights are not fused in the matrices due to instabilities
+
+            norm_weights_requires_grad = norm_weights.requires_grad
+            self.linear.norm_weights = nn.Parameter(norm_weights.detach())
+            self.linear.norm_weights.requires_grad = norm_weights_requires_grad
+
+            self.linear.norm_weights = norm_weights
 
     def forward(self, input: Tensor) -> Tuple[Tensor, ...]:
         all_outputs = self.linear(input)

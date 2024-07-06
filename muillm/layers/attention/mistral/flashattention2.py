@@ -56,7 +56,6 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
 
         new_module = MuiMistralFlashAttention2(config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
 
-        new_module.qkv_proj.copy_modules(prev_module=[prev_module.q_proj, prev_module.k_proj, prev_module.v_proj])
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 
         return new_module
@@ -72,7 +71,9 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
@@ -88,9 +89,7 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
 
             # overwrite attention_mask with padding_mask
             attention_mask = kwargs.pop("padding_mask")
-        bsz, q_len, _ = hidden_states.size()
-
-        query_states, key_states, value_states = self.qkv_proj(hidden_states)
+        bsz, q_len, _ = query_states.size()
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)

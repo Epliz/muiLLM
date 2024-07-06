@@ -29,7 +29,6 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
 
         new_module = MuiMistralSdpaAttention(config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
 
-        new_module.qkv_proj.copy_modules(prev_modules=[prev_module.q_proj, prev_module.k_proj, prev_module.v_proj])
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 
         return new_module
@@ -37,7 +36,9 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
     # Adapted from MistralAttention.forward
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
@@ -52,7 +53,9 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
                 'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
             )
             return super().forward(
-                hidden_states=hidden_states,
+                query_states=query_states,
+                key_states=key_states,
+                value_states=value_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_value=past_key_value,
@@ -60,9 +63,7 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
                 use_cache=use_cache,
             )
 
-        bsz, q_len, _ = hidden_states.size()
-
-        query_states, key_states, value_states = self.qkv_proj(hidden_states)
+        bsz, q_len, _ = query_states.size()
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -78,7 +79,7 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
         #  q: [B, num_q_heads, T, embed_dim]
         #  k: [B, num_k_heads, NEW_T, embed_dim]
         #  v: [B, num_v_heads, NEW_T, embed_dim]
-        if (bsz == 1) and (q_len == 1) and (attention_mask is None) and (hidden_states.dtype == torch.float16):
+        if (bsz == 1) and (q_len == 1) and (attention_mask is None) and (query_states.dtype == torch.float16):
             #
             attn_output = mui_causally_decode(query_states, key_states, value_states)
         else:

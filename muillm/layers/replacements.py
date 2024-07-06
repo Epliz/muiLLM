@@ -18,15 +18,8 @@ from muillm.layers.transformer.decoder import MuiDecoderLayer
 _LAYER_REPLACEMENTS = {
     nn.Linear: MuiLinear,
 
-    # TODO: import dynamically to avoid dependency on transformers
-    ## Transformers
-    MistralRMSNorm: MuiRMSNorm,
-    LlamaRMSNorm: MuiRMSNorm,
-
-    MistralMLP: MuiGateUpDownMLP,
-
-    MistralSdpaAttention: MuiMistralSdpaAttention,
-
+    # We replace the full decoder all at once to avoid issues due to replacement order
+    # (e.g. replacing the MLP then the decoder)
     MistralDecoderLayer : MuiDecoderLayer,
 }
 
