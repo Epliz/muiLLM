@@ -84,19 +84,15 @@ class MuiGateUpDownMLP(nn.Module):
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
-            gateup = _MuiGateUpSiLU.apply(input, self.norm_weights, self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight)
-            return self.down_proj(gateup, residual=residual)
+
+            # Also check that we don't have quantized linear
+            if isinstance(self.gate_proj, MuiLinear) and isinstance(self.up_proj, MuiLinear):
+                gateup = _MuiGateUpSiLU.apply(input, self.norm_weights, self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight)
+                return self.down_proj(gateup, residual=residual)
 
         # else: # not dispatchable or not MuiLinear
         if self.normalize:
             input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
-
-        if self.normalize:
-            input_dtype = input.dtype
-            hidden_states = input.to(torch.float32)
-            variance = hidden_states.pow(2).mean(-1, keepdim=True)
-            hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-            input = self.norm_weights * hidden_states.to(input_dtype)
 
         g = self.gate_proj(input)
         u = self.up_proj(input)

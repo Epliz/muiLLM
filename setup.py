@@ -40,7 +40,11 @@ setup(
         CUDAExtension('muillm_ext', [
             'csrc/module.cpp',
             'csrc/linear_kernels.cu',
+            'csrc/int8_dequantization_kernel.cu',
+            'csrc/int8_linear_kernels.cu',
             'csrc/gateup_kernels.cu',
+            'csrc/int8_gateup_kernels.cu',
+            'csrc/int8_gateup_dequantization_kernel.cu',
             'csrc/rmsnorm_kernels.cu',
             'csrc/rotary_kernels.cu',
             'csrc/causal_transformer_decoding.cu',
