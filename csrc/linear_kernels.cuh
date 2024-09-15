@@ -15,7 +15,9 @@ at::Tensor muillm_linear_activ_forward(
     mui_activation activ,
     torch::Tensor mul_bias,
     torch::Tensor add_bias,
-    torch::Tensor x
+    torch::Tensor x,
+    int tensor_parallelism,
+    int sharding_dim
 );
 
 #endif // __MUILLM_LINEAR_KERNELS_CUH__

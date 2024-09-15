@@ -1,4 +1,5 @@
-import torch
+from typing import Optional
+from muillm.engineconfig import MuiEngineConfig
 import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
@@ -7,9 +8,9 @@ from muillm.modules.wrapping import wrap_model
 from muillm.quantization.quantizationmethod import QuantizationMethod
 from muillm.quantization.quantizedreplacements import quantize_layers
 
-def init_engine(model: nn.Module, quantization_method: QuantizationMethod = None) -> nn.Module :
+def init_engine(model: nn.Module, quantization_method: QuantizationMethod = None, tensor_parallelism: Optional[int] = None) -> nn.Module :
 
-    engine_config = MuiEngineConfig(quantization_method)
+    engine_config = MuiEngineConfig(quantization_method=quantization_method, tensor_parallelism=tensor_parallelism)
 
     # replace full modules/layers first, then quantize
     model = replace_layers(module=model, engine_config=engine_config)

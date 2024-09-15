@@ -1,4 +1,6 @@
 from typing import Optional, Union
+from muillm.engineconfig import MuiEngineConfig
+from muillm.muimodule import MuiModule
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -53,11 +55,13 @@ class _MuiInt8Linear(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise ValueError("Not implemented")
 
-class MuiInt8Linear(nn.Module):
-    def __init__(self, quantization_method: Int8WeightOnlyQuantizationMethod, in_features: int, out_features: int, bias: bool = True,
+class MuiInt8Linear(MuiModule):
+    def __init__(self, engine_config: MuiEngineConfig, in_features: int, out_features: int, bias: bool = True,
                  variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None,
                  prev_weights_uint8: torch.Tensor = None, prev_scales_min_vals: torch.Tensor = None, prev_bias: torch.Tensor = None) -> None:
-        super().__init__()
+        super().__init__(engine_config=engine_config)
+        quantization_method = engine_config.quantization_method
+
         self.quantizer = RTNQuantizer(n_bit=8, groupsize=quantization_method.group_size, f=quantization_method.f)
 
         self.in_features = in_features
@@ -94,7 +98,7 @@ class MuiInt8Linear(nn.Module):
             variance_epsilon = prev_module.variance_epsilon if normalize else 0.0
             norm_weights = prev_module.norm_weights if normalize else None
 
-        new_module = MuiInt8Linear(quantization_method=engine_config.quantization_method, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
+        new_module = MuiInt8Linear(engine_config=engine_config, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
         new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights)
 
         return new_module

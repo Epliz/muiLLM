@@ -1,4 +1,6 @@
 from typing import Union
+from muillm.engineconfig import MuiEngineConfig
+from muillm.muimodule import MuiModule
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -24,10 +26,11 @@ class _MuiRMSNorm(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise NotImplementedError("RMSNorm backward is not implemented")
 
-class MuiRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6,
+class MuiRMSNorm(MuiModule):
+    def __init__(self, engine_config: MuiEngineConfig, hidden_size, eps=1e-6,
                  device=None, dtype=None) -> None:
-        super().__init__()
+        super().__init__(engine_config=engine_config)
+
         self.weight = nn.Parameter(torch.ones(hidden_size, device=device, dtype=dtype))
         self.variance_epsilon = eps
 
@@ -40,7 +43,7 @@ class MuiRMSNorm(nn.Module):
     def replace(prev_module: Union[LlamaRMSNorm, MistralRMSNorm], engine_config: MuiEngineConfig) -> "MuiRMSNorm":
         hidden_size = prev_module.weight.shape[0]
         eps = prev_module.variance_epsilon
-        new_module = MuiRMSNorm(hidden_size=hidden_size, eps=eps, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
+        new_module = MuiRMSNorm(engine_config=engine_config, hidden_size=hidden_size, eps=eps, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
 
         new_module.weight = nn.Parameter(prev_module.weight.detach())
         new_module.weight.requires_grad = prev_module.weight.requires_grad

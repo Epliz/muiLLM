@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 
@@ -37,12 +36,20 @@ def _recursive_setattr(model: nn.Module, module_name: str, new_module: nn.Module
         current_module = getattr(current_module, name)
     current_module.__setattr__(split_list[-1], new_module)
 
+def _is_rank0(engine_config: MuiEngineConfig) -> bool:
+    if engine_config.communicator is None:
+        return True
+    
+    return engine_config.communicator.rank == 0
+
 def replace_layers(module: nn.Module, engine_config: MuiEngineConfig, name_prefix = "") -> nn.Module:
 
     module_type = type(module)
 
     if module_type in _LAYER_REPLACEMENTS:
-        print(f"Replacing {name_prefix} ({module_type}) ...")
+        if _is_rank0(engine_config):
+            print(f"Replacing {name_prefix} ({module_type}) ...")
+
         new_module_type = _LAYER_REPLACEMENTS[module_type]
 
         new_module = new_module_type.replace(module, engine_config=engine_config)

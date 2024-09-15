@@ -55,6 +55,11 @@ setup(
             'csrc/causal_transformer_decoding.cu',
             'csrc/sync.cu',
             'csrc/sync_torch.cpp',
+            'csrc/comm.cu',
+            'csrc/comm_base.cu',
+            'csrc/comm_p2p.cu',
+            'csrc/comm_staged.cu',
+            'csrc/comm_torch.cpp',
         ])
     ],
     cmdclass={

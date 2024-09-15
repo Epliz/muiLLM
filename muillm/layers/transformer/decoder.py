@@ -1,5 +1,7 @@
 from typing import Optional, Tuple
 import warnings
+from muillm.engineconfig import MuiEngineConfig
+from muillm.muimodule import MuiModule
 import torch
 import torch.nn as nn
 
@@ -13,9 +15,9 @@ from muillm.layers.multilinear import MuiMultiLinear
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralAttention, MistralSdpaAttention, MISTRAL_ATTENTION_CLASSES
 
 
-class MuiDecoderLayer(nn.Module):
-    def __init__(self, qkv_proj: MuiMultiLinear, self_attn: MuiMistralAttention, mlp: MuiGateUpDownMLP):
-        super().__init__()
+class MuiDecoderLayer(MuiModule):
+    def __init__(self, engine_config: MuiEngineConfig, qkv_proj: MuiMultiLinear, self_attn: MuiMistralAttention, mlp: MuiGateUpDownMLP):
+        super().__init__(engine_config=engine_config)
 
         self.qkv_proj = qkv_proj
         self.self_attn = self_attn
@@ -41,7 +43,7 @@ class MuiDecoderLayer(nn.Module):
         if not isinstance(prev_module.mlp, MuiGateUpDownMLP):
             mlp = MuiGateUpDownMLP.replace(prev_module=prev_module.mlp, engine_config=engine_config, prev_layernorm_module=post_attention_layernorm)
 
-        return MuiDecoderLayer(qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp)
+        return MuiDecoderLayer(qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp, engine_config=engine_config)
 
     
     def forward(
@@ -74,6 +76,9 @@ class MuiDecoderLayer(nn.Module):
         """
 
         residual = hidden_states
+
+        # TODO: when using tensor parallelism, shard the qkv+attention to spread the compute
+        # (we can avoid the sync on qkv, but have to sync after o_proj, so same amount of syncs)
 
         # Transform q, k, v
         # input layer norm is fused

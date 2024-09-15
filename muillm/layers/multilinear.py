@@ -1,5 +1,7 @@
 
 from typing import Iterable, List, Tuple, Union
+from muillm.engineconfig import MuiEngineConfig
+from muillm.muimodule import MuiModule
 import torch
 from  torch import Tensor
 import torch.nn as nn
@@ -9,6 +11,8 @@ from muillm.layers.linear import MuiLinear
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
+from muillm.tensorparallelism.sharding import _shard
+
 def _all_or_none(it: Iterable[bool], exception_message) -> bool:
     has_all = all([i for i in it])
     has_any = not all([not i for i in it])
@@ -17,12 +21,18 @@ def _all_or_none(it: Iterable[bool], exception_message) -> bool:
         raise ValueError(exception_message)
     return has_all
 
-class MuiMultiLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: List[int], bias: bool = True,
-                 variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
-        super().__init__()
+class MuiMultiLinear(MuiModule):
+    def __init__(self, engine_config: MuiEngineConfig, in_features: int, out_features: List[int], bias: bool = True,
+                 variance_epsilon:float = 0.0, normalize:bool = False, sharding_dim:int = -1, device=None, dtype=None) -> None:
+        super().__init__(engine_config=engine_config)
 
-        self.linear = MuiLinear(in_features=in_features, out_features=sum(out_features), bias=bias, variance_epsilon=variance_epsilon, normalize=normalize, device=device, dtype=dtype)
+        tensor_parallelism = engine_config.tensor_parallelism
+
+        self.linear = MuiLinear(engine_config=engine_config, in_features=in_features, out_features=sum(out_features), bias=bias, variance_epsilon=variance_epsilon, normalize=normalize, sharding_dim=sharding_dim, device=device, dtype=dtype)
+
+        self.tensor_parallelism = tensor_parallelism
+        # MuiLinear will bring back sharding_dim in [0, 1] if negative
+        self.sharding_dim = self.linear.sharding_dim
 
         self.slice_starts = []
         self.slice_ends = []
@@ -52,19 +62,22 @@ class MuiMultiLinear(nn.Module):
         variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
         norm_weights = prev_layernorm_module.weight if normalize else None
 
-        new_module = MuiMultiLinear(in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
+        new_module = MuiMultiLinear(engine_config=engine_config, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
         new_module.copy_modules(prev_modules=prev_modules, norm_weights=norm_weights)
 
         return new_module
 
-    def copy_modules(self, prev_modules: List[nn.Linear], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
+    def copy_modules(self, prev_modules: List[nn.Linear], norm_weights: torch.Tensor = None):
         has_bias = self.linear.bias is not None
 
-        self.linear.weight = nn.Parameter(torch.cat([prev_module.weight.detach() for prev_module in prev_modules], dim=0))
+        # shard for tensor parallelism if necessary
+        self.linear.weight = nn.Parameter(_shard(torch.cat([prev_module.weight.detach() for prev_module in prev_modules], dim=0), tensor_parallelism=self.tensor_parallelism, dim=self.sharding_dim))
         self.linear.weight.requires_grad = _all_or_none([prev_module.weight.requires_grad for prev_module in prev_modules], "all or none weights must required grads but got a mix")
 
         if has_bias:
-            self.linear.bias = nn.Parameter(torch.cat([prev_module.bias.detach() for prev_module in prev_modules], dim=0))
+            # we don't shard the bias, but scale it down to get the correct result
+            bias = torch.cat([prev_module.bias.detach() for prev_module in prev_modules], dim=0)
+            self.linear.bias = nn.Parameter(MuiLinear._shard_bias(bias, self.tensor_parallelism, self.sharding_dim))
             self.linear.bias.requires_grad = _all_or_none([prev_module.bias.requires_grad for prev_module in prev_modules], "all or none biases must required grads but got a mix")
 
 
@@ -72,7 +85,8 @@ class MuiMultiLinear(nn.Module):
             # the rescaling weights are not fused in the matrices due to instabilities
 
             norm_weights_requires_grad = norm_weights.requires_grad
-            self.linear.norm_weights = nn.Parameter(norm_weights.detach())
+            # shard for tensor parallelism if necessary
+            self.linear.norm_weights = nn.Parameter(MuiLinear._shard_norm_weights(norm_weights.detach(), self.tensor_parallelism, self.sharding_dim))
             self.linear.norm_weights.requires_grad = norm_weights_requires_grad
 
             self.linear.norm_weights = norm_weights

@@ -2,6 +2,7 @@ from typing import List, Optional, Union
 import warnings
 
 from muillm.engineconfig import MuiEngineConfig
+from muillm.commmunication.communicator import Communicator
 from muillm.synchronization.synchronizer import Synchronizer
 from transformers.generation.utils import GenerationMixin, GenerateNonBeamOutput, GenerateEncoderDecoderOutput, GenerateDecoderOnlyOutput
 from transformers.generation.streamers import BaseStreamer
@@ -10,6 +11,7 @@ from transformers.generation.stopping_criteria import validate_stopping_criteria
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 
 from muillm.sampling.multinomial import muillm_multinomial_sample_one_no_sync
 
@@ -32,8 +34,20 @@ def _less_sync_sample(
     synced_gpus: bool = False,
     streamer: Optional[BaseStreamer] = None,
     synchronizer: Synchronizer = None,
+    communicator: Communicator = None,
+    tensor_parallelism:int = 1,
     **model_kwargs,
 ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
+    
+    if tensor_parallelism > 1:
+        # we are using tensor parallelism, so we need to sync the GPUs
+        synced_gpus = True
+
+        # determine what rank we are
+        rank = dist.get_rank()
+    else:
+        rank = 0
+
     # init values
     logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
     stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
@@ -82,7 +96,11 @@ def _less_sync_sample(
     batch_size, cur_len = input_ids.shape
     if "inputs_embeds" in model_kwargs:
         cur_len = model_kwargs["inputs_embeds"].shape[1]
+
+
     this_peer_finished = False
+    has_unfinished_sequences = True
+
     unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
     model_kwargs["cache_position"] = torch.arange(cur_len, device=input_ids.device)
 
@@ -96,15 +114,14 @@ def _less_sync_sample(
         max_remaining_generate = max_length - cur_len
 
     last_sync = 0
-    sync_frequency = 4
+    sync_frequency = 32
+    max_sync_frequency = 128
 
     # help removes a GPU sync point when preparing masks
     checked_mask_content = False
     self.all_ones_mask = None
 
-    printed_type = False
-
-    while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
+    while has_unfinished_sequences:
         # prepare model inputs
         model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
@@ -126,8 +143,12 @@ def _less_sync_sample(
             output_hidden_states=output_hidden_states,
         )
 
-        if synced_gpus and this_peer_finished:
-            continue  # don't waste resources running the code we don't need
+        # # This code was in HF Transformers
+        # # But for us, we can't actually skip the rest if we are using tensor parallelism
+        # # As we need all GPUs to reach the broadcast and so on
+        # # We could skip the prob computations, but we don't right now
+        # if synced_gpus and this_peer_finished:
+        #     continue  # don't waste resources running the code we don't need
 
         next_token_logits = outputs.logits[:, -1, :]
 
@@ -156,10 +177,17 @@ def _less_sync_sample(
                 )
 
         # sample
+        # (when we have multiple GPUs, we don't really need to do that on all GPUs, but it keeps
+        # the execution more similar)
         probs = nn.functional.softmax(next_token_scores, dim=-1)
         #next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
         # avoid GPU sync
         next_tokens = muillm_multinomial_sample_one_no_sync(probs).squeeze(1)
+
+        if tensor_parallelism > 1:
+            # synchronize the samples token to make sure all GPUs get the same output
+            communicator.broadcast(next_tokens, src=0)
+            #dist.broadcast(next_tokens, src=0)
 
         # finished sentences should have their next token be a padding token
         if eos_token_id is not None:
@@ -191,15 +219,29 @@ def _less_sync_sample(
 
         last_sync = last_sync + 1
         if (last_sync >= sync_frequency) or (max_remaining_generate <= 0):
+            # in this block, we basically block and check if the generation finished
+            # we do it not for every token so that we can enqueue more kernels ahead
+
             last_sync = 0
             # make sure we get a python boolean out to avoid sync anytime we access
             # the variable
-            if synchronizer is not None:
-                this_peer_finished = synchronizer.item(unfinished_sequences.max() == 0)
-            else:
-                this_peer_finished = (unfinished_sequences.max() == 0).item()
 
-            if sync_frequency < 16:
+            # this contains "True" if this GPU has finished
+            this_peer_finished_gpu = (unfinished_sequences.max() == 0)
+
+            if synchronizer is not None:
+                this_peer_finished = synchronizer.item(this_peer_finished_gpu)
+            else:
+                this_peer_finished = this_peer_finished_gpu.item()
+
+            # Also refresh that one, that is conditioning the looping
+            # HF Transformers was doing an all reduce in _has_unfinished_sequences()
+            # But because we broadcast the same tokens, this_peer_finished should always be the same
+            # on all GPUs
+            # TODO: revisit when we support other inference modes than tensor parallelism
+            has_unfinished_sequences = not this_peer_finished
+
+            if sync_frequency < max_sync_frequency:
                 # decrease the sync frequency up to every 16 tokens
                 sync_frequency = sync_frequency * 2
 
@@ -235,6 +277,7 @@ def _less_sync_sample(
     else:
         return input_ids
 
+
 def _wrap_transformers_model(model: GenerationMixin, engine_config: MuiEngineConfig) -> GenerationMixin:
     # monkey patch
     model._sample_bak = model._sample
@@ -243,6 +286,8 @@ def _wrap_transformers_model(model: GenerationMixin, engine_config: MuiEngineCon
         return _less_sync_sample(
             model,
             synchronizer = engine_config.synchronizer,
+            communicator = engine_config.communicator,
+            tensor_parallelism=engine_config.tensor_parallelism,
             *args,
             **kwargs
         )

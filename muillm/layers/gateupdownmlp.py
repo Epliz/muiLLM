@@ -1,10 +1,11 @@
 from enum import Enum
 import math
 from typing import Optional, Union
+from muillm.engineconfig import MuiEngineConfig
+from muillm.muimodule import MuiModule
 import torch
 from torch import Tensor
 import torch.nn as nn
-import torch.nn.functional as F
 
 from muillm.engineconfig import MuiEngineConfig
 from transformers.models.mistral.modeling_mistral import MistralMLP
@@ -14,6 +15,7 @@ from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 from muillm.layers.linear import MuiLinear
 
 from muillm.layers.rmsnorm import _MuiRMSNorm
+from muillm.tensorparallelism.sharding import _shard
 import muillm_ext
 
 class _MuiGateUpSiLUMethod(Enum):
@@ -52,19 +54,26 @@ class _MuiGateUpSiLUSplit(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise NotImplementedError("GateUpSiLU split K backward is not implemented")
 
-class MuiGateUpDownMLP(nn.Module):
-    def __init__(self, hidden_size: int, intermediate_size: int, activation_function: nn.Module, variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
-        super().__init__()
+class MuiGateUpDownMLP(MuiModule):
+    def __init__(self, engine_config: MuiEngineConfig, hidden_size: int, intermediate_size: int, activation_function: nn.Module, variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
+        super().__init__(engine_config=engine_config)
+
+        tensor_parallelism = engine_config.tensor_parallelism
+
+        self.tensor_parallelism = tensor_parallelism
+
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
         self.normalize = normalize
         self.variance_epsilon = variance_epsilon
+        # we don't need to shard the norm_weights as we shard gate/up by rows to avoid some all_reduce ops
         self.norm_weights = nn.Parameter(torch.ones(hidden_size, dtype=dtype, device=device)) if normalize else None
 
-        self.gate_proj = MuiLinear(self.hidden_size, self.intermediate_size, bias=False, device=device, dtype=dtype)
-        self.up_proj = MuiLinear(self.hidden_size, self.intermediate_size, bias=False, device=device, dtype=dtype)
-        self.down_proj = MuiLinear(self.intermediate_size, self.hidden_size, bias=False, device=device, dtype=dtype)
+        # shard gate/up by rows so that the all_reduce from the different linear can be removed
+        self.gate_proj = MuiLinear(engine_config=engine_config, in_features=self.hidden_size, out_features=self.intermediate_size, bias=False, sharding_dim=0, device=device, dtype=dtype)
+        self.up_proj = MuiLinear(engine_config=engine_config, in_features=self.hidden_size, out_features=self.intermediate_size, bias=False, sharding_dim=0, device=device, dtype=dtype)
+        self.down_proj = MuiLinear(engine_config=engine_config, in_features=self.intermediate_size, out_features=self.hidden_size, bias=False, sharding_dim=1, device=device, dtype=dtype)
         self.activation_function = activation_function
 
         wdtype = self.gate_proj.weight.dtype
@@ -89,7 +98,7 @@ class MuiGateUpDownMLP(nn.Module):
         variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
         norm_weights = prev_layernorm_module.weight if normalize else None
 
-        new_module = MuiGateUpDownMLP(hidden_size=hidden_size, intermediate_size=intermediate_size, activation_function=activation_function, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
+        new_module = MuiGateUpDownMLP(engine_config=engine_config, hidden_size=hidden_size, intermediate_size=intermediate_size, activation_function=activation_function, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
         new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights)
 
         return new_module
@@ -102,6 +111,7 @@ class MuiGateUpDownMLP(nn.Module):
             # the rescaling weights are not fused in the matrices due to instabilities
 
             norm_weights_requires_grad = norm_weights.requires_grad
+            # we don't need to shard the norm_weights as we shard gate/up by rows to avoid some all_reduce ops
             self.norm_weights = nn.Parameter(norm_weights.detach())
             self.norm_weights.requires_grad = norm_weights_requires_grad
 
@@ -115,10 +125,10 @@ class MuiGateUpDownMLP(nn.Module):
             input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
 
         # we shard gate/up by rows so that the all_reduce from the gate/up linears can be avoided
-        g = self.gate_proj(input)
-        u = self.up_proj(input)
+        g = self.gate_proj(input, collect_output=False)
+        u = self.up_proj(input, collect_output=False)
 
-        output = self.down_proj(self.activation_function(g) * u)
+        output = self.down_proj(self.activation_function(g) * u, shard_inputs=False, collect_output=True)
 
         if residual is not None:
             output = output + residual
@@ -131,8 +141,15 @@ class MuiGateUpDownMLP(nn.Module):
 
             # Also check that we don't have quantized linear
             if isinstance(self.gate_proj, MuiLinear) and isinstance(self.up_proj, MuiLinear):
+                # we shard gate/up by rows so that we can still use the fused kernel and
+                # the all_reduce from the gate/up linears can be avoided
+
+                # as we shard gate/up by rows, we don't need to shard the input and we
+                # still can use the fused RMSNorm
                 gateup = _MuiGateUpSiLU.apply(input, self.norm_weights, self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight)
-                return self.down_proj(gateup, residual=residual)
+
+                # we need to do an all_reduce here if we are using sharding (tensor parallelism)
+                return self.down_proj(gateup, residual=residual, shard_inputs=False, collect_output=True)
 
         # else: # not dispatchable or not MuiLinear
         return self._forward_unfused(input=input, residual=residual)
@@ -151,7 +168,7 @@ class MuiGateUpDownMLP(nn.Module):
                 gateup = _MuiGateUpSiLUSplit.apply(input, self.norm_weights, self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight)
 
                 # we need to do an all_reduce here if we are using sharding (tensor parallelism)
-                return self.down_proj(gateup, residual=residual)
+                return self.down_proj(gateup, residual=residual, shard_inputs=False, collect_output=True)
 
         # else: # not dispatchable or not MuiLinear
         return self._forward_unfused(input=input, residual=residual)

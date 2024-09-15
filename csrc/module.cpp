@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 
 #include <vector>
 #include <tuple>
@@ -7,6 +8,8 @@
 
 at::Tensor muillm_linear_forward_trampoline(
     torch::Tensor x,
+    int tensor_parallelism,
+    int sharding_dim,
     torch::Tensor weights,
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
@@ -22,7 +25,9 @@ at::Tensor muillm_linear_forward_trampoline(
         mui_activation::Identity,
         mul_bias,
         add_bias,
-        x
+        x,
+        tensor_parallelism,
+        sharding_dim
     );
 }
 
@@ -190,8 +195,64 @@ at::Tensor muillm_to_cpu_trampoline(
   return muillm_to_cpu(sync.sync_ptr, tensor);
 }
 
+#include "comm.h"
+
+void muillm_broadcast(
+    muillm_comm_t* comm,
+    torch::Tensor& tensor,
+    int src_rank
+);
+
+void muillm_all_reduce_sum(
+    muillm_comm_t* comm,
+    torch::Tensor& tensor
+);
+
+// needed because Pybind11 can't seem to be able to deal with opaque pointers
+struct muillm_comm_ptr {
+  muillm_comm_t* comm_ptr;
+};
+
+muillm_comm_ptr muillm_comm_init_trampoline(
+    int world_size,
+    int local_size,
+    int rank,
+    int local_rank
+) {
+  muillm_comm_t* ptr = nullptr;
+  muillm_comm_error_t error = muillm_comm_init(world_size, local_size, rank, local_rank, &ptr);
+
+  // TODO: log error
+
+  muillm_comm_ptr ret;
+  ret.comm_ptr = ptr;
+  return ret;
+}
+
+void muillm_barrier_trampoline(
+    muillm_comm_ptr comm
+) {
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  muillm_comm_barrier(comm.comm_ptr, stream);
+}
+
+void muillm_broadcast_trampoline(
+    muillm_comm_ptr comm,
+    torch::Tensor& tensor,
+    int src_rank
+) {
+  muillm_broadcast(comm.comm_ptr, tensor, src_rank);
+}
+
+void muillm_all_reduce_sum_trampoline(
+    muillm_comm_ptr comm,
+    torch::Tensor& tensor
+) {
+  muillm_all_reduce_sum(comm.comm_ptr, tensor);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
+  m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("tensor_parallelism"), py::arg("sharding_dim"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_int8_dequantize_forward", &muillm_int8_dequantize_forward, "muillm int8 dequantize forward");
   m.def("muillm_int8_linear_forward", &muillm_int8_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("scales_min_vals"), py::arg("group_size_shift"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_gateupsilu_forward", &muillm_gateupsilu_forward, "muillm gate up silu forward");
@@ -216,5 +277,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_item_f16", &muillm_item_f16_trampoline, "muillm item f16");
   m.def("muillm_item_f32", &muillm_item_f32_trampoline, "muillm item f32");
   m.def("muillm_to_cpu", &muillm_to_cpu_trampoline, "muillm to cpu");
+
+  // communication
+  pybind11::class_<muillm_comm_ptr> cl(m, "muillm_comm_ptr");
+  cl.def(pybind11::init<>());
+
+  m.def("muillm_comm_init", &muillm_comm_init_trampoline, "muillm comm init");
+  m.def("muillm_barrier", &muillm_barrier_trampoline, "muillm barrier");
+  m.def("muillm_broadcast", &muillm_broadcast_trampoline, "muillm broadcast");
+  m.def("muillm_all_reduce_sum", &muillm_all_reduce_sum_trampoline, "muillm all_reduce sum");
 
 }

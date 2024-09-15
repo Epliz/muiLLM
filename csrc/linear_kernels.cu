@@ -83,7 +83,8 @@ __global__ void muillm_gemv_kernel(
     const half* __restrict__ AB, // optional additive bias - size N
     half* __restrict__ Y, // output - size N
     unsigned N,
-    unsigned K
+    unsigned K,
+    float tp_scale
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
   int warpId = threadIdx.x / warpSize;
@@ -218,7 +219,7 @@ __global__ void muillm_gemv_kernel(
       }
 
       if (AB != nullptr) { // apply the additive bias if there is one
-        acc += __half2float(AB[current_row]);
+        acc += tp_scale * __half2float(AB[current_row]);
       }
 
       // write the output value
@@ -239,7 +240,8 @@ __global__ void muillm_gemv_norm_inputs_kernel(
     unsigned N,
     unsigned K,
     float epsilon,
-    float scale
+    float scale,
+    float tp_scale
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
   int warpId = threadIdx.x / warpSize;
@@ -431,7 +433,7 @@ __global__ void muillm_gemv_norm_inputs_kernel(
       }
 
       if (AB != nullptr) { // apply the additive bias if there is one
-        acc += __half2float(AB[current_row]);
+        acc += tp_scale * __half2float(AB[current_row]);
       }
 
       // write the output value
@@ -451,7 +453,9 @@ at::Tensor muillm_linear_activ_forward(
     mui_activation activ,
     torch::Tensor mul_bias,
     torch::Tensor add_bias,
-    torch::Tensor x) {
+    torch::Tensor x,
+    int tensor_parallelism,
+    int sharding_dim) {
   bool normalize = norm_weights.defined();
   if (normalize) {
     CHECK_INPUT(norm_weights);
@@ -487,6 +491,11 @@ at::Tensor muillm_linear_activ_forward(
   const int threads_per_blocks = THREADS_PER_BLOCK;
   const int num_blocks = DIV_ROUND_UP(N, ROWS_PER_BLOCK);
 
+  // if we are sharding column-wise, we need to scale the bias/residual as we
+  // are going to add several times due to the all-reduce
+  // but for row-wise sharding, we should not
+  float tp_scale = (sharding_dim == 1) ? (1.0f / tensor_parallelism) : 1.f;
+
   if (normalize) {
     float scale = 1.f / K;
 
@@ -501,7 +510,8 @@ at::Tensor muillm_linear_activ_forward(
       N,
       K,
       epsilon,
-      scale
+      scale,
+      tp_scale
     );
   } else {
     muillm_gemv_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
@@ -512,7 +522,8 @@ at::Tensor muillm_linear_activ_forward(
       add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
       (half*)y.data_ptr(),
       N,
-      K
+      K,
+      tp_scale
     );
   }
 
