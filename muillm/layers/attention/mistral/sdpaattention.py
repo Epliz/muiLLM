@@ -48,6 +48,8 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
         use_cache: bool = False,
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
+        shard_inputs:bool = True,
+        collect_output:bool = True,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
@@ -74,9 +76,14 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
 
         bsz, q_len, _ = query_states.size()
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        # shard inputs if needed
+        query_states = MuiMistralAttention._shard_inputs(query_states, self.tensor_parallelism, self.sharding_dim, shard_inputs=shard_inputs)
+        key_states = MuiMistralAttention._shard_inputs(key_states, self.tensor_parallelism, self.sharding_dim, shard_inputs=shard_inputs)
+        value_states = MuiMistralAttention._shard_inputs(value_states, self.tensor_parallelism, self.sharding_dim, shard_inputs=shard_inputs)
+
+        query_states = query_states.view(bsz, q_len, self.tp_num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.tp_num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.tp_num_key_value_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
@@ -121,10 +128,11 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
         # from shape [B, num_q_heads, T, embed_dim], go to [B, T, num_q_heads, embed_dim]
         attn_output = attn_output.transpose(1, 2).contiguous()
         # from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
-        attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.view(bsz, q_len, self.tp_hidden_size)
 
-        # when non-batched, could push the o_proj into v?
-        # TODO: could be made 2x faster?
-        attn_output = self.o_proj(attn_output, residual=residual)
+        attn_output = self.o_proj(attn_output, residual=residual, shard_inputs=False)
+
+        # when doing tensor parallelism, collect the output if necessary
+        self._collect_output(attn_output, collect_output=collect_output)
 
         return attn_output, None, past_key_value

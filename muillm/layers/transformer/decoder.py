@@ -33,7 +33,7 @@ class MuiDecoderLayer(MuiModule):
         self_attn = None
         if isinstance(prev_attn, MistralSdpaAttention):
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
-            qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm)
+            qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm, sharding_dim=-2)
             self_attn = MuiMistralSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config)
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
@@ -77,14 +77,15 @@ class MuiDecoderLayer(MuiModule):
 
         residual = hidden_states
 
-        # TODO: when using tensor parallelism, shard the qkv+attention to spread the compute
-        # (we can avoid the sync on qkv, but have to sync after o_proj, so same amount of syncs)
+        # when using tensor parallelism, we shard by head so that we don't need to sync after the qkv_proj
 
         # Transform q, k, v
         # input layer norm is fused
-        query_states, key_states, value_states = self.qkv_proj(hidden_states)
+        query_states, key_states, value_states = self.qkv_proj(hidden_states, collect_output=False)
 
         # Self Attention
+        # (when using tensor parallelism, query, key, states are split by head already,
+        # so we don't need to shard the inputs)
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             query_states=query_states,
             key_states=key_states,
@@ -96,6 +97,7 @@ class MuiDecoderLayer(MuiModule):
             use_cache=use_cache,
             all_ones_mask=all_ones_mask,
             residual=residual,
+            shard_inputs=False # for tensor parallelism
         )
 
         # Fully Connected

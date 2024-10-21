@@ -17,7 +17,7 @@ from muillm.layers.attention.mistral.causaltransformerdecoding import mui_causal
 from muillm.layers.attention.mistral.kvcache import repeat_kv
 from muillm.layers.linear import MuiLinear
 
-from muillm.layers.multilinear import MuiMultiLinear
+from muillm.tensorparallelism.sharding import _shard
 
 logger = logging.get_logger(__name__)
 
@@ -39,11 +39,13 @@ class MuiMistralAttention(MuiModule):
                 "when creating this class."
             )
 
+
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
@@ -55,7 +57,23 @@ class MuiMistralAttention(MuiModule):
                 f" and `num_heads`: {self.num_heads})."
             )
 
-        self.o_proj = MuiLinear(engine_config=engine_config, in_features=self.num_heads * self.head_dim, out_features=self.hidden_size, bias=False, device=device, dtype=dtype)
+        self.tensor_parallelism = self.engine_config.tensor_parallelism
+        self.comm = engine_config.communicator
+        self.sharding_dim = 1 # means we shard o_proj by columns; maybe we will support something else in the future?
+
+        # with tensor parallelism, we actually shard the heads across ranks
+        if self.hidden_size % self.tensor_parallelism != 0:
+            raise ValueError(f"Hidden size needs to be a multiple of the tensor parallelism but was {self.hidden_size} and tp level {self.tensor_parallelism}")
+
+        if self.num_heads % self.tensor_parallelism != 0:
+            raise ValueError(f"Number of heads needs to be a multiple of the tensor parallelism but was {self.num_heads} and tp level {self.tensor_parallelism}")
+
+        self.tp_hidden_size = self.hidden_size // self.tensor_parallelism
+        self.tp_num_heads = self.num_heads // self.tensor_parallelism
+        self.tp_num_key_value_heads = self.num_key_value_heads // self.tensor_parallelism
+
+        # o_proj is sharded by columns
+        self.o_proj = MuiLinear(engine_config=engine_config, in_features=self.num_heads * self.head_dim, out_features=self.hidden_size, sharding_dim=self.sharding_dim, bias=False, device=device, dtype=dtype)
 
         self.rotary_emb = MuiMistralRotaryEmbedding(
             engine_config=engine_config,
@@ -78,8 +96,34 @@ class MuiMistralAttention(MuiModule):
 
         return new_module
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+    @staticmethod
+    def _shard_inputs(inputs:torch.Tensor, tensor_parallelism:int, sharding_dim:int, shard_inputs:bool = True):
+        if not shard_inputs:
+            # in some cases (e.g. sharded MLP), we can skip the sharding as we do things manually
+            return inputs
+
+        if sharding_dim == 1:
+            # if we shard o_proj along the K dim (column-wise), we don't need to shard the inputs
+            return inputs
+        else:
+            raise ValueError("not supported")
+
+    def _collect_output(self, output:torch.Tensor, collect_output:bool = True):
+        if not collect_output:
+            # in some cases (e.g. sharded MLP), we can skip the collection as we do things manually
+            return output
+
+        if self.tensor_parallelism > 1:
+            if self.sharding_dim == 1:
+                # if we sharded along the K-dim (columnwise), collecting the pieces
+                # is summing them up (all reduce)
+                self.comm.all_reduce_sum(output)
+            else:
+                # if we sharded long the M-dim (row-wise), collecting the pieces
+                # is concatenating them up
+                # (but we don't really need to implement it as we should not be using it
+                # anywhere at the moment)
+                raise ValueError("not implemented")
 
     def forward(
         self,
@@ -93,6 +137,8 @@ class MuiMistralAttention(MuiModule):
         use_cache: bool = False,
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
+        shard_inputs:bool = True,
+        collect_output:bool = True,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if "padding_mask" in kwargs:
@@ -106,9 +152,14 @@ class MuiMistralAttention(MuiModule):
 
         bsz, q_len, _ = query_states.size()
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        # shard inputs if needed
+        query_states = MuiMistralAttention._shard_inputs(query_states, self.tensor_parallelism, self.sharding_dim, shard_inputs=shard_inputs)
+        key_states = MuiMistralAttention._shard_inputs(key_states, self.tensor_parallelism, self.sharding_dim, shard_inputs=shard_inputs)
+        value_states = MuiMistralAttention._shard_inputs(value_states, self.tensor_parallelism, self.sharding_dim, shard_inputs=shard_inputs)
+
+        query_states = query_states.view(bsz, q_len, self.tp_num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.tp_num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.tp_num_key_value_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
@@ -120,6 +171,7 @@ class MuiMistralAttention(MuiModule):
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
 
+        # TODO: adapt if q and k are partial due to tensor parallelism
         query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(query_states, key_states, position_ids, kv_seq_len, value_states, past_key_value)
 
         # at this point, we have the following shapes:
@@ -135,11 +187,12 @@ class MuiMistralAttention(MuiModule):
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
+            # A has shape [B, num_q_heads, T, T]
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+            if attn_weights.size() != (bsz, self.tp_num_heads, q_len, kv_seq_len):
                 raise ValueError(
-                    f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+                    f"Attention weights should be of size {(bsz, self.tp_num_heads, q_len, kv_seq_len)}, but is"
                     f" {attn_weights.size()}"
                 )
 
@@ -152,13 +205,17 @@ class MuiMistralAttention(MuiModule):
                 attn_weights = attn_weights + attention_mask
 
             # upcast attention to fp32
+            # A has shape [B, num_q_heads, T, T]
+            # (softmax is per head, so it is fine with the sharding per head when we use tensor parallelism)
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+
+            # output has shape [B, num_q_heads, T, embed_dim]
             attn_output = torch.matmul(attn_weights, value_states)
 
-            if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+            if attn_output.size() != (bsz, self.tp_num_heads, q_len, self.head_dim):
                 raise ValueError(
-                    f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                    f"`attn_output` should be of size {(bsz, self.tp_num_heads, q_len, self.head_dim)}, but is"
                     f" {attn_output.size()}"
                 )
 
@@ -167,9 +224,15 @@ class MuiMistralAttention(MuiModule):
         # from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        attn_output = self.o_proj(attn_output, residual=residual)
+        attn_output = self.o_proj(attn_output, residual=residual, shard_inputs=False)
 
         if not output_attentions:
             attn_weights = None
+        else:
+            if self.tensor_parallelism > 1:
+                raise ValueError("outputting attention weights with tensor parallelism is not supported")
+
+        # when doing tensor parallelism, collect the output if necessary
+        self._collect_output(attn_output, collect_output=collect_output)
 
         return attn_output, attn_weights, past_key_value

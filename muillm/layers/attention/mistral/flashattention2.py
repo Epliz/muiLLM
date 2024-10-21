@@ -83,6 +83,8 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
         use_cache: bool = False,
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
+        shard_inputs:bool = True,
+        collect_output:bool = True,
         **kwargs,
     ):
         if "padding_mask" in kwargs:
@@ -94,9 +96,14 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
             attention_mask = kwargs.pop("padding_mask")
         bsz, q_len, _ = query_states.size()
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        # shard inputs if needed
+        query_states = MuiMistralAttention._shard_inputs(query_states, self.tensor_parallelism, self.sharding_dim, shard_inputs=shard_inputs)
+        key_states = MuiMistralAttention._shard_inputs(key_states, self.tensor_parallelism, self.sharding_dim, shard_inputs=shard_inputs)
+        value_states = MuiMistralAttention._shard_inputs(value_states, self.tensor_parallelism, self.sharding_dim, shard_inputs=shard_inputs)
+
+        query_states = query_states.view(bsz, q_len, self.tp_num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.tp_num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.tp_num_key_value_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
@@ -157,8 +164,8 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        key_states = repeat_kv(key_states, self.tp_num_key_value_groups)
+        value_states = repeat_kv(value_states, self.tp_num_key_value_groups)
         dropout_rate = 0.0 if not self.training else self.attention_dropout
 
         # In PEFT, usually we cast the layer norms in float32 for training stability reasons
@@ -199,11 +206,17 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
             use_sliding_windows=use_sliding_windows,
         )
 
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
-        attn_output = self.o_proj(attn_output, residual=residual)
+        attn_output = attn_output.reshape(bsz, q_len, self.tp_hidden_size).contiguous()
+        attn_output = self.o_proj(attn_output, residual=residual, shard_inputs=False)
 
         if not output_attentions:
             attn_weights = None
+        else:
+            if self.tensor_parallelism > 1:
+                raise ValueError("outputting attention weights with tensor parallelism is not supported")
+
+        # when doing tensor parallelism, collect the output if necessary
+        self._collect_output(attn_output, collect_output=collect_output)
 
         return attn_output, attn_weights, past_key_value
 
