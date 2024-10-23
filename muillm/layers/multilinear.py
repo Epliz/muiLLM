@@ -4,6 +4,7 @@ import torch
 from  torch import Tensor
 import torch.nn as nn
 
+from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.linear import MuiLinear
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
@@ -36,7 +37,7 @@ class MuiMultiLinear(nn.Module):
             current_start = current_end
 
     @staticmethod
-    def replace(prev_modules: List[nn.Linear], prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiMultiLinear":
+    def replace(prev_modules: List[nn.Linear], engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiMultiLinear":
         if len(prev_modules) < 1:
             raise ValueError("MuiMultiLinear needs some linear layers passed in but none were provided")
         

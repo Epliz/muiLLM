@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
+from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.rmsnorm import _MuiRMSNorm
 import muillm_ext
 
@@ -51,7 +52,7 @@ class MuiLinear(nn.Linear):
         self.dispatchable = dispatchable_device and dispatchable_type
 
     @staticmethod
-    def replace(prev_module: nn.Linear, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiLinear":
+    def replace(prev_module: nn.Linear, engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiLinear":
         has_bias = prev_module.bias is not None
         in_features = prev_module.in_features
         out_features = prev_module.out_features

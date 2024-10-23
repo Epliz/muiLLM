@@ -9,6 +9,8 @@ import muillm_ext
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
+from muillm.engineconfig import MuiEngineConfig
+
 class _MuiRMSNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs, weights, epsilon):
@@ -35,7 +37,7 @@ class MuiRMSNorm(nn.Module):
         self.dispatchable = dispatchable_device and dispatchable_type
 
     @staticmethod
-    def replace(prev_module: Union[LlamaRMSNorm, MistralRMSNorm]) -> "MuiRMSNorm":
+    def replace(prev_module: Union[LlamaRMSNorm, MistralRMSNorm], engine_config: MuiEngineConfig) -> "MuiRMSNorm":
         hidden_size = prev_module.weight.shape[0]
         eps = prev_module.variance_epsilon
         new_module = MuiRMSNorm(hidden_size=hidden_size, eps=eps, dtype=prev_module.weight.dtype, device=prev_module.weight.device)

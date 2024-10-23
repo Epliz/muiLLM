@@ -5,6 +5,7 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
+from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.quantized.int8linear import MuiInt8Linear
 from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
 from muillm.layers.rmsnorm import _MuiRMSNorm
@@ -95,7 +96,7 @@ class MuiInt8GateUpDownMLP(nn.Module):
         self.dispatchable = dispatchable_activation and dispatchable_device and dispatchable_type
 
     @staticmethod
-    def replace(prev_module: MuiGateUpDownMLP, quantization_method: Int8WeightOnlyQuantizationMethod) -> "MuiInt8GateUpDownMLP":
+    def replace(prev_module: MuiGateUpDownMLP, engine_config: MuiEngineConfig) -> "MuiInt8GateUpDownMLP":
         dtype=prev_module.gate_proj.weight.dtype
         device=prev_module.gate_proj.weight.device
 
@@ -106,7 +107,7 @@ class MuiInt8GateUpDownMLP(nn.Module):
         normalize = prev_module.normalize is not None
         variance_epsilon = prev_module.variance_epsilon
 
-        new_module = MuiInt8GateUpDownMLP(quantization_method=quantization_method, hidden_size=hidden_size, intermediate_size=intermediate_size, activation_function=activation_function, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
+        new_module = MuiInt8GateUpDownMLP(quantization_method=engine_config.quantization_method, hidden_size=hidden_size, intermediate_size=intermediate_size, activation_function=activation_function, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
         new_module.copy_module(prev_module=prev_module)
 
         return new_module

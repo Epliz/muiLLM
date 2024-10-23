@@ -35,10 +35,17 @@ def generate(model, prompt:Union[str, List[str]], max_new_tokens=20) -> Union[st
         prompts = [prompt]
     else:
         prompts = prompt
+
     with torch.no_grad():
        inputs = tokenizer(prompts, return_tensors="pt", padding="longest").to(device="cuda")
        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True)
+
+       if hasattr(model, "muillm_config"):
+           engine_config = model.muillm_config
+           outputs = engine_config.synchronizer.to_cpu(outputs)
+
        texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
     texts = [text[len(prompts[i]):] for i, text in enumerate(texts)]
     if single_prompt:
         return texts[0]
@@ -61,18 +68,19 @@ def profile_func(f, trace_path= "trace.json"):
     prof.export_chrome_trace(trace_path)
     return ret
 
-text, time = time_func(lambda: generate(model, "Hello my name is", 50))
-text, time = time_func(lambda: generate(model, "Hello my name is", 50))
-text, time = time_func(lambda: generate(model, "Hello my name is", 50))
-print("[Original] Completion: ", text)
-print("[Original] Time: ", time)
-text, time = profile_func(lambda: time_func(lambda: generate(model, "Hello my name is", 50)), trace_path="trace_orig.json")
+# text, time = time_func(lambda: generate(model, "Hello my name is", 50))
+# text, time = time_func(lambda: generate(model, "Hello my name is", 50))
+# text, time = time_func(lambda: generate(model, "Hello my name is", 50))
+# print("[Original] Completion: ", text)
+# print("[Original] Time: ", time)
+# text, time = profile_func(lambda: time_func(lambda: generate(model, "Hello my name is", 50)), trace_path="trace_orig.json")
 
 from muillm.engine import init_engine
 model = init_engine(model)
 
 print("Optimized models: ", model)
 
+text, time = time_func(lambda: generate(model, "Hello my name is", 50))
 text, time = time_func(lambda: generate(model, "Hello my name is", 50))
 text, time = time_func(lambda: generate(model, "Hello my name is", 50))
 print("[Optimized] Completion: ", text)

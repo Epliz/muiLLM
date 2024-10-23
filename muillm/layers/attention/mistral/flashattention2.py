@@ -9,6 +9,7 @@ import transformers.utils.logging as logging
 from transformers.cache_utils import Cache
 from transformers.models.mistral.modeling_mistral import MistralFlashAttention2
 
+from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.attention.mistral.rotaryembedding import apply_rotary_pos_emb
 from muillm.layers.attention.mistral.kvcache import repeat_kv
 from muillm.layers.attention.mistral.baseattention import MuiMistralAttention
@@ -50,7 +51,7 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
     """
 
     @staticmethod
-    def replace(prev_module: MistralFlashAttention2) -> "MuiMistralFlashAttention2":
+    def replace(prev_module: MistralFlashAttention2, engine_config: MuiEngineConfig) -> "MuiMistralFlashAttention2":
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
@@ -79,6 +80,7 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,
     ):
