@@ -4,6 +4,7 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
+from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.linear import MuiLinear
 from muillm.layers.rmsnorm import _MuiRMSNorm
 from muillm.quantization.quantizationmethod import Int8WeightOnlyQuantizationMethod
@@ -79,7 +80,7 @@ class MuiInt8Linear(nn.Module):
         self.dispatchable = dispatchable_device and dispatchable_type
 
     @staticmethod
-    def replace(prev_module: Union[nn.Linear, MuiLinear], quantization_method: Int8WeightOnlyQuantizationMethod) -> "MuiInt8Linear":
+    def replace(prev_module: Union[nn.Linear, MuiLinear], engine_config: MuiEngineConfig) -> "MuiInt8Linear":
         has_bias = prev_module.bias is not None
         in_features = prev_module.in_features
         out_features = prev_module.out_features
@@ -93,7 +94,7 @@ class MuiInt8Linear(nn.Module):
             variance_epsilon = prev_module.variance_epsilon if normalize else 0.0
             norm_weights = prev_module.norm_weights if normalize else None
 
-        new_module = MuiInt8Linear(quantization_method=quantization_method, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
+        new_module = MuiInt8Linear(quantization_method=engine_config.quantization_method, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
         new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights)
 
         return new_module

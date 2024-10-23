@@ -5,6 +5,7 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
+from muillm.engineconfig import MuiEngineConfig
 from transformers.models.mistral.modeling_mistral import MistralMLP
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
@@ -49,7 +50,7 @@ class MuiGateUpDownMLP(nn.Module):
         self.dispatchable = dispatchable_activation and dispatchable_device and dispatchable_type
 
     @staticmethod
-    def replace(prev_module: MistralMLP, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiGateUpDownMLP":
+    def replace(prev_module: MistralMLP, engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiGateUpDownMLP":
         dtype=prev_module.gate_proj.weight.dtype
         device=prev_module.gate_proj.weight.device
 

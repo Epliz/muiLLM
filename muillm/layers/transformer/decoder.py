@@ -3,6 +3,7 @@ import warnings
 import torch
 import torch.nn as nn
 
+from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.attention.mistral.baseattention import MuiMistralAttention
 from muillm.layers.attention.mistral.sdpaattention import MuiMistralSdpaAttention
 from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
@@ -22,22 +23,23 @@ class MuiDecoderLayer(nn.Module):
         self.mlp = mlp
 
     @staticmethod
-    def replace(prev_module: MistralDecoderLayer) -> "MuiDecoderLayer":
+    def replace(prev_module: MistralDecoderLayer, engine_config: MuiEngineConfig) -> "MuiDecoderLayer":
         prev_attn = prev_module.self_attn
 
         input_layernorm = prev_module.input_layernorm
         qkv_proj = None
         self_attn = None
         if isinstance(prev_attn, MistralSdpaAttention):
-            qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], prev_layernorm_module=input_layernorm)
-            self_attn = MuiMistralSdpaAttention.replace(prev_module.self_attn)
+            # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
+            qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm)
+            self_attn = MuiMistralSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config)
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
 
         post_attention_layernorm = prev_module.post_attention_layernorm
         mlp = prev_module.mlp
         if not isinstance(prev_module.mlp, MuiGateUpDownMLP):
-            mlp = MuiGateUpDownMLP.replace(prev_module=prev_module.mlp, prev_layernorm_module=post_attention_layernorm)
+            mlp = MuiGateUpDownMLP.replace(prev_module=prev_module.mlp, engine_config=engine_config, prev_layernorm_module=post_attention_layernorm)
 
         return MuiDecoderLayer(qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp)
 
@@ -50,6 +52,7 @@ class MuiDecoderLayer(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        all_ones_mask: Optional[bool] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         if "padding_mask" in kwargs:
@@ -86,6 +89,7 @@ class MuiDecoderLayer(nn.Module):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            all_ones_mask=all_ones_mask,
             residual=residual,
         )
 

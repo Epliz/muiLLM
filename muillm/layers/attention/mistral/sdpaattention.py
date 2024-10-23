@@ -8,6 +8,7 @@ import transformers.utils.logging as logging
 from transformers.cache_utils import Cache
 from transformers.models.mistral.modeling_mistral import MistralSdpaAttention
 
+from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.attention.mistral.rotaryembedding import apply_rotary_pos_emb
 from muillm.layers.attention.mistral.causaltransformerdecoding import mui_causally_decode
 from muillm.layers.attention.mistral.kvcache import repeat_kv
@@ -23,7 +24,7 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
     """
 
     @staticmethod
-    def replace(prev_module: MistralSdpaAttention) -> "MuiMistralSdpaAttention":
+    def replace(prev_module: MistralSdpaAttention, engine_config: MuiEngineConfig) -> "MuiMistralSdpaAttention":
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
@@ -44,6 +45,7 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
@@ -61,7 +63,13 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
                 past_key_value=past_key_value,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
+                all_ones_mask=all_ones_mask,
             )
+
+        if all_ones_mask is None:
+            # if not specified, assume it might not have just ones
+            all_ones_mask = False
+
 
         bsz, q_len, _ = query_states.size()
 
@@ -79,7 +87,7 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
         #  q: [B, num_q_heads, T, embed_dim]
         #  k: [B, num_k_heads, NEW_T, embed_dim]
         #  v: [B, num_v_heads, NEW_T, embed_dim]
-        if (bsz == 1) and (q_len == 1) and (attention_mask is None) and (query_states.dtype == torch.float16):
+        if (bsz == 1) and (q_len == 1) and all_ones_mask and (query_states.dtype == torch.float16):
             #
             attn_output = mui_causally_decode(query_states, key_states, value_states)
         else:

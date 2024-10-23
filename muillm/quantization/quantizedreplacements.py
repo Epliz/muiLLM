@@ -2,6 +2,7 @@ from typing import List
 import torch
 import torch.nn as nn
 
+from muillm.engineconfig import MuiEngineConfig
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.layers.quantized.int8linear import MuiInt8Linear
 from muillm.layers.quantized.int8gateupdownmlp import MuiInt8GateUpDownMLP
@@ -29,7 +30,8 @@ def _module_name_matches(module_name: str, modules: List[str]):
             return True
     return False
 
-def quantize_layers(model: nn.Module, quantization_method: QuantizationMethod = None):
+def quantize_layers(model: nn.Module, engine_config: MuiEngineConfig):
+    quantization_method = engine_config.quantization_method
     if not isinstance(quantization_method, Int8WeightOnlyQuantizationMethod):
         raise ValueError(f"The quantization method {quantization_method} is not supported")
     
@@ -47,7 +49,7 @@ def quantize_layers(model: nn.Module, quantization_method: QuantizationMethod = 
             print(f"Quantizing {module_name}...")
             new_module_type = replacements[module_type]
 
-            new_module = new_module_type.replace(module, quantization_method=quantization_method)
+            new_module = new_module_type.replace(module, engine_config=engine_config)
 
             _recursive_setattr(model, module_name, new_module)
 

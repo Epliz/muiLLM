@@ -1,6 +1,8 @@
 from typing import List, Optional, Union
 import warnings
 
+from muillm.engineconfig import MuiEngineConfig
+from muillm.synchronization.synchronizer import Synchronizer
 from transformers.generation.utils import GenerationMixin, GenerateNonBeamOutput, GenerateEncoderDecoderOutput, GenerateDecoderOnlyOutput
 from transformers.generation.streamers import BaseStreamer
 from transformers.generation.logits_process import LogitsProcessorList
@@ -29,6 +31,7 @@ def _less_sync_sample(
     return_dict_in_generate: Optional[bool] = None,
     synced_gpus: bool = False,
     streamer: Optional[BaseStreamer] = None,
+    synchronizer: Synchronizer = None,
     **model_kwargs,
 ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
     # init values
@@ -95,8 +98,11 @@ def _less_sync_sample(
     last_sync = 0
     sync_frequency = 4
 
+    # help removes a GPU sync point when preparing masks
     checked_mask_content = False
-    self.all_ones_mask = False
+    self.all_ones_mask = None
+
+    printed_type = False
 
     while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
         # prepare model inputs
@@ -183,14 +189,19 @@ def _less_sync_sample(
         if max_remaining_generate is not None:
             max_remaining_generate = max_remaining_generate - 1
 
-        # TODO: remove sync point in _prepare_4d_causal_attention_mask_for_sdpa due to torch.all
-        # by precomputing a flag in the model
         last_sync = last_sync + 1
         if (last_sync >= sync_frequency) or (max_remaining_generate <= 0):
             last_sync = 0
             # make sure we get a python boolean out to avoid sync anytime we access
             # the variable
-            this_peer_finished = (unfinished_sequences.max() == 0).item()
+            if synchronizer is not None:
+                this_peer_finished = synchronizer.item(unfinished_sequences.max() == 0)
+            else:
+                this_peer_finished = (unfinished_sequences.max() == 0).item()
+
+            if sync_frequency < 16:
+                # decrease the sync frequency up to every 16 tokens
+                sync_frequency = sync_frequency * 2
 
 
     # Reset just in case we generate without this method next time
@@ -224,12 +235,17 @@ def _less_sync_sample(
     else:
         return input_ids
 
-def _wrap_transformers_model(model: GenerationMixin) -> GenerationMixin:
+def _wrap_transformers_model(model: GenerationMixin, engine_config: MuiEngineConfig) -> GenerationMixin:
     # monkey patch
     model._sample_bak = model._sample
 
     def _less_sync_sample_binder(*args, **kwargs):
-        return _less_sync_sample(model, *args, **kwargs)
+        return _less_sync_sample(
+            model,
+            synchronizer = engine_config.synchronizer,
+            *args,
+            **kwargs
+        )
 
     model._sample = _less_sync_sample_binder
 

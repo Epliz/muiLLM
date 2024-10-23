@@ -1,13 +1,16 @@
+
 import torch
 import torch.nn as nn
 
+from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.linear import MuiLinear
 from muillm.layers.rmsnorm import MuiRMSNorm
 from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
 from muillm.layers.attention.mistral.sdpaattention import MuiMistralSdpaAttention
+from muillm.layers.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
 from muillm.memorymanagement.gc import trigger_gc
 
-from transformers.models.mistral.modeling_mistral import MistralRMSNorm, MistralSdpaAttention, MistralMLP, MistralDecoderLayer
+from transformers.models.mistral.modeling_mistral import MistralRMSNorm, MistralSdpaAttention, MistralMLP, MistralDecoderLayer, MistralModel, MistralForCausalLM
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from muillm.layers.transformer.decoder import MuiDecoderLayer
@@ -21,6 +24,10 @@ _LAYER_REPLACEMENTS = {
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. replacing the MLP then the decoder)
     MistralDecoderLayer : MuiDecoderLayer,
+
+    # replacements for full layers
+    MistralModel : MuiMistralModel,
+    MistralForCausalLM : MuiMistralForCausalLM,
 }
 
 def _recursive_setattr(model: nn.Module, module_name: str, new_module: nn.Module):
@@ -30,33 +37,35 @@ def _recursive_setattr(model: nn.Module, module_name: str, new_module: nn.Module
         current_module = getattr(current_module, name)
     current_module.__setattr__(split_list[-1], new_module)
 
-def replace_layers(model: nn.Module, name_prefix = ""):
+def replace_layers(module: nn.Module, engine_config: MuiEngineConfig, name_prefix = "") -> nn.Module:
+
+    module_type = type(module)
+
+    if module_type in _LAYER_REPLACEMENTS:
+        print(f"Replacing {name_prefix} ({module_type}) ...")
+        new_module_type = _LAYER_REPLACEMENTS[module_type]
+
+        new_module = new_module_type.replace(module, engine_config=engine_config)
+
+        # delete the previous module to save memory
+        del module
+
+        # trigger GC to save memory
+        trigger_gc()
+
+        # point to the new module so that we recurse on it
+        module = new_module
 
     # only replace the immediate children and not all children
     # as we might update the structure quite a lot through our replacements
     # and original children might not have counterparts anymore after replacements
     # (e.g. q, k, v projs will not exist anymore in the attention after replacement to our attention classes)
-    for module_name, module in model.named_children():
-        module_type = type(module)
-
-        full_module_name = name_prefix + "." + module_name if name_prefix != "" else module_name
-
-        if module_type in _LAYER_REPLACEMENTS:
-            print(f"Replacing {full_module_name} ({module_type}) ...")
-            new_module_type = _LAYER_REPLACEMENTS[module_type]
-
-            new_module = new_module_type.replace(module)
-
-            _recursive_setattr(model, module_name, new_module)
-
-            # delete the previous module to save memory
-            del module
-
-            # trigger GC to save memory
-            trigger_gc()
-
-            # point to the new module so that we recurse on it
-            module = new_module
+    for sub_module_name, sub_module in module.named_children():
+        full_module_name = name_prefix + "." + sub_module_name if name_prefix != "" else sub_module_name
 
         # replace modules in this module (updated or not) recursively
-        replace_layers(module, name_prefix=full_module_name)
+        new_sub_module = replace_layers(sub_module, engine_config=engine_config, name_prefix=full_module_name)
+
+        _recursive_setattr(module, sub_module_name, new_sub_module)
+
+    return module

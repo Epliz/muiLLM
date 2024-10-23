@@ -120,6 +120,69 @@ at::Tensor muillm_causal_transformer_decoding_no_mask(
     torch::Tensor& v  // [B, num_v_heads, NEW_T, embed_dim]
 );
 
+#include "sync.h"
+
+// needed because Pybind11 can't seem to be able to deal with opaque pointers
+struct muillm_synchronizer_ptr {
+  muillm_synchronizer_t* sync_ptr;
+};
+
+muillm_synchronizer_ptr muillm_sync_init_trampoline(
+) {
+  muillm_synchronizer_t* ptr = muillm_sync_init();
+  muillm_synchronizer_ptr ret;
+  ret.sync_ptr = ptr;
+  return ret;
+}
+
+bool muillm_item_bool(
+    muillm_synchronizer_t* sync,
+    torch::Tensor& tensor
+);
+
+half muillm_item_f16(
+    muillm_synchronizer_t* sync,
+    torch::Tensor& tensor
+);
+
+float muillm_item_f32(
+    muillm_synchronizer_t* sync,
+    torch::Tensor& tensor
+);
+
+at::Tensor muillm_to_cpu(
+    muillm_synchronizer_t* sync,
+    torch::Tensor& tensor
+);
+
+bool muillm_item_bool_trampoline(
+    muillm_synchronizer_ptr sync,
+    torch::Tensor& tensor
+) {
+  return muillm_item_bool(sync.sync_ptr, tensor);
+}
+
+float muillm_item_f16_trampoline(
+    muillm_synchronizer_ptr sync,
+    torch::Tensor& tensor
+) {
+  return __half2float(muillm_item_f16(sync.sync_ptr, tensor));
+}
+
+float muillm_item_f32_trampoline(
+    muillm_synchronizer_ptr sync,
+    torch::Tensor& tensor
+) {
+  return muillm_item_f32(sync.sync_ptr, tensor);
+}
+
+at::Tensor muillm_to_cpu_trampoline(
+    muillm_synchronizer_ptr sync,
+    torch::Tensor& tensor
+) {
+  return muillm_to_cpu(sync.sync_ptr, tensor);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_int8_dequantize_forward", &muillm_int8_dequantize_forward, "muillm int8 dequantize forward");
@@ -135,4 +198,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_causal_transformer_compute_softmax_scores_no_mask", &muillm_causal_transformer_compute_softmax_scores_no_mask, "muillm causal transformer compute softmax scores no mask");
   m.def("muillm_causal_transformer_apply_softmax_scores", &muillm_causal_transformer_apply_softmax_scores, "muillm causal transformer apply softmax scores");
   m.def("muillm_causal_transformer_decoding_no_mask", &muillm_causal_transformer_decoding_no_mask, "muillm causal transformer decoding no mask");
+
+  // synchronization
+  pybind11::class_<muillm_synchronizer_ptr> cl_sync(m, "muillm_synchronizer_ptr");
+  cl_sync.def(pybind11::init<>());
+
+  m.def("muillm_sync_init", &muillm_sync_init_trampoline, "muillm sync init");
+  m.def("muillm_item_bool", &muillm_item_bool_trampoline, "muillm item bool");
+  m.def("muillm_item_f16", &muillm_item_f16_trampoline, "muillm item f16");
+  m.def("muillm_item_f32", &muillm_item_f32_trampoline, "muillm item f32");
+  m.def("muillm_to_cpu", &muillm_to_cpu_trampoline, "muillm to cpu");
+
 }
