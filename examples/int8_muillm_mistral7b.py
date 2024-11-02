@@ -1,8 +1,10 @@
+# Example showing how to use muiLLM's int8 RTN support on the Mistral 7b model
 
 import os
 
 from muillm.quantization.quantizationmethod import Int8WeightOnlyQuantizationMethod
 
+# Run this example on a single GPU
 os.environ["ROCR_VISIBLE_DEVICES"] = "0"
 os.environ["ROCM_VISIBLE_DEVICES"] = "0"
 os.environ["HIP_VISIBLE_DEVICES"] = "0"
@@ -19,11 +21,13 @@ import torch.nn as nn
 # either set this environment variable before running the example, or adapt the path
 model_id = os.getenv("MISTRAL_7B_PATH", "/storage/models/Mistral-7B-Instruct-v0.2/")
 
+## Load the original model & tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_id,padding_side="left")
 
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
+# we load the original model in fp16 precision
 model: nn.Module = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16).to(device="cuda", dtype=torch.float16)
 
 print("Model : ", model)
@@ -66,12 +70,23 @@ def profile_func(f, trace_path= "trace.json"):
   prof.export_chrome_trace(trace_path)
   return ret
 
+# Have a look at the original speed (~50 tokens/s generation on MI300x)
+text, time = time_func(lambda: generate(model, "Hello my name is", 50))
+text, time = time_func(lambda: generate(model, "Hello my name is", 50))
+text, time = time_func(lambda: generate(model, "Hello my name is", 50))
+print("[Original] Completion: ", text)
+print("[Original] Time: ", time)
 
+# Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
+text, time = profile_func(lambda: time_func(lambda: generate(model, "Hello my name is", 50)), trace_path="trace_orig.json")
+
+# Use the muiLLM replacements layers with int8 round-to-nearest (RTN) quantization
 from muillm.engine import init_engine
 model = init_engine(model, quantization_method=Int8WeightOnlyQuantizationMethod(group_size=32, modules=["qkv_proj", "o_proj", "gate_proj", "up_proj","down_proj", "mlp"]))
 
 print("Optimized models: ", model)
 
+# Have a look at the speed (~200 token/s generation on MI300x)
 text, time = time_func(lambda: generate(model, "Hello my name is", 50))
 text, time = time_func(lambda: generate(model, "Hello my name is", 50))
 text, time = time_func(lambda: generate(model, "Hello my name is", 50))

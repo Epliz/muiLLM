@@ -1,6 +1,8 @@
+# Example showing how to use muiLLM's fp16 support on the Mistral 7b model
 
 import os
 
+# Run this example on a single GPU
 os.environ["ROCR_VISIBLE_DEVICES"] = "0"
 os.environ["ROCM_VISIBLE_DEVICES"] = "0"
 os.environ["HIP_VISIBLE_DEVICES"] = "0"
@@ -17,11 +19,13 @@ import torch.nn as nn
 # either set this environment variable before running the example, or adapt the path
 model_id = os.getenv("MISTRAL_7B_PATH", "/storage/models/Mistral-7B-Instruct-v0.2/")
 
+## Load the original model & tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_id,padding_side="left")
 
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
+# we load the original model in fp16 precision
 model: nn.Module = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16).to(device="cuda", dtype=torch.float16)
 
 print("Model : ", model)
@@ -39,10 +43,6 @@ def generate(model, prompt:Union[str, List[str]], max_new_tokens=20) -> Union[st
     with torch.no_grad():
        inputs = tokenizer(prompts, return_tensors="pt", padding="longest").to(device="cuda")
        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True)
-
-       if hasattr(model, "muillm_config"):
-           engine_config = model.muillm_config
-           outputs = engine_config.synchronizer.to_cpu(outputs)
 
        texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
@@ -68,21 +68,28 @@ def profile_func(f, trace_path= "trace.json"):
     prof.export_chrome_trace(trace_path)
     return ret
 
-# text, time = time_func(lambda: generate(model, "Hello my name is", 50))
-# text, time = time_func(lambda: generate(model, "Hello my name is", 50))
-# text, time = time_func(lambda: generate(model, "Hello my name is", 50))
-# print("[Original] Completion: ", text)
-# print("[Original] Time: ", time)
-# text, time = profile_func(lambda: time_func(lambda: generate(model, "Hello my name is", 50)), trace_path="trace_orig.json")
+# Have a look at the original speed (~50 tokens/s generation on MI300x)
+text, time = time_func(lambda: generate(model, "Hello my name is", 50))
+text, time = time_func(lambda: generate(model, "Hello my name is", 50))
+text, time = time_func(lambda: generate(model, "Hello my name is", 50))
+print("[Original] Completion: ", text)
+print("[Original] Time: ", time)
 
+# Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
+text, time = profile_func(lambda: time_func(lambda: generate(model, "Hello my name is", 50)), trace_path="trace_orig.json")
+
+# Use the muiLLM replacements layers
 from muillm.engine import init_engine
 model = init_engine(model)
 
 print("Optimized models: ", model)
 
+# Have a look at the speed (~140 token/s generation on MI300x)
 text, time = time_func(lambda: generate(model, "Hello my name is", 50))
 text, time = time_func(lambda: generate(model, "Hello my name is", 50))
 text, time = time_func(lambda: generate(model, "Hello my name is", 50))
 print("[Optimized] Completion: ", text)
 print("[Optimized] Time: ", time)
+
+# Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
 text, time = profile_func(lambda: time_func(lambda: generate(model, "Hello my name is", 50)), trace_path="trace_muillm.json")
