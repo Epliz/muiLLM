@@ -53,9 +53,13 @@ The library has to be installed from source.
 
 Before doing so, Pytorch for ROCM has to be installed first.
 
-### Installing Pytorch
+Please refer to the [Pytorch website](https://pytorch.org/get-started/locally/) for how to install pytorch for ROCm.
 
-Please refer to the [Pytorch website](https://pytorch.org/get-started/locally/) for this part.
+To make the building process faster, make sure you have ninja installed as well:
+
+```shell
+pip install ninja
+```
 
 ### Installing from source
 
