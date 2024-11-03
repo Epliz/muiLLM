@@ -16,6 +16,11 @@ def get_version(rel_path):
     else:
         raise RuntimeError("Unable to find version string.")
 
+class NinjaBuildExtension(BuildExtension):
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs['use_ninja'] = True
+        super().__init__(*args, **kwargs)
+
 setup(
     name="muillm",
     description="Library for fast LLM training/inferenceon AMD GPUs",
@@ -53,7 +58,7 @@ setup(
         ])
     ],
     cmdclass={
-        'build_ext': BuildExtension
+        'build_ext': NinjaBuildExtension
     },
     install_requires=["torch", "transformers==4.39.2"],
     version=get_version("muillm/__init__.py"))
