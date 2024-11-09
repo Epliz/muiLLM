@@ -3,6 +3,18 @@
 #include "comm_staged.h"
 #include "comm_p2p.h"
 
+#include <signal.h>
+#include <unistd.h>
+#include <stdio.h>
+
+void handler(int signo)
+{
+  int i = 1;
+  printf("pid=%d, got signal=%d\n", getpid(), signo);
+  fflush(stdout);
+  while (i) { }
+}
+
 muillm_comm_error_t muillm_comm_init(
     int world_size,
     int local_size,
@@ -27,6 +39,21 @@ muillm_comm_error_t muillm_comm_init(
       local_rank,
       (muillm_comm_p2p_t**) comm_ptr
     );
+  }
+
+  // Set up the sigaction
+  struct sigaction sa;
+  sa.sa_handler = handler;
+  sa.sa_flags = 0; // or SA_RESTART
+  sigemptyset(&sa.sa_mask);
+
+  if (sigaction(SIGSEGV, &sa, NULL) == -1) {
+    perror("Error setting signal handler for SIGSEGV");
+    exit(EXIT_FAILURE); 
+  }
+  if (sigaction(SIGABRT, &sa, NULL) == -1) {
+    perror("Error setting signal handler for SIGABRT");
+    exit(EXIT_FAILURE); 
   }
 }
 

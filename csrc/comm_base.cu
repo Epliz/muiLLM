@@ -163,7 +163,9 @@ muillm_comm_error_t __open_local_socket(
 
     printf("(rank %d) connected to the server\n", local_rank);
     // send to the server our rank
-    full_write(comm->client_to_server_fd, &local_rank, sizeof(int));
+    if (full_write(comm->client_to_server_fd, &local_rank, sizeof(int)) < 0) {
+      return MUILLM_SOCKET_WRITE_ERROR;
+    }
   }
 
   return MUILLM_COMM_SUCCESS;
@@ -171,7 +173,7 @@ muillm_comm_error_t __open_local_socket(
 
 
 // do a barrier using the local socker
-void __local_socket_barrier(
+muillm_comm_error_t __local_socket_barrier(
     muillm_comm_t* comm
 ) {
   bool is_server = comm->server_fd != -1;
@@ -190,11 +192,13 @@ void __local_socket_barrier(
 
         int v = 0;
         if (full_read(comm->server_to_client_fds[r], &v, sizeof(int)) < 0) {
-          printf("partial write\n");
+          printf("(rank %d) partial read\n", local_rank);
+          return MUILLM_SOCKET_READ_ERROR;
         }
 
         if (v != client_to_server_val) {
           printf("server read wrong barrier value\n");
+          return MUILLM_SOCKET_READ_ERROR;
         }
       }
 
@@ -204,29 +208,35 @@ void __local_socket_barrier(
 
         int v = server_to_client_val;
         if (full_write(comm->server_to_client_fds[r], &v, sizeof(int)) < 0) {
-          printf("partial write\n");
+          printf("(rank %d) partial write\n", local_rank);
+          return MUILLM_SOCKET_WRITE_ERROR;
         }
       }
     } else {
       // need to send to the server, the server will wait for all
       int v = client_to_server_val;
       if (full_write(comm->client_to_server_fd, &v, sizeof(int)) < 0) {
-        printf("partial write\n");
+        printf("(rank %d) partial write\n", local_rank);
+        return MUILLM_SOCKET_WRITE_ERROR;
       }
 
       // wait for the reply from the server
       if (full_read(comm->client_to_server_fd, &v, sizeof(int)) < 0) {
-        printf("partial write\n");
+        printf("(rank %d) partial write\n", local_rank);
+        return MUILLM_SOCKET_READ_ERROR;
       }
 
       if (v != server_to_client_val) {
-          printf("client read wrong barrier value\n");
+        printf("(rank %d) read wrong barrier value\n", local_rank);
+        return MUILLM_SOCKET_READ_ERROR;
       }
     }
+  
+  return MUILLM_COMM_SUCCESS;
 }
 
 // do a broadcast using the local socker
-void __local_socket_broadcast(
+muillm_comm_error_t __local_socket_broadcast(
     muillm_comm_t* comm,
     int src_local_rank,
     void* ptr,
@@ -244,13 +254,15 @@ void __local_socket_broadcast(
       for (int r = 0; r < local_size; r++) {
         if (r == local_rank) continue;
         if (full_write(comm->server_to_client_fds[r], ptr, byte_count) < 0) {
-          printf("partial write\n");
+          printf("(rank %d) partial write\n", local_rank);
+          return MUILLM_SOCKET_WRITE_ERROR;
         }
       }
     } else {
       // need to send to the server, the server will broadcast
       if (full_write(comm->client_to_server_fd, ptr, byte_count) < 0) {
-        printf("partial write\n");
+        printf("(rank %d) partial write\n", local_rank);
+        return MUILLM_SOCKET_WRITE_ERROR;
       }
     }
   } else {
@@ -259,27 +271,32 @@ void __local_socket_broadcast(
     if (is_server) {
       // we need to receive it from the src rank first
       if (full_read(comm->server_to_client_fds[src_local_rank], ptr, byte_count) < 0) {
-        printf("partial read\n");
+        printf("(rank %d) partial read\n", local_rank);
+        return MUILLM_SOCKET_READ_ERROR;
       }
       // then broadcast to the others
       for (int r = 0; r < local_size; r++) {
         if (r == local_rank || r == src_local_rank) continue;
         if (full_write(comm->server_to_client_fds[r], ptr, byte_count) < 0) {
-          printf("partial write\n");
+          printf("(rank %d) partial write\n", local_rank);
+          return MUILLM_SOCKET_WRITE_ERROR;
         }
       }
     } else {
       // we need to receive from the server
       if (full_read(comm->client_to_server_fd, ptr, byte_count) < 0) {
-        printf("partial read\n");
+        printf("(rank %d) partial read\n", local_rank);
+        return MUILLM_SOCKET_READ_ERROR;
       }
     }
   }
+
+  return MUILLM_COMM_SUCCESS;
 }
 
 // do a all gather using the local socket
 // out_ptr is expected to have enough space for LOCAL_SIZE * byte_count
-void __local_socket_all_gather(
+muillm_comm_error_t __local_socket_all_gather(
     muillm_comm_t* comm,
     void* in_ptr,
     size_t byte_count,
@@ -299,7 +316,8 @@ void __local_socket_all_gather(
       } else {
         // copy the content from the remote rank into out_ptr
         if (full_read(comm->server_to_client_fds[r], (int8_t*)out_ptr + offset, byte_count) < 0) {
-          printf("partial read\n");
+          printf("(rank %d) partial read\n", local_rank);
+          return MUILLM_SOCKET_READ_ERROR;
         }
       }
     }
@@ -308,18 +326,23 @@ void __local_socket_all_gather(
     for (int r = 0; r < local_size; r++) {
       if (r == local_rank) continue;
       if (full_write(comm->server_to_client_fds[r], out_ptr, byte_count * local_size) < 0) {
-        printf("partial write\n");
+        printf("(rank %d) partial write\n", local_rank);
+        return MUILLM_SOCKET_WRITE_ERROR;
       }
     }
   } else {
     // need to send to the server
     if (full_write(comm->client_to_server_fd, in_ptr, byte_count) < 0) {
-      printf("partial write\n");
+      printf("(rank %d) partial write\n", local_rank);
+      return MUILLM_SOCKET_WRITE_ERROR;
     }
 
     // need to received from the server
     if (full_read(comm->client_to_server_fd, out_ptr, byte_count * local_size) < 0) {
-      printf("partial read\n");
+      printf("(rank %d) partial read\n", local_rank);
+      return MUILLM_SOCKET_READ_ERROR;
     }
   }
+
+  return MUILLM_COMM_SUCCESS;
 }

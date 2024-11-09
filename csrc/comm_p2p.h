@@ -10,6 +10,8 @@ typedef struct muillm_comm_p2p_recv_buffer_set {
   void* p2p_recv_buffer;
   // all receive buffers, including the local and remote ones
   void** all_p2p_recv_buffers;
+  // same as previous, but on GPU memory
+  void** all_p2p_recv_buffers_device;
   hipMemPool_t* memPools; // mem pools to import pointers
 } muillm_comm_p2p_recv_buffer_set_t;
 
@@ -38,6 +40,8 @@ typedef struct muillm_comm_p2p: muillm_comm {
 
   // sequence number to use to signal the barrier 
   int seq_no;
+
+  int all_reduce_no;
 } muillm_comm_p2p_t;
 
 muillm_comm_error_t __init_p2p_comm(
@@ -48,12 +52,12 @@ muillm_comm_error_t __init_p2p_comm(
     muillm_comm_p2p_t** comm_ptr
 );
 
-void __local_p2p_gpu_barrier(
+muillm_comm_error_t __local_p2p_gpu_barrier(
     muillm_comm_p2p_t* comm,
     hipStream_t stream
 );
 
-void __all_reduce_sum_p2p(
+muillm_comm_error_t __all_reduce_sum_p2p(
     muillm_comm_p2p_t* comm,
     void* src_ptr,
     void* dst_ptr,
@@ -62,7 +66,7 @@ void __all_reduce_sum_p2p(
     hipStream_t stream
 );
 
-void __broadcast_p2p(
+muillm_comm_error_t __broadcast_p2p(
     muillm_comm_p2p_t* comm,
     int src_rank,
     void* ptr,

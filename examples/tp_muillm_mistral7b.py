@@ -77,6 +77,13 @@ def run(rank, size):
     # either set this environment variable before running the example, or adapt the path
     model_id = os.getenv("MISTRAL_7B_PATH", "/storage/models/Mistral-7B-Instruct-v0.2/")
 
+    print("Process pid ", os.getpid(), flush=True)
+
+    import time
+    time.sleep(60)
+
+    print("starting.", flush=True)
+
     tokenizer = AutoTokenizer.from_pretrained(model_id,padding_side="left")
 
     if tokenizer.pad_token is None:
@@ -96,54 +103,65 @@ def run(rank, size):
     if dist.get_rank() == 0:
         print("Optimized models: ", model)
 
-    # # Test barriers
-    # for _ in range(1024):
-    #   model.muillm_config.communicator.barrier()
+    # Test barriers
+    for _ in range(1024):
+      model.muillm_config.communicator.barrier()
 
-    # torch.cuda.synchronize()
+    torch.cuda.synchronize()
 
-    # print(f"(rank {rank}) Finished all barriers.", flush=True)
+    print(f"(rank {rank}) Finished all barriers.", flush=True)
 
-    # # Test broadcast
-    # for i in range(1024):
-    #   src_rank = i % size
-    #   orig_tensor = torch.rand(size=(1,2,3), dtype=torch.float16).to(device="cuda")
+    failed = False
+    # Test broadcast
+    for i in range(1024):
+      src_rank = i % size
+      orig_tensor = torch.rand(size=(1,2,3), dtype=torch.float16).to(device="cuda")
 
-    #   tensor = torch.clone(orig_tensor)
-    #   model.muillm_config.communicator.broadcast(tensor, src=src_rank)
+      tensor = torch.clone(orig_tensor)
+      dist_tensor = torch.clone(orig_tensor)
+      model.muillm_config.communicator.broadcast(tensor, src=src_rank)
 
-    #   if (src_rank == rank) and ((i % 13) == 0):
-    #      # check that the result is correct every so often
-    #      matches = torch.sum(orig_tensor - tensor).item() == 0.0
-    #      if not matches:
-    #         print(f"Not matching: orig_tensor {orig_tensor} tensor {tensor}")
+      dist.broadcast(dist_tensor, src=src_rank)
 
-    # torch.cuda.synchronize()
+      if ((i % 13) == 0):
+         # check that the result is correct every so often
+         matches = torch.sum(dist_tensor - tensor).item() == 0.0
+         if not matches:
+            print(f"Not matching: orig_tensor {dist_tensor} tensor {tensor}")
+            failed = True
 
-    # print(f"(rank {rank}) Finished all broadcasts.", flush=True)
+    torch.cuda.synchronize()
+
+    print(f"(rank {rank}) Finished all broadcasts.", flush=True)
+
+    if failed:
+       return
   
-    #   # Test reduce
-    # for i in range(1024):
-    #   src_rank = i % size
-    #   orig_tensor = torch.rand(size=(1,2,3), dtype=torch.float16).to(device="cuda")
+      # Test reduce
+    for i in range(1024):
+      src_rank = i % size
+      orig_tensor = torch.rand(size=(1,2,3), dtype=torch.float16).to(device="cuda")
 
-    #   tensor = torch.clone(orig_tensor)
-    #   model.muillm_config.communicator.broadcast(tensor, src=src_rank)
+      tensor = torch.clone(orig_tensor)
+      dist_tensor = torch.clone(orig_tensor)
 
-    #   model.muillm_config.communicator.all_reduce_sum(tensor)
+      model.muillm_config.communicator.broadcast(tensor, src=src_rank)
+      model.muillm_config.communicator.all_reduce_sum(tensor)
 
-    #   if (src_rank == rank) and ((i % 13) == 0):
-    #      # check that the result is correct every so often
-    #      expected_tensor = size * orig_tensor
-    #      matches = torch.sum(expected_tensor - tensor).item() == 0.0
-    #      if not matches:
-    #         print(f"Not matching: expected_tensor {expected_tensor} tensor {tensor}")
+      dist.broadcast(dist_tensor, src=src_rank)
+      dist.all_reduce(dist_tensor)
 
-    # torch.cuda.synchronize()
+      if ((i % 13) == 0):
+         # check that the result is correct every so often
+         matches = torch.sum(dist_tensor - tensor).item() == 0.0
+         if not matches:
+            print(f"Not matching: expected_tensor {dist_tensor} tensor {tensor}")
 
-    # print(f"(rank {rank}) Finished all reductions.", flush=True)
+    torch.cuda.synchronize()
 
-    # return
+    print(f"(rank {rank}) Finished all reductions.", flush=True)
+
+    return
 
     prompt = "Hello my name is"
     outputs, time = time_func(lambda: generate(model, tokenizer, prompt, 50))

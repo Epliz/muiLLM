@@ -91,18 +91,18 @@ muillm_comm_error_t __open_local_socket(
     int local_rank
 );
 
-void __local_socket_barrier(
+muillm_comm_error_t __local_socket_barrier(
     muillm_comm_t* comm
 );
 
-void __local_socket_broadcast(
+muillm_comm_error_t __local_socket_broadcast(
     muillm_comm_t* comm,
     int src_local_rank,
     void* ptr,
     size_t byte_count
 );
 
-void __local_socket_all_gather(
+muillm_comm_error_t __local_socket_all_gather(
     muillm_comm_t* comm,
     void* in_ptr,
     size_t byte_count,
