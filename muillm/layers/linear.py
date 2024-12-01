@@ -1,4 +1,5 @@
 from typing import Optional, Union
+from muillm.layers.module import MuiModule
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -37,10 +38,11 @@ class _MuiLinear(torch.autograd.Function):
             g_b = grad_output.sum(axis=-1)
         return g_x, g_w, g_b
 
-class MuiLinear(nn.Linear):
-    def __init__(self, in_features: int, out_features: int, bias: bool = True,
+class MuiLinear(MuiModule, nn.Linear):
+    def __init__(self, engine_config: MuiEngineConfig, in_features: int, out_features: int, bias: bool = True,
                  variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
-        super().__init__(in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
+        MuiModule.__init__(self, engine_config=engine_config)
+        nn.Linear.__init__(self, in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
 
         self.normalize = normalize
         self.variance_epsilon = variance_epsilon
@@ -61,7 +63,7 @@ class MuiLinear(nn.Linear):
         variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
         norm_weights = prev_layernorm_module.weight if normalize else None
 
-        new_module = MuiLinear(in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
+        new_module = MuiLinear(engine_config=engine_config, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
         new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights)
 
         return new_module

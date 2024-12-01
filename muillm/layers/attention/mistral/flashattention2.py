@@ -55,7 +55,7 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
-        new_module = MuiMistralFlashAttention2(config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
+        new_module = MuiMistralFlashAttention2(engine_config=engine_config, config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 

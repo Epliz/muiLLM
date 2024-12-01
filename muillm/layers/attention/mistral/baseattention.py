@@ -10,23 +10,22 @@ from transformers.models.mistral.configuration_mistral import MistralConfig
 from transformers.models.mistral.modeling_mistral import MistralAttention
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.attention.mistral.rotaryembedding import MuiMistralRotaryEmbedding, apply_rotary_pos_emb
+from muillm.layers.module import MuiModule
+from muillm.layers.attention.mistral.rotaryembedding import MuiMistralRotaryEmbedding
 from muillm.layers.attention.mistral.causaltransformerdecoding import mui_causally_decode
 from muillm.layers.attention.mistral.kvcache import repeat_kv
 from muillm.layers.linear import MuiLinear
 
-from muillm.layers.multilinear import MuiMultiLinear
-
 logger = logging.get_logger(__name__)
 
-class MuiMistralAttention(nn.Module):
+class MuiMistralAttention(MuiModule):
     """
     Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
     and "Generating Long Sequences with Sparse Transformers".
     """
 
-    def __init__(self, config: MistralConfig, layer_idx: Optional[int] = None, device=None, dtype=None):
-        super().__init__()
+    def __init__(self, engine_config: MuiEngineConfig, config: MistralConfig, layer_idx: Optional[int] = None, device=None, dtype=None):
+        super().__init__(engine_config=engine_config)
         self.config = config
         self.layer_idx = layer_idx
         if layer_idx is None:
@@ -52,9 +51,10 @@ class MuiMistralAttention(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
 
-        self.o_proj = MuiLinear(self.num_heads * self.head_dim, self.hidden_size, bias=False, device=device, dtype=dtype)
+        self.o_proj = MuiLinear(engine_config, self.num_heads * self.head_dim, self.hidden_size, bias=False, device=device, dtype=dtype)
 
         self.rotary_emb = MuiMistralRotaryEmbedding(
+            engine_config,
             self.head_dim,
             max_position_embeddings=self.max_position_embeddings,
             base=self.rope_theta,
@@ -68,7 +68,7 @@ class MuiMistralAttention(nn.Module):
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
-        new_module = MuiMistralAttention(config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
+        new_module = MuiMistralAttention(engine_config=engine_config, config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 
