@@ -1,4 +1,5 @@
 
+from muillm.layers.parallellinear import MuiParallelLinear
 import torch
 import torch.nn as nn
 
@@ -30,6 +31,19 @@ _LAYER_REPLACEMENTS = {
     MistralForCausalLM : MuiMistralForCausalLM,
 }
 
+_TP_LAYER_REPLACEMENTS = {
+    nn.Linear: MuiParallelLinear,
+    MuiLinear: MuiParallelLinear,
+
+    # We replace the full decoder all at once to avoid issues due to replacement order
+    # (e.g. replacing the MLP then the decoder)
+    MistralDecoderLayer : MuiDecoderLayer,
+
+    # replacements for full layers
+    MistralModel : MuiMistralModel,
+    MistralForCausalLM : MuiMistralForCausalLM,
+}
+
 def _recursive_setattr(model: nn.Module, module_name: str, new_module: nn.Module):
     split_list = module_name.split('.')
     current_module = model
@@ -41,9 +55,16 @@ def replace_layers(module: nn.Module, engine_config: MuiEngineConfig, name_prefi
 
     module_type = type(module)
 
-    if module_type in _LAYER_REPLACEMENTS:
-        print(f"Replacing {name_prefix} ({module_type}) ...")
-        new_module_type = _LAYER_REPLACEMENTS[module_type]
+    replacements = _LAYER_REPLACEMENTS
+
+    if engine_config.tensor_parallelism > 1:
+        # we want to use tensor parallelism
+        # use the correct replacements
+        replacements = _TP_LAYER_REPLACEMENTS
+
+    if module_type in replacements:
+        new_module_type = replacements[module_type]
+        print(f"Replacing {name_prefix} ({module_type} to {new_module_type}) ...")
 
         new_module = new_module_type.replace(module, engine_config=engine_config)
 
