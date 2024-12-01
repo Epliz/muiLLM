@@ -102,9 +102,7 @@ def _less_sync_sample(
     checked_mask_content = False
     self.all_ones_mask = None
 
-    printed_type = False
-
-    while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
+    while (not this_peer_finished):
         # prepare model inputs
         model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
@@ -125,9 +123,6 @@ def _less_sync_sample(
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
         )
-
-        if synced_gpus and this_peer_finished:
-            continue  # don't waste resources running the code we don't need
 
         next_token_logits = outputs.logits[:, -1, :]
 
@@ -171,6 +166,7 @@ def _less_sync_sample(
         input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
         if streamer is not None:
             streamer.put(next_tokens.cpu())
+
         model_kwargs = self._update_model_kwargs_for_generation(
             outputs,
             model_kwargs,
