@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import List, Optional, Union
 from muillm.layers.linear import MuiLinear
 from muillm.layers.module import MuiModule
 import torch
@@ -41,10 +41,13 @@ class _MuiParallelLinear(torch.autograd.Function):
 
 class MuiParallelLinear(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, in_features: int, out_features: int, bias: bool = True,
-                 variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
+                 variance_epsilon:float = 0.0, normalize:bool = False, sharding_dim: int = 1, device=None, dtype=None) -> None:
         MuiModule.__init__(self, engine_config=engine_config)
 
         linear = nn.Linear(in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
+
+        self.tensor_parallelism = engine_config.tensor_parallelism
+        self.sharding_dim = sharding_dim + len(linear.weight.shape) if sharding_dim < 0 else sharding_dim
 
         self.in_features = in_features
         self.out_features = out_features
@@ -117,15 +120,70 @@ class MuiParallelLinear(MuiModule):
             self.norm_weights = nn.Parameter(norm_weights.detach())
             self.norm_weights.requires_grad = norm_weights_requires_grad
 
-    def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
+    def _shard_weigths(self, tensor: Tensor) -> List[Tensor]:
+        return torch.tensor_split(tensor, self.tensor_parallelism, self.sharding_dim)
+
+    def _shard_inputs(self, tensor: Tensor) -> List[Tensor]:
+        if self.sharding_dim == 1:
+            # if we are sharding along the k-dim, we need to shard the input accordingly
+            return torch.tensor_split(tensor, self.tensor_parallelism, -1)
+        elif (self.sharding_dim == 0):
+            # but if we shard by row, we just need the inputs on all devices
+            return [tensor] * self.tensor_parallelism
+        else:
+            raise ValueError("Unsupported sharding dimension")
+
+    def _shard_bias(self, bias: Optional[Tensor]) -> Optional[List[Tensor]]:
+        if bias is None:
+            return None
+        
+        if self.sharding_dim == 0:
+            # if we shard by rows, we need to shard the bias
+            return torch.tensor_split(bias, self.tensor_parallelism, 0)
+        elif self.sharding_dim == 1:
+            # if we shard by columns (k-dim), we should not shard
+            # we can instead apply it only on the first GPU
+            return [bias if i == 0 else None for i in range(self.tensor_parallelism)]
+        else:
+            raise ValueError("Unsupported sharding dimension")
+
+    def parallel_forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
-            return _MuiParallelLinear.apply(input, self.weight, self.norm_weights, self.variance_epsilon, self.bias, residual)
-        else:
-            if self.normalize:
+            if (self.sharding_dim == 1) and self.normalize:
+                # when splitting along k-dim, we need to normalize first
                 input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
+                return _MuiParallelLinear.apply(input, self.weight, None, 0, self.bias, residual)
+            else:
+                return _MuiParallelLinear.apply(input, self.weight, self.norm_weights, self.variance_epsilon, self.bias, residual)
 
-            output = F.linear(input, self.weight, self.bias)
-            if residual is not None:
-                output = output + residual
-            return output
+        # Not dispatchable
+        if self.normalize:
+            input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
+
+        inputs = self._shard_inputs(input)
+        weights = self._shard_weigths(self.weight)
+        biases = self._shard_bias(self.bias)
+
+        # Do the sharded computation
+        outputs = [F.linear(inputs[i], weights[i], biases[i] if biases is not None else None) for i in range(self.tensor_parallelism)]
+
+        # reduce
+        if self.sharding_dim == 1:
+            output = outputs[0]
+            for i in range(1, self.tensor_parallelism):
+                output = output + outputs[i]
+        else:
+            raise ValueError("Not supported")
+
+        #output = F.linear(input, self.weight, self.bias)
+
+        if residual is not None:
+            output = output + residual
+        return output
+
+    def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
+        if self.tensor_parallelism > 1:
+            return self.parallel_forward(input, residual)
+
+        raise ValueError("Only parallel inference is supported")
