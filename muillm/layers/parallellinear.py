@@ -39,19 +39,28 @@ class _MuiParallelLinear(torch.autograd.Function):
             g_b = grad_output.sum(axis=-1)
         return g_x, g_w, g_b
 
-class MuiParallelLinear(MuiModule, nn.Linear):
+class MuiParallelLinear(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, in_features: int, out_features: int, bias: bool = True,
                  variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
         MuiModule.__init__(self, engine_config=engine_config)
-        nn.Linear.__init__(self, in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
+
+        linear = nn.Linear(in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.device = device
+        self.dtype = dtype
 
         self.normalize = normalize
         self.variance_epsilon = variance_epsilon
         self.norm_weights = nn.Parameter(torch.ones(in_features, dtype=dtype, device=device)) if normalize else None
 
-        wdtype = self.weight.dtype
+        self.weight = linear.weight
+        self.bias = linear.bias if bias else None
+
+        wdtype = linear.weight.dtype
         dispatchable_type = (wdtype == torch.float16)
-        dispatchable_device = self.weight.is_cuda
+        dispatchable_device = linear.weight.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
 
     @staticmethod
