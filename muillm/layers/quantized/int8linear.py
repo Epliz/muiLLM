@@ -1,4 +1,5 @@
 from typing import Optional, Union
+from muillm.layers.module import MuiModule
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -53,11 +54,11 @@ class _MuiInt8Linear(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise ValueError("Not implemented")
 
-class MuiInt8Linear(nn.Module):
-    def __init__(self, quantization_method: Int8WeightOnlyQuantizationMethod, in_features: int, out_features: int, bias: bool = True,
+class MuiInt8Linear(MuiModule):
+    def __init__(self, engine_config: MuiEngineConfig, quantization_method: Int8WeightOnlyQuantizationMethod, in_features: int, out_features: int, bias: bool = True,
                  variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None,
                  prev_weights_uint8: torch.Tensor = None, prev_scales_min_vals: torch.Tensor = None, prev_bias: torch.Tensor = None) -> None:
-        super().__init__()
+        super().__init__(engine_config=engine_config)
         self.quantizer = RTNQuantizer(n_bit=8, groupsize=quantization_method.group_size, f=quantization_method.f)
 
         self.in_features = in_features

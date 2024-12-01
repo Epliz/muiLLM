@@ -1,5 +1,6 @@
 
 from typing import Iterable, List, Tuple, Union
+from muillm.layers.module import MuiModule
 import torch
 from  torch import Tensor
 import torch.nn as nn
@@ -17,12 +18,12 @@ def _all_or_none(it: Iterable[bool], exception_message) -> bool:
         raise ValueError(exception_message)
     return has_all
 
-class MuiMultiLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: List[int], bias: bool = True,
+class MuiMultiLinear(MuiModule):
+    def __init__(self, engine_config: MuiEngineConfig, in_features: int, out_features: List[int], bias: bool = True,
                  variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
-        super().__init__()
+        super().__init__(engine_config=engine_config)
 
-        self.linear = MuiLinear(in_features=in_features, out_features=sum(out_features), bias=bias, variance_epsilon=variance_epsilon, normalize=normalize, device=device, dtype=dtype)
+        self.linear = MuiLinear(engine_config=engine_config, in_features=in_features, out_features=sum(out_features), bias=bias, variance_epsilon=variance_epsilon, normalize=normalize, device=device, dtype=dtype)
 
         self.slice_starts = []
         self.slice_ends = []
@@ -52,7 +53,7 @@ class MuiMultiLinear(nn.Module):
         variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
         norm_weights = prev_layernorm_module.weight if normalize else None
 
-        new_module = MuiMultiLinear(in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
+        new_module = MuiMultiLinear(engine_config=engine_config, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
         new_module.copy_modules(prev_modules=prev_modules, norm_weights=norm_weights)
 
         return new_module

@@ -1,6 +1,7 @@
 from enum import Enum
 import math
 from typing import Optional, Union
+from muillm.layers.module import MuiModule
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -52,9 +53,9 @@ class _MuiGateUpSiLUSplit(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise NotImplementedError("GateUpSiLU split K backward is not implemented")
 
-class MuiGateUpDownMLP(nn.Module):
-    def __init__(self, hidden_size: int, intermediate_size: int, activation_function: nn.Module, variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
-        super().__init__()
+class MuiGateUpDownMLP(MuiModule):
+    def __init__(self, engine_config: MuiEngineConfig, hidden_size: int, intermediate_size: int, activation_function: nn.Module, variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
+        super().__init__(engine_config=engine_config)
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
@@ -62,9 +63,9 @@ class MuiGateUpDownMLP(nn.Module):
         self.variance_epsilon = variance_epsilon
         self.norm_weights = nn.Parameter(torch.ones(hidden_size, dtype=dtype, device=device)) if normalize else None
 
-        self.gate_proj = MuiLinear(self.hidden_size, self.intermediate_size, bias=False, device=device, dtype=dtype)
-        self.up_proj = MuiLinear(self.hidden_size, self.intermediate_size, bias=False, device=device, dtype=dtype)
-        self.down_proj = MuiLinear(self.intermediate_size, self.hidden_size, bias=False, device=device, dtype=dtype)
+        self.gate_proj = MuiLinear(engine_config, self.hidden_size, self.intermediate_size, bias=False, device=device, dtype=dtype)
+        self.up_proj = MuiLinear(engine_config, self.hidden_size, self.intermediate_size, bias=False, device=device, dtype=dtype)
+        self.down_proj = MuiLinear(engine_config, self.intermediate_size, self.hidden_size, bias=False, device=device, dtype=dtype)
         self.activation_function = activation_function
 
         wdtype = self.gate_proj.weight.dtype
@@ -89,7 +90,7 @@ class MuiGateUpDownMLP(nn.Module):
         variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
         norm_weights = prev_layernorm_module.weight if normalize else None
 
-        new_module = MuiGateUpDownMLP(hidden_size=hidden_size, intermediate_size=intermediate_size, activation_function=activation_function, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
+        new_module = MuiGateUpDownMLP(engine_config=engine_config, hidden_size=hidden_size, intermediate_size=intermediate_size, activation_function=activation_function, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
         new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights)
 
         return new_module

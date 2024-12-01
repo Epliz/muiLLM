@@ -1,4 +1,6 @@
 from typing import Optional, Tuple
+from muillm.engineconfig import MuiEngineConfig
+from muillm.layers.module import MuiModule
 import torch
 import torch.nn as nn
 
@@ -77,9 +79,9 @@ class _MuiRotaryDynamicCache(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise NotImplementedError("rotary backward not implemented")
 
-class MuiMistralRotaryEmbedding(nn.Module):
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, layer_idx: int = None, device=None, dtype=None):
-        super().__init__()
+class MuiMistralRotaryEmbedding(MuiModule):
+    def __init__(self, engine_config: MuiEngineConfig, dim, max_position_embeddings=2048, base=10000, layer_idx: int = None, device=None, dtype=None):
+        super().__init__(engine_config=engine_config)
 
         self.layer_idx = layer_idx
 
