@@ -157,7 +157,18 @@ class MuiParallelLinear(MuiModule):
         else:
             raise ValueError("Unsupported sharding dimension")
 
-    def parallel_forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
+    def _collect_outputs(self, tensors: List[Tensor]) -> List[Tensor]:
+        if self.sharding_dim == 1:
+            # reduce on GPU0
+            output = tensors[0]
+            for i in range(1, self.tensor_parallelism):
+                output = output + tensors[i]
+
+            return [output] * self.tensor_parallelism
+        else:
+            raise ValueError("Not supported")
+
+    def parallel_forward(self, input: Tensor, residual: Optional[Tensor] = None) -> List[Tensor]:
         # TODO: adapt
         # if self.dispatchable and (input.numel() == input.shape[-1]):
         #     # input is effectively 1D, and we support the type
@@ -177,22 +188,19 @@ class MuiParallelLinear(MuiModule):
         # Do the sharded computation
         outputs = [F.linear(inputs[i], self.weights[i], self.biases[i] if self.biases is not None else None) for i in range(self.tensor_parallelism)]
 
+        # Apply the residual on GPU0
+        if residual is not None:
+            outputs[0] = outputs[0] + residual
+
         # reduce
-        if self.sharding_dim == 1:
-            output = outputs[0]
-            for i in range(1, self.tensor_parallelism):
-                output = output + outputs[i]
-        else:
-            raise ValueError("Not supported")
+        outputs = self._collect_outputs(outputs)
 
         #output = F.linear(input, self.weight, self.bias)
 
-        if residual is not None:
-            output = output + residual
-        return output
+        return outputs
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.tensor_parallelism > 1:
-            return self.parallel_forward(input, residual)
+            return self.parallel_forward(input, residual)[0]
 
         raise ValueError("Only parallel inference is supported")
