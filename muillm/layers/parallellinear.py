@@ -58,13 +58,23 @@ class MuiParallelLinear(MuiModule):
         self.variance_epsilon = variance_epsilon
         self.norm_weights = nn.Parameter(torch.ones(in_features, dtype=dtype, device=device)) if normalize else None
 
-        self.weight = linear.weight
-        self.bias = linear.bias if bias else None
+        self.weights = nn.ParameterList(self._shard_weigths(linear.weight))
+        self._set_requires_grads(self.weights, linear.weight.requires_grad)
+
+        if linear.bias is not None:
+            self.biases = nn.ParameterList(self._shard_bias(linear.bias))
+            self._set_requires_grads(self.biases, linear.bias.requires_grad)
+        else:
+            self.biases = None
 
         wdtype = linear.weight.dtype
         dispatchable_type = (wdtype == torch.float16)
         dispatchable_device = linear.weight.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
+
+    def _set_requires_grads(self, params: Union[List[nn.parameter.Parameter], nn.ParameterList], requires_grads: bool) -> None:
+        for p in params:
+            p.requires_grad = requires_grads
 
     @staticmethod
     def replace(prev_module: Union[nn.Linear, MuiLinear], engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiParallelLinear":
@@ -95,12 +105,12 @@ class MuiParallelLinear(MuiModule):
     def copy_module(self, prev_module: Union[nn.Linear, MuiLinear], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
         has_bias = prev_module.bias is not None
 
-        self.weight = nn.Parameter(prev_module.weight.detach())
-        self.weight.requires_grad = prev_module.weight.requires_grad
+        self.weights = nn.ParameterList(self._shard_weigths(prev_module.weight))
+        self._set_requires_grads(self.weights, prev_module.weight.requires_grad)
 
         if has_bias:
-            self.bias = nn.Parameter(prev_module.bias.detach())
-            self.bias.requires_grad = prev_module.bias.requires_grad
+            self.biases = nn.ParameterList(self._shard_bias(prev_module.bias)) if prev_module.bias is not None else None
+            self._set_requires_grads(self.biases, prev_module.bias.requires_grad)
 
         if isinstance(prev_module, MuiLinear):
             # MuiLinear inherits nn.Linear, so need to check first
@@ -148,25 +158,24 @@ class MuiParallelLinear(MuiModule):
             raise ValueError("Unsupported sharding dimension")
 
     def parallel_forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
-        if self.dispatchable and (input.numel() == input.shape[-1]):
-            # input is effectively 1D, and we support the type
-            if (self.sharding_dim == 1) and self.normalize:
-                # when splitting along k-dim, we need to normalize first
-                input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
-                return _MuiParallelLinear.apply(input, self.weight, None, 0, self.bias, residual)
-            else:
-                return _MuiParallelLinear.apply(input, self.weight, self.norm_weights, self.variance_epsilon, self.bias, residual)
+        # TODO: adapt
+        # if self.dispatchable and (input.numel() == input.shape[-1]):
+        #     # input is effectively 1D, and we support the type
+        #     if (self.sharding_dim == 1) and self.normalize:
+        #         # when splitting along k-dim, we need to normalize first
+        #         input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
+        #         return _MuiParallelLinear.apply(input, self.weight, None, 0, self.bias, residual)
+        #     else:
+        #         return _MuiParallelLinear.apply(input, self.weight, self.norm_weights, self.variance_epsilon, self.bias, residual)
 
         # Not dispatchable
         if self.normalize:
             input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
 
         inputs = self._shard_inputs(input)
-        weights = self._shard_weigths(self.weight)
-        biases = self._shard_bias(self.bias)
 
         # Do the sharded computation
-        outputs = [F.linear(inputs[i], weights[i], biases[i] if biases is not None else None) for i in range(self.tensor_parallelism)]
+        outputs = [F.linear(inputs[i], self.weights[i], self.biases[i] if self.biases is not None else None) for i in range(self.tensor_parallelism)]
 
         # reduce
         if self.sharding_dim == 1:
