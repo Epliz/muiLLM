@@ -24,5 +24,5 @@ class MuiEngineConfig:
 
         self.tensor_parallelism = tensor_parallelism
 
-        self.devices = [torch.cuda.device(d) for d in range(self.tensor_parallelism)]
+        self.devices = [torch.device(f"cuda:{d}") for d in range(self.tensor_parallelism)]
         torch.cuda.set_device(self.devices[0])

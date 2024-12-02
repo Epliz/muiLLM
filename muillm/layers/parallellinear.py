@@ -67,6 +67,11 @@ class MuiParallelLinear(MuiModule):
         else:
             self.biases = None
 
+
+        # Need to synchronize after copying the tensors to make sure the transfers
+        # completed
+        self._sync_all()
+
         wdtype = linear.weight.dtype
         dispatchable_type = (wdtype == torch.float16)
         dispatchable_device = linear.weight.is_cuda
@@ -130,18 +135,44 @@ class MuiParallelLinear(MuiModule):
             self.norm_weights = nn.Parameter(norm_weights.detach())
             self.norm_weights.requires_grad = norm_weights_requires_grad
 
+        # Need to synchronize after copying the tensors to make sure the transfers
+        # completed
+        self._sync_all()
+
+    def _sync_all(self):
+        devices = self.engine_config.devices
+        for d in devices:
+            torch.cuda.synchronize(d)
+
+    def _transfer_across(self, tensors: Optional[List[Tensor]]) -> Optional[List[Tensor]]:
+        if tensors is None:
+            return None
+        
+        devices = self.engine_config.devices
+        return [t.to(device=devices[i], dtype=t.dtype) if t is not None else None for i, t in enumerate(tensors)] 
+
+    def _transfer_back(self, tensors: Optional[List[Tensor]]) -> List[Tensor]:
+        if tensors is None:
+            return None
+        
+        d = self.engine_config.devices[0]
+        return [t.to(device=d, dtype=t.dtype) if t is not None else None for t in tensors] 
+
     def _shard_weigths(self, tensor: Tensor) -> List[Tensor]:
-        return torch.tensor_split(tensor, self.tensor_parallelism, self.sharding_dim)
+        tensors = torch.tensor_split(tensor, self.tensor_parallelism, self.sharding_dim)
+        return self._transfer_across(tensors)
 
     def _shard_inputs(self, tensor: Tensor) -> List[Tensor]:
         if self.sharding_dim == 1:
             # if we are sharding along the k-dim, we need to shard the input accordingly
-            return torch.tensor_split(tensor, self.tensor_parallelism, -1)
+            tensors = torch.tensor_split(tensor, self.tensor_parallelism, -1)
         elif (self.sharding_dim == 0):
             # but if we shard by row, we just need the inputs on all devices
-            return [tensor] * self.tensor_parallelism
+            tensors = [tensor] * self.tensor_parallelism
         else:
             raise ValueError("Unsupported sharding dimension")
+
+        return self._transfer_across(tensors)
 
     def _shard_bias(self, bias: Optional[Tensor]) -> Optional[List[Tensor]]:
         if bias is None:
@@ -149,13 +180,15 @@ class MuiParallelLinear(MuiModule):
         
         if self.sharding_dim == 0:
             # if we shard by rows, we need to shard the bias
-            return torch.tensor_split(bias, self.tensor_parallelism, 0)
+            tensors = torch.tensor_split(bias, self.tensor_parallelism, 0)
         elif self.sharding_dim == 1:
             # if we shard by columns (k-dim), we should not shard
             # we can instead apply it only on the first GPU
-            return [bias if i == 0 else None for i in range(self.tensor_parallelism)]
+            tensors = [bias if i == 0 else None for i in range(self.tensor_parallelism)]
         else:
             raise ValueError("Unsupported sharding dimension")
+        
+        return self._transfer_across(tensors)
 
     def _collect_outputs(self, tensors: List[Tensor]) -> List[Tensor]:
         if self.sharding_dim == 1:
@@ -185,12 +218,21 @@ class MuiParallelLinear(MuiModule):
 
         inputs = self._shard_inputs(input)
 
+        # need to synchronize to make sure the sharding is complete
+        self._sync_all()
+
         # Do the sharded computation
         outputs = [F.linear(inputs[i], self.weights[i], self.biases[i] if self.biases is not None else None) for i in range(self.tensor_parallelism)]
 
         # Apply the residual on GPU0
         if residual is not None:
             outputs[0] = outputs[0] + residual
+
+        # transfer all outputs back on GPU0 
+        outputs = self._transfer_back(outputs)
+
+        # need to syncrhonize to make sure we moved back all tensors on GPU0
+        self._sync_all()
 
         # reduce
         outputs = self._collect_outputs(outputs)
