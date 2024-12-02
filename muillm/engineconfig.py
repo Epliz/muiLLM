@@ -13,8 +13,16 @@ class MuiEngineConfig:
         self.synchronizer = Synchronizer()
         self.quantization_method = quantization_method
 
+        device_count = torch.cuda.device_count()
         if tensor_parallelism is None:
             # None means use all GPUs
-            tensor_parallelism = torch.cuda.device_count()
+            tensor_parallelism = device_count
+
+
+        if tensor_parallelism > device_count:
+            raise ValueError(f"tensor_parallelism {tensor_parallelism} is bigger than number of available devices: {device_count}")
 
         self.tensor_parallelism = tensor_parallelism
+
+        self.devices = [torch.cuda.device(d) for d in range(self.tensor_parallelism)]
+        torch.cuda.set_device(self.devices[0])
