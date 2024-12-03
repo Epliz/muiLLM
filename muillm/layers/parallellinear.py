@@ -144,19 +144,45 @@ class MuiParallelLinear(MuiModule):
         for d in devices:
             torch.cuda.synchronize(d)
 
+    def _wait_for(self, d: int):
+        streams = self.engine_config.streams
+        event = streams[d].record_event()
+
+        for i in range(self.tensor_parallelism):
+            if i != d:
+                streams[i].wait_event(event)
+
+    def _wait_for_others(self, d: int):
+        streams = self.engine_config.streams
+
+        for i in range(self.tensor_parallelism):
+            if i != d:
+                event = streams[i].record_event()
+                streams[d].wait_event(event)
+
     def _transfer_across(self, tensors: Optional[List[Tensor]]) -> Optional[List[Tensor]]:
         if tensors is None:
             return None
         
         devices = self.engine_config.devices
-        return [t.to(device=devices[i], dtype=t.dtype) if t is not None else None for i, t in enumerate(tensors)] 
+        moved_tensors = [t.to(device=devices[i], dtype=t.dtype) if t is not None else None for i, t in enumerate(tensors)] 
+
+        # make all streams of the other devices wait on the GPU0
+        self._wait_for(d = 0)
+
+        return moved_tensors
 
     def _transfer_back(self, tensors: Optional[List[Tensor]]) -> List[Tensor]:
         if tensors is None:
             return None
         
-        d = self.engine_config.devices[0]
-        return [t.to(device=d, dtype=t.dtype) if t is not None else None for t in tensors] 
+        device = self.engine_config.devices[0]
+        moved_tensors = [t.to(device=device, dtype=t.dtype) if t is not None else None for t in tensors] 
+
+        # make the stream 0 wait for the other GPUs
+        self._wait_for_others(d = 0)
+
+        return moved_tensors
 
     def _shard_weigths(self, tensor: Tensor) -> List[Tensor]:
         tensors = torch.tensor_split(tensor, self.tensor_parallelism, self.sharding_dim)
@@ -219,7 +245,7 @@ class MuiParallelLinear(MuiModule):
         inputs = self._shard_inputs(input)
 
         # need to synchronize to make sure the sharding is complete
-        self._sync_all()
+        #self._sync_all()
 
         # Do the sharded computation
         outputs = [F.linear(inputs[i], self.weights[i], self.biases[i] if self.biases is not None else None) for i in range(self.tensor_parallelism)]
@@ -232,7 +258,7 @@ class MuiParallelLinear(MuiModule):
         outputs = self._transfer_back(outputs)
 
         # need to syncrhonize to make sure we moved back all tensors on GPU0
-        self._sync_all()
+        #self._sync_all()
 
         # reduce
         outputs = self._collect_outputs(outputs)
