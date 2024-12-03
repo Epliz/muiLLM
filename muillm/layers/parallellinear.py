@@ -168,7 +168,8 @@ class MuiParallelLinear(MuiModule):
         moved_tensors = [t.to(device=devices[i], dtype=t.dtype) if t is not None else None for i, t in enumerate(tensors)] 
 
         # make all streams of the other devices wait on the GPU0
-        self._wait_for(d = 0)
+        # torch already inserts waits
+        #self._wait_for(d = 0)
 
         return moved_tensors
 
@@ -180,7 +181,8 @@ class MuiParallelLinear(MuiModule):
         moved_tensors = [t.to(device=device, dtype=t.dtype) if t is not None else None for t in tensors] 
 
         # make the stream 0 wait for the other GPUs
-        self._wait_for_others(d = 0)
+        # torch already inserts waits
+        #self._wait_for_others(d = 0)
 
         return moved_tensors
 
