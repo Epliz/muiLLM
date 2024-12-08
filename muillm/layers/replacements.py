@@ -1,5 +1,6 @@
 
 from muillm.layers.parallellinear import MuiParallelLinear
+from muillm.layers.transformer.paralleldecoder import MuiParallelDecoderLayer
 import torch
 import torch.nn as nn
 
@@ -35,11 +36,14 @@ _LAYER_REPLACEMENTS = {
 _TP_LAYER_REPLACEMENTS = {
     nn.Linear: MuiParallelLinear,
     MuiLinear: MuiParallelLinear,
+
+    MistralMLP: MuiParallelGateUpDownMLP,
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
 
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. replacing the MLP then the decoder)
-    MistralDecoderLayer : MuiDecoderLayer,
+    MistralDecoderLayer : MuiParallelDecoderLayer,
+    MuiDecoderLayer: MuiParallelDecoderLayer,
 
     # replacements for full layers
     MistralModel : MuiMistralModel,
