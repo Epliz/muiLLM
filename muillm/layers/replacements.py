@@ -1,5 +1,7 @@
 
+from muillm.layers.multilinear import MuiMultiLinear
 from muillm.layers.parallellinear import MuiParallelLinear
+from muillm.layers.parallelmultilinear import MuiParallelMultiLinear
 from muillm.layers.transformer.paralleldecoder import MuiParallelDecoderLayer
 import torch
 import torch.nn as nn
@@ -36,6 +38,8 @@ _LAYER_REPLACEMENTS = {
 _TP_LAYER_REPLACEMENTS = {
     nn.Linear: MuiParallelLinear,
     MuiLinear: MuiParallelLinear,
+
+    MuiMultiLinear: MuiParallelMultiLinear,
 
     MistralMLP: MuiParallelGateUpDownMLP,
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
