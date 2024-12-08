@@ -74,7 +74,8 @@ class MuiParallelLinear(MuiModule):
 
         wdtype = linear.weight.dtype
         dispatchable_type = (wdtype == torch.float16)
-        dispatchable_device = linear.weight.is_cuda
+        self.is_cuda = linear.weight.is_cuda
+        dispatchable_device = self.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
 
     def _set_requires_grads(self, params: Union[List[nn.parameter.Parameter], nn.ParameterList], requires_grads: bool) -> None:
@@ -220,6 +221,9 @@ class MuiParallelLinear(MuiModule):
 
     def _collect_outputs(self, tensors: List[Tensor]) -> List[Tensor]:
         if self.sharding_dim == 1:
+            # transfer all outputs back on GPU0 
+            tensors = self._transfer_back(tensors)
+
             # reduce on GPU0
             output = tensors[0]
             for i in range(1, self.tensor_parallelism):
@@ -229,7 +233,7 @@ class MuiParallelLinear(MuiModule):
         else:
             raise ValueError("Not supported")
 
-    def parallel_forward(self, input: Tensor, residual: Optional[Tensor] = None) -> List[Tensor]:
+    def parallel_forward(self, input: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None, collect_outputs: bool = True) -> List[Tensor]:
         # TODO: adapt
         # if self.dispatchable and (input.numel() == input.shape[-1]):
         #     # input is effectively 1D, and we support the type
@@ -240,11 +244,20 @@ class MuiParallelLinear(MuiModule):
         #     else:
         #         return _MuiParallelLinear.apply(input, self.weight, self.norm_weights, self.variance_epsilon, self.bias, residual)
 
+        sharded_inputs = isinstance(input, list)
+
         # Not dispatchable
         if self.normalize:
+            if sharded_inputs:
+                raise ValueError("normalizing sharded inputs is unsupported")
+
             input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
 
-        inputs = self._shard_inputs(input)
+        if not sharded_inputs:
+            inputs = self._shard_inputs(input)
+        else:
+            # already sharded
+            inputs = input
 
         # need to synchronize to make sure the sharding is complete
         #self._sync_all()
@@ -256,14 +269,9 @@ class MuiParallelLinear(MuiModule):
         if residual is not None:
             outputs[0] = outputs[0] + residual
 
-        # transfer all outputs back on GPU0 
-        outputs = self._transfer_back(outputs)
-
-        # need to syncrhonize to make sure we moved back all tensors on GPU0
-        #self._sync_all()
-
         # reduce
-        outputs = self._collect_outputs(outputs)
+        if collect_outputs:
+            outputs = self._collect_outputs(outputs)
 
         #output = F.linear(input, self.weight, self.bias)
 
