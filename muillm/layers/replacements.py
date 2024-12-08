@@ -7,6 +7,7 @@ from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.linear import MuiLinear
 from muillm.layers.rmsnorm import MuiRMSNorm
 from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
+from muillm.layers.parallelgateupdownmlp import MuiParallelGateUpDownMLP
 from muillm.layers.attention.mistral.sdpaattention import MuiMistralSdpaAttention
 from muillm.layers.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
 from muillm.memorymanagement.gc import trigger_gc
@@ -34,6 +35,7 @@ _LAYER_REPLACEMENTS = {
 _TP_LAYER_REPLACEMENTS = {
     nn.Linear: MuiParallelLinear,
     MuiLinear: MuiParallelLinear,
+    MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
 
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. replacing the MLP then the decoder)
@@ -61,6 +63,8 @@ def replace_layers(module: nn.Module, engine_config: MuiEngineConfig, name_prefi
         # we want to use tensor parallelism
         # use the correct replacements
         replacements = _TP_LAYER_REPLACEMENTS
+
+    print(f"Replace {name_prefix} ({module_type})?")
 
     if module_type in replacements:
         new_module_type = replacements[module_type]
