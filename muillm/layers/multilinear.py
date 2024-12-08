@@ -25,6 +25,9 @@ class MuiMultiLinear(MuiModule):
 
         self.linear = MuiLinear(engine_config=engine_config, in_features=in_features, out_features=sum(out_features), bias=bias, variance_epsilon=variance_epsilon, normalize=normalize, device=device, dtype=dtype)
 
+        self.in_features = in_features
+        self.out_features = list(out_features)
+
         self.slice_starts = []
         self.slice_ends = []
 
@@ -57,6 +60,34 @@ class MuiMultiLinear(MuiModule):
         new_module.copy_modules(prev_modules=prev_modules, norm_weights=norm_weights)
 
         return new_module
+    
+    def _get_linear_back(self, slice_start: int, slice_end: int) -> nn.Linear:
+        out_features = slice_end - slice_start
+        has_bias = self.linear.bias is not None
+
+        weight = self.linear.weight[slice_start:slice_end, ...]
+        bias = self.linear.bias[slice_start:slice_end] if has_bias else None
+
+        linear = nn.Linear(in_features = self.in_features, out_features = out_features, bias=has_bias, dtype=weight.dtype, device=weight.device)
+
+        weights_require_grads = self.linear.weight.requires_grad
+        linear.weight = nn.Parameter(weight)
+        linear.weight.requires_grad = weights_require_grads
+
+        if has_bias:
+            bias_requires_grads = self.linear.bias.requires_grad
+            linear.bias = nn.Parameter(bias)
+            linear.bias.requires_grad = bias_requires_grads
+
+        return linear
+    
+    def replace_back(self) -> Tuple[List[nn.Linear], torch.Tensor]:
+        # split back in different modules
+        norm_weights = self.linear.norm_weights
+
+        linears = [self._get_linear_back(slice_start, slice_end) for slice_start, slice_end in zip(self.slice_starts, self.slice_ends)]
+
+        return linears, norm_weights
 
     def copy_modules(self, prev_modules: List[nn.Linear], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
         has_bias = self.linear.bias is not None

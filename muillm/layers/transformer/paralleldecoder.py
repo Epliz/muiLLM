@@ -2,6 +2,7 @@ from typing import Optional, Tuple, Union
 import warnings
 from muillm.layers.module import MuiModule
 from muillm.layers.parallelgateupdownmlp import MuiParallelGateUpDownMLP
+from muillm.layers.parallelmultilinear import MuiParallelMultiLinear
 from muillm.layers.transformer.decoder import MuiDecoderLayer
 import torch
 
@@ -15,7 +16,7 @@ from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, Mi
 
 
 class MuiParallelDecoderLayer(MuiModule):
-    def __init__(self, engine_config: MuiEngineConfig, qkv_proj: MuiMultiLinear, self_attn: MuiMistralAttention, mlp: MuiParallelGateUpDownMLP):
+    def __init__(self, engine_config: MuiEngineConfig, qkv_proj: MuiParallelMultiLinear, self_attn: MuiMistralAttention, mlp: MuiParallelGateUpDownMLP):
         super().__init__(engine_config=engine_config)
 
         self.qkv_proj = qkv_proj
@@ -31,14 +32,20 @@ class MuiParallelDecoderLayer(MuiModule):
         self_attn = None
 
         if isinstance(prev_module, MuiDecoderLayer):
-            # TODO: once we have MuiParallelMultiLinear, replace it if needed
-            qkv_proj = prev_module.qkv_proj
+            if isinstance(prev_module.qkv_proj, MuiParallelMultiLinear):
+                qkv_proj = prev_module.qkv_proj
+            elif isinstance(prev_module.qkv_proj, MuiMultiLinear):
+            # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
+                qkv_proj = MuiParallelMultiLinear.replace(prev_modules=qkv_proj, engine_config=engine_config, sharding_dim=0)
+            else:
+                raise ValueError(f"Not supported {type(prev_module.qkv_proj)}")
+
             # TODO: once we have MuiParallelSdpaAttention, replace it if needed
             self_attn = prev_module.self_attn
-        elif isinstance(prev_attn, MistralSdpaAttention):
+        elif isinstance(prev_module, MistralDecoderLayer):
             input_layernorm = prev_module.input_layernorm
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
-            qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm)
+            qkv_proj = MuiParallelMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm, sharding_dim=0)
             self_attn = MuiMistralSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config)
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
@@ -91,6 +98,7 @@ class MuiParallelDecoderLayer(MuiModule):
         query_states, key_states, value_states = self.qkv_proj(hidden_states)
 
         # Self Attention
+        # TODO: parallel attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             query_states=query_states,
             key_states=key_states,
