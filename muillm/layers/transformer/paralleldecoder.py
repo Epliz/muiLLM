@@ -1,5 +1,6 @@
 from typing import Optional, Tuple, Union
 import warnings
+from muillm.layers.attention.mistral.parallelsdpaattention import MuiParallelMistralSdpaAttention
 from muillm.layers.module import MuiModule
 from muillm.layers.parallelgateupdownmlp import MuiParallelGateUpDownMLP
 from muillm.layers.parallelmultilinear import MuiParallelMultiLinear
@@ -40,13 +41,16 @@ class MuiParallelDecoderLayer(MuiModule):
             else:
                 raise ValueError(f"Not supported {type(prev_module.qkv_proj)}")
 
-            # TODO: once we have MuiParallelSdpaAttention, replace it if needed
             self_attn = prev_module.self_attn
+            if not isinstance(self_attn, MuiParallelMistralSdpaAttention):
+                # replace the attention module itself if necessary
+                self_attn = MuiParallelMistralSdpaAttention.replace(self_attn, engine_config=engine_config)
+
         elif isinstance(prev_module, MistralDecoderLayer):
             input_layernorm = prev_module.input_layernorm
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
             qkv_proj = MuiParallelMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm, sharding_dim=0)
-            self_attn = MuiMistralSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config)
+            self_attn = MuiParallelMistralSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config)
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
 
