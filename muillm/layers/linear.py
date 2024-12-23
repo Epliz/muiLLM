@@ -44,6 +44,9 @@ class MuiLinear(MuiModule, nn.Linear):
         MuiModule.__init__(self, engine_config=engine_config)
         nn.Linear.__init__(self, in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
 
+        self.device = self.weight.device
+        self.dtype = self.weight.dtype
+
         self.normalize = normalize
         self.variance_epsilon = variance_epsilon
         self.norm_weights = nn.Parameter(torch.ones(in_features, dtype=dtype, device=device)) if normalize else None
