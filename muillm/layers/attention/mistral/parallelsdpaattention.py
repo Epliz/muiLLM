@@ -1,12 +1,13 @@
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 import warnings
+from muillm.layers.attention.mistral.baseattention import MuiMistralAttention
 import torch
 import torch.nn as nn
 
 import transformers.utils.logging as logging
 from transformers.cache_utils import Cache
-from transformers.models.mistral.modeling_mistral import MistralSdpaAttention
+from transformers.models.mistral.modeling_mistral import MistralAttention
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.attention.mistral.rotaryembedding import apply_rotary_pos_emb
@@ -24,9 +25,16 @@ class MuiParallelMistralSdpaAttention(MuiParallelMistralAttention):
     """
 
     @staticmethod
-    def replace(prev_module: MistralSdpaAttention, engine_config: MuiEngineConfig) -> "MuiParallelMistralSdpaAttention":
-        device = prev_module.q_proj.weight.device
-        dtype = prev_module.q_proj.weight.dtype
+    def replace(prev_module: Union[MistralAttention, MuiMistralAttention], engine_config: MuiEngineConfig) -> "MuiParallelMistralSdpaAttention":
+        if isinstance(prev_module, MistralAttention):
+            device = prev_module.o_proj.weight.device
+            dtype = prev_module.o_proj.weight.dtype
+        elif isinstance(prev_module, MuiMistralAttention):
+            device = prev_module.o_proj.device
+            dtype = prev_module.o_proj.dtype
+        else:
+            raise ValueError(f"unsupported module type: {type(prev_module)}")
+
 
         new_module = MuiParallelMistralSdpaAttention(engine_config=engine_config, config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
 

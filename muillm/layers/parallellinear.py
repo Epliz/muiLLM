@@ -51,8 +51,8 @@ class MuiParallelLinear(MuiModule):
 
         self.in_features = in_features
         self.out_features = out_features
-        self.device = device
-        self.dtype = dtype
+        self.device = linear.weight.device
+        self.dtype = linear.weight.dtype
 
         self.normalize = normalize
         self.variance_epsilon = variance_epsilon
