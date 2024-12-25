@@ -8,6 +8,8 @@
 #include <vector>
 #include <algorithm>
 
+#include <iostream>
+
 #define THREADS_PER_BLOCK 256
 
 template <typename T>
@@ -161,13 +163,14 @@ static inline std::vector<at::Tensor> muillm_rope_forward_no_cache_cuda(
     torch::Tensor& k_in
 ) {
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto device = q_in.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   auto dtype = torch::kFloat16;
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
-                            .device(at::kCUDA)
+                            .device(device) // same output device as inputs
                             .requires_grad(false);
 
   auto cache_sizes = cos_cached.sizes().vec();
@@ -450,13 +453,14 @@ static inline std::vector<at::Tensor> muillm_rope_forward_write_dynamic_cache_cu
     torch::Tensor& prev_v_cache
 ) {
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto device = q_in.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   auto dtype = torch::kFloat16;
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
-                            .device(at::kCUDA)
+                            .device(device) // same output device as inputs
                             .requires_grad(false);
 
   auto cache_sizes = cos_cached.sizes().vec();

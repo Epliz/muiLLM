@@ -64,16 +64,16 @@ class MuiParallelMistralAttention(MuiModule):
         # QKV will be sharded by rows so that it corresponds to having sharded heads
         self.o_proj = MuiParallelLinear(engine_config, self.num_heads * self.head_dim, self.hidden_size, bias=False, device=device, dtype=dtype, sharding_dim=1)
 
-        # TODO: needs a parallel variant using a parallel kv cache or call it several times
-        self.rotary_emb = MuiMistralRotaryEmbedding(
+        # one rotary cache per device
+        self.rotary_embs = [MuiMistralRotaryEmbedding(
             engine_config,
             self.head_dim,
             max_position_embeddings=self.max_position_embeddings,
             base=self.rope_theta,
             layer_idx=layer_idx,
-            device=device,
+            device=d,
             dtype=dtype,
-        )
+        ) for d in self.engine_config.devices]
 
     @staticmethod
     def replace(prev_module: Union[MistralAttention, MuiMistralAttention], engine_config: MuiEngineConfig) -> "MuiParallelMistralAttention":
@@ -167,7 +167,7 @@ class MuiParallelMistralAttention(MuiModule):
             # do the rotary embeddings on each head group
             pos_ids = position_ids[d] if position_ids is not None else None
             past_key_value = past_key_values[d] if past_key_values is not None else None
-            query_states[d], key_states[d], value_states[d] = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(query_states[d], key_states[d], pos_ids, kv_seq_len, value_states[d], past_key_value)
+            query_states[d], key_states[d], value_states[d] = self.rotary_embs[d].apply_rotary_pos_emb_write_kv_cache(query_states[d], key_states[d], pos_ids, kv_seq_len, value_states[d], past_key_value)
 
         # at this point, we have the following shapes:
         #  q: [B, num_q_heads, T, embed_dim]
