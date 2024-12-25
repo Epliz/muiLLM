@@ -112,7 +112,7 @@ class MuiParallelMistralSdpaAttention(MuiParallelMistralAttention):
             # do the rotary embeddings on each head group
             pos_ids = position_ids[d] if position_ids is not None else None
             past_key_value = past_key_values[d] if past_key_values is not None else None
-            query_states[d], key_states[d], value_states[d] = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(query_states[d], key_states[d], pos_ids, kv_seq_len, value_states[d], past_key_value)
+            query_states[d], key_states[d], value_states[d] = self.rotary_embs[d].apply_rotary_pos_emb_write_kv_cache(query_states[d], key_states[d], pos_ids, kv_seq_len, value_states[d], past_key_value)
 
         # at this point, we have the following shapes:
         #  q: [B, num_q_heads, T, embed_dim]
