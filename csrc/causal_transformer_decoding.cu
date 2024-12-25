@@ -426,19 +426,20 @@ at::Tensor muillm_causal_transformer_compute_softmax_scores_no_mask(
   CHECK_INPUT(q);
   CHECK_INPUT(k);
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto device = q.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   auto output_options_f16 = at::TensorOptions()
                             .dtype(torch::kFloat16)
                             .layout(at::kStrided)
-                            .device(at::kCUDA)
+                            .device(device) // same device as inputs
                             .requires_grad(false);
   
 
   auto temp_options_f32 = at::TensorOptions()
                             .dtype(torch::kFloat32)
                             .layout(at::kStrided)
-                            .device(at::kCUDA)
+                            .device(device) // same device as inputs
                             .requires_grad(false);
 
   auto q_sizes = q.sizes().vec();
@@ -496,12 +497,13 @@ at::Tensor muillm_causal_transformer_apply_softmax_scores(
   CHECK_INPUT(attention_weights);
   CHECK_INPUT(v);
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto device = v.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   auto output_options_f16 = at::TensorOptions()
                             .dtype(torch::kFloat16)
                             .layout(at::kStrided)
-                            .device(at::kCUDA)
+                            .device(device) // same output device as inputs
                             .requires_grad(false);
 
   auto attention_weights_sizes = attention_weights.sizes().vec();
@@ -555,13 +557,14 @@ at::Tensor muillm_causal_transformer_decoding_no_mask(
   CHECK_INPUT(k);
   CHECK_INPUT(v);
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto device = q.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   auto dtype = torch::kFloat16;
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
-                            .device(at::kCUDA)
+                            .device(device) // same output device as inputs
                             .requires_grad(false);
   
   auto q_sizes = q.sizes().vec();
