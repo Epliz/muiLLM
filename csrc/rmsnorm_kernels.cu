@@ -132,7 +132,8 @@ static at::Tensor muillm_rmsnorm_forward_cuda(
     torch::Tensor& x,
     float epsilon) {
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto device = x.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   const auto K = weights.numel();
   // batch size
@@ -144,7 +145,7 @@ static at::Tensor muillm_rmsnorm_forward_cuda(
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
-                            .device(at::kCUDA)
+                            .device(device) // same output device as inputs
                             .requires_grad(false);
 
   auto y = torch::empty(output_sizes, output_options);
