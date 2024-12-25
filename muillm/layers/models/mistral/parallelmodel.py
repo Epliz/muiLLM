@@ -42,8 +42,10 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
         config: MistralConfig
     """
 
-    def __init__(self, prev_model: Union["MuiParallelMistralModel", MuiMistralModel, MistralModel]):
+    def __init__(self, engine_config: MuiEngineConfig, prev_model: Union["MuiParallelMistralModel", MuiMistralModel, MistralModel]):
         super().__init__(prev_model.config)
+        self.engine_config = engine_config
+
         self.padding_idx = prev_model.padding_idx
         self.vocab_size = prev_model.vocab_size
 
@@ -57,7 +59,7 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
         self.post_init()
 
     def replace(prev_model: Union["MuiParallelMistralModel", MuiMistralModel, MistralModel], engine_config: MuiEngineConfig) -> "MuiParallelMistralModel":
-        return MuiParallelMistralModel(prev_model=prev_model)
+        return MuiParallelMistralModel(engine_config=engine_config, prev_model=prev_model)
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -107,10 +109,17 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
         past_key_values_length = 0
 
         if use_cache:
-            use_legacy_cache = not isinstance(past_key_values, Cache)
-            if use_legacy_cache:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            past_key_values_length = past_key_values.get_usable_length(seq_length)
+            no_previous_cache = (past_key_values is None )
+            use_legacy_cache = no_previous_cache or (not isinstance(past_key_values[0], Cache))
+
+            if no_previous_cache:
+                # one cache per GPU
+                past_key_values = [DynamicCache.from_legacy_cache(None) for d in self.engine_config.devices]
+            elif use_legacy_cache:
+                # one cache per GPU
+                past_key_values = [DynamicCache.from_legacy_cache(past_key_values[i]) for i, d in enumerate(self.engine_config.devices)]
+
+            past_key_values_length = past_key_values[0].get_usable_length(seq_length)
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -162,7 +171,7 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
-        next_decoder_cache = None
+        next_decoder_caches = None
 
         for decoder_layer in self.layers:
             if output_hidden_states:
@@ -193,7 +202,7 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
             hidden_states = layer_outputs[0]
 
             if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+                next_decoder_caches = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
@@ -206,13 +215,13 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
 
         next_cache = None
         if use_cache:
-            next_cache = next_decoder_cache.to_legacy_cache() if use_legacy_cache else next_decoder_cache
+            next_caches = [next_decoder_cache.to_legacy_cache() for next_decoder_cache in next_decoder_caches] if use_legacy_cache else next_decoder_caches
 
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
+            past_key_values=next_caches,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
@@ -354,12 +363,12 @@ class MuiParallelMistralForCausalLM(MistralPreTrainedModel):
     ):
         # Omit tokens covered by past_key_values
         if past_key_values is not None:
-            if isinstance(past_key_values, Cache):
-                cache_length = past_key_values.get_seq_length()
-                past_length = past_key_values.seen_tokens
-                max_cache_length = past_key_values.get_max_length()
+            if isinstance(past_key_values[0], Cache):
+                cache_length = past_key_values[0].get_seq_length()
+                past_length = past_key_values[0].seen_tokens
+                max_cache_length = past_key_values[0].get_max_length()
             else:
-                cache_length = past_length = past_key_values[0][0].shape[2]
+                cache_length = past_length = past_key_values[0][0][0].shape[2]
                 max_cache_length = None
 
             # Keep only the unprocessed tokens:
