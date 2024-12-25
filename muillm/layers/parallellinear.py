@@ -167,6 +167,17 @@ class MuiParallelLinear(MuiModule):
                 event = streams[i].record_event()
                 streams[d].wait_event(event)
 
+
+    @staticmethod
+    def _broadcast(engine_config: MuiEngineConfig, tensor: Tensor) -> Optional[List[Tensor]]:
+        if tensor is None:
+            return None
+
+        devices = engine_config.devices
+        moved_tensors = [tensor.to(device=d) for d in devices] 
+
+        return moved_tensors
+
     def __transfer_across(self, tensors: Optional[List[Tensor]]) -> Optional[List[Tensor]]:
         if tensors is None:
             return None
