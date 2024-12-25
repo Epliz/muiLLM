@@ -4,6 +4,7 @@ from muillm.layers.attention.mistral.parallelbaseattention import MuiParallelMis
 from muillm.layers.attention.mistral.parallelsdpaattention import MuiParallelMistralSdpaAttention
 from muillm.layers.module import MuiModule
 from muillm.layers.parallelgateupdownmlp import MuiParallelGateUpDownMLP
+from muillm.layers.parallellinear import MuiParallelLinear
 from muillm.layers.parallelmultilinear import MuiParallelMultiLinear
 from muillm.layers.transformer.decoder import MuiDecoderLayer
 import torch
@@ -19,6 +20,8 @@ from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, Mi
 class MuiParallelDecoderLayer(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, qkv_proj: MuiParallelMultiLinear, self_attn: MuiParallelMistralAttention, mlp: MuiParallelGateUpDownMLP):
         super().__init__(engine_config=engine_config)
+
+        self.tensor_parallelism = engine_config.tensor_parallelism
 
         self.qkv_proj = qkv_proj
         self.self_attn = self_attn
@@ -65,18 +68,18 @@ class MuiParallelDecoderLayer(MuiModule):
 
         return MuiParallelDecoderLayer(engine_config=engine_config, qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp)
 
-    
-    def forward(
+
+    def parallel_forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, List[torch.Tensor]],
         attention_masks: Optional[List[torch.Tensor]] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[List[torch.LongTensor]] = None,
         past_key_values: Optional[List[Cache]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         all_ones_mask: Optional[bool] = None,
         **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> Tuple[List[torch.FloatTensor], Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         if "padding_mask" in kwargs:
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
@@ -98,6 +101,8 @@ class MuiParallelDecoderLayer(MuiModule):
         if output_attentions:
             raise ValueError("outputting attention weights is not supported")
 
+        if (position_ids is not None) and (not isinstance(position_ids, list)):
+            raise ValueError("position_ids needs to be a list")
         if (attention_masks is not None) and (not isinstance(attention_masks, list)):
             raise ValueError("attention mask needs to be a list")
         if (past_key_values is not None) and (not isinstance(past_key_values, list)):
@@ -131,8 +136,7 @@ class MuiParallelDecoderLayer(MuiModule):
         # post attention layer norm is fused in the MLP
         hidden_states = self.mlp.parallel_forward(hidden_states, residual=residual)
 
-        # only keeping the one from GPU0
-        hidden_states = hidden_states[0]
+        hidden_states = hidden_states
 
         outputs = (hidden_states,)
 
@@ -140,3 +144,36 @@ class MuiParallelDecoderLayer(MuiModule):
             outputs += (present_key_values,)
 
         return outputs
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[Cache]] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        all_ones_mask: Optional[bool] = None,
+        **kwargs,
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        if self.tensor_parallelism > 1:
+            outputs = self.parallel_forward(
+                hidden_states=hidden_states,
+                attention_masks=MuiParallelLinear._broadcast(self.engine_config, attention_mask),
+                position_ids=MuiParallelLinear._broadcast(self.engine_config, position_ids),
+                past_key_values=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                all_ones_mask=all_ones_mask,
+                **kwargs)
+            
+            if use_cache:
+                hidden_states, present_key_values = outputs
+                # return what is on GPU0
+                return hidden_states[0], present_key_values
+            else:
+                (hidden_states,) = outputs
+                # return what is on GPU0
+                return (hidden_states[0],)
+
+        raise ValueError("Only parallel inference is supported")
