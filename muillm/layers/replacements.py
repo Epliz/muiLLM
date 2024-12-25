@@ -1,4 +1,5 @@
 
+from muillm.layers.models.mistral.parallelmodel import MuiParallelMistralForCausalLM, MuiParallelMistralModel
 from muillm.layers.multilinear import MuiMultiLinear
 from muillm.layers.parallellinear import MuiParallelLinear
 from muillm.layers.parallelmultilinear import MuiParallelMultiLinear
@@ -30,7 +31,7 @@ _LAYER_REPLACEMENTS = {
     # (e.g. replacing the MLP then the decoder)
     MistralDecoderLayer : MuiDecoderLayer,
 
-    # replacements for full layers
+    # replacements for full models
     MistralModel : MuiMistralModel,
     MistralForCausalLM : MuiMistralForCausalLM,
 }
@@ -50,8 +51,10 @@ _TP_LAYER_REPLACEMENTS = {
     MuiDecoderLayer: MuiParallelDecoderLayer,
 
     # replacements for full layers
-    MistralModel : MuiMistralModel,
-    MistralForCausalLM : MuiMistralForCausalLM,
+    MistralModel : MuiParallelMistralModel,
+    MistralForCausalLM : MuiParallelMistralForCausalLM,
+    MuiMistralModel : MuiParallelMistralModel,
+    MuiMistralForCausalLM : MuiParallelMistralForCausalLM,
 }
 
 def _recursive_setattr(model: nn.Module, module_name: str, new_module: nn.Module):
