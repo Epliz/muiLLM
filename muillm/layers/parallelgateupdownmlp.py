@@ -66,7 +66,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
         self.normalize = normalize
         self.variance_epsilon = variance_epsilon
-        self.norm_weights = nn.Parameter(torch.ones(hidden_size, dtype=dtype, device=device)) if normalize else None
+        self.norm_weights = nn.ParameterList([torch.ones(hidden_size, dtype=dtype, device=d) for d in self.engine_config.devices]) if normalize else None
 
         self.gate_proj = MuiParallelLinear(engine_config, self.hidden_size, self.intermediate_size, bias=False, sharding_dim=0, device=device, dtype=dtype)
         self.up_proj = MuiParallelLinear(engine_config, self.hidden_size, self.intermediate_size, bias=False, sharding_dim=0, device=device, dtype=dtype)
@@ -130,40 +130,42 @@ class MuiParallelGateUpDownMLP(MuiModule):
             # the rescaling weights are not fused in the matrices due to instabilities
 
             norm_weights_requires_grad = norm_weights.requires_grad
-            self.norm_weights = nn.Parameter(norm_weights.detach())
-            self.norm_weights.requires_grad = norm_weights_requires_grad
-
-            self.norm_weights = norm_weights
+            self.norm_weights = nn.ParameterList([norm_weights.detach().to(device=d) for d in self.engine_config.devices])
+            MuiParallelLinear._set_requires_grads(self.norm_weights, norm_weights_requires_grad)
 
         self.down_proj.copy_module(prev_module.down_proj)
 
-    def _parallel_forward_unfused(self, input: Tensor, residual: Optional[Tensor] = None) -> List[Tensor]:
+    def _parallel_forward_unfused(self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None) -> List[Tensor]:
         # else: # not dispatchable or not MuiLinear
         if self.normalize:
-            input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
+            if isinstance(inputs, list):
+                # normalize on each GPU independently instead of doing on GPU0 then copy (saves a copy)
+                inputs = [_MuiRMSNorm.apply(input, self.norm_weights[d], self.variance_epsilon) for d, input in enumerate(inputs)]
+            else:
+                inputs = _MuiRMSNorm.apply(inputs, self.norm_weights[0], self.variance_epsilon)
 
         # we shard gate/up by rows so that the all_reduce from the gate/up linears can be avoided
-        gs = self.gate_proj.parallel_forward(input, collect_outputs=False)
-        us = self.up_proj.parallel_forward(input, collect_outputs=False)
+        gs = self.gate_proj.parallel_forward(inputs, collect_outputs=False)
+        us = self.up_proj.parallel_forward(inputs, collect_outputs=False)
 
         gus = [self.activation_function(g) * u for g, u in zip(gs, us)]
         outputs = self.down_proj.parallel_forward(gus, residual=residual)
 
         return outputs
 
-    def _parallel_forward_fused(self, input: Tensor, residual: Optional[Tensor] = None) -> List[Tensor]:
+    def _parallel_forward_fused(self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None) -> List[Tensor]:
         if False: #self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
 
             # Also check that we don't have quantized linear
             if isinstance(self.gate_proj, MuiLinear) and isinstance(self.up_proj, MuiLinear):
-                gateup = _MuiParallelGateUpSiLU.apply(input, self.norm_weights, self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight)
+                gateup = _MuiParallelGateUpSiLU.apply(input, self.norm_weights[d], self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight)
                 return self.down_proj(gateup, residual=residual)
 
         # else: # not dispatchable or not MuiLinear
-        return self._parallel_forward_unfused(input=input, residual=residual)
+        return self._parallel_forward_unfused(inputs=inputs, residual=residual)
 
-    def _parallel_forward_split(self, input: Tensor, residual: Optional[Tensor] = None) -> List[Tensor]:
+    def _parallel_forward_split(self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None) -> List[Tensor]:
         if False: #self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
 
@@ -174,22 +176,22 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
                 # as we shard gate/up by rows, we don't need to shard the input and we
                 # still can use the fused RMSNorm
-                gateup = _MuiParallelGateUpSiLUSplit.apply(input, self.norm_weights, self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight)
+                gateup = _MuiParallelGateUpSiLUSplit.apply(input, self.norm_weights[d], self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight)
 
                 # we need to do an all_reduce here if we are using sharding (tensor parallelism)
                 return self.down_proj(gateup, residual=residual)
 
         # else: # not dispatchable or not MuiLinear
-        return self._parallel_forward_unfused(input=input, residual=residual)
+        return self._parallel_forward_unfused(inputs=inputs, residual=residual)
 
 
-    def parallel_forward(self, input: Tensor, residual: Optional[Tensor] = None) -> List[Tensor]:
+    def parallel_forward(self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None) -> List[Tensor]:
         if self.method == _MuiParallelGateUpSiLUMethod.GATEUPSILU_FUSED:
-            return self._parallel_forward_fused(input=input, residual=residual)
+            return self._parallel_forward_fused(inputs=inputs, residual=residual)
         elif self.method == _MuiParallelGateUpSiLUMethod.GATEUPSILU_UNFUSED:
-            return self._parallel_forward_unfused(input=input, residual=residual)
+            return self._parallel_forward_unfused(inputs=inputs, residual=residual)
         elif self.method == _MuiParallelGateUpSiLUMethod.GATEUPSILU_SPLIT:
-            return self._parallel_forward_split(input=input, residual=residual)
+            return self._parallel_forward_split(inputs=inputs, residual=residual)
         else:
             raise ValueError("Unsupported Gate/Up Silu method")
 
