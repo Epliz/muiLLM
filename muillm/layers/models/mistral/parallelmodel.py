@@ -3,6 +3,7 @@
 
 from typing import List, Optional, Tuple, Union
 from muillm.layers.models.mistral.model import MuiMistralForCausalLM, MuiMistralModel, _prepare_4d_causal_attention_mask_for_sdpa
+from muillm.layers.parallellinear import MuiParallelLinear
 import torch
 import torch.nn as nn
 
@@ -172,6 +173,9 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_caches = None
+    
+        attention_mask=MuiParallelLinear._broadcast(self.engine_config, attention_mask)
+        position_ids=MuiParallelLinear._broadcast(self.engine_config, position_ids)
 
         for decoder_layer in self.layers:
             if output_hidden_states:
@@ -179,7 +183,7 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
+                    decoder_layer.parallel_forward,
                     hidden_states,
                     attention_mask,
                     position_ids,
@@ -189,7 +193,7 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
                     all_ones_mask=all_ones_mask,
                 )
             else:
-                layer_outputs = decoder_layer(
+                layer_outputs = decoder_layer.parallel_forward(
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -206,6 +210,9 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+
+        # keep the output from GPU0
+        hidden_states = hidden_states[0]
 
         hidden_states = self.norm(hidden_states)
 
