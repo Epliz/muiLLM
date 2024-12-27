@@ -56,7 +56,7 @@ class MuiParallelLinear(MuiModule):
 
         self.normalize = normalize
         self.variance_epsilon = variance_epsilon
-        self.norm_weights = nn.Parameter(torch.ones(in_features, dtype=dtype, device=device)) if normalize else None
+        self.norm_weights = nn.ParameterList([torch.ones(in_features, dtype=dtype, device=d) for d in self.engine_config.devices]) if normalize else None
 
         self.weights = nn.ParameterList(self.__shard_weigths(linear.weight))
         MuiParallelLinear._set_requires_grads(self.weights, linear.weight.requires_grad)
@@ -109,6 +109,11 @@ class MuiParallelLinear(MuiModule):
         new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights)
 
         return new_module
+    
+    def _set_norm_weights(self, norm_weights: torch.Tensor) -> None:
+        norm_weights_requires_grad = norm_weights.requires_grad
+        self.norm_weights = nn.ParameterList([norm_weights.detach().to(device=d) for d in self.engine_config.devices])
+        MuiParallelLinear._set_requires_grads(self.norm_weights, norm_weights_requires_grad)
 
     def copy_module(self, prev_module: Union[nn.Linear, MuiLinear], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
         has_bias = prev_module.bias is not None
@@ -133,10 +138,7 @@ class MuiParallelLinear(MuiModule):
 
         if norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities
-
-            norm_weights_requires_grad = norm_weights.requires_grad
-            self.norm_weights = nn.Parameter(norm_weights.detach())
-            self.norm_weights.requires_grad = norm_weights_requires_grad
+            self._set_norm_weights(norm_weights)
 
         # Need to synchronize after copying the tensors to make sure the transfers
         # completed
@@ -315,17 +317,22 @@ class MuiParallelLinear(MuiModule):
         sharded_inputs = isinstance(input, list)
 
         # Not dispatchable
-        if self.normalize:
-            if sharded_inputs:
-                raise ValueError("normalizing sharded inputs is unsupported")
-
-            input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
 
         if not sharded_inputs:
+            if self.normalize:
+                input = _MuiRMSNorm.apply(input, self.norm_weights[0], self.variance_epsilon)
             inputs = self.__shard_inputs(input)
         else:
             # already sharded
             inputs = input
+
+            if self.normalize:
+                if self.sharding_dim == 1:
+                    raise ValueError("normalizing sharded inputs is unsupported for sharding dim 1")
+                
+                inputs = [_MuiRMSNorm.apply(inputs[d], self.norm_weights[d], self.variance_epsilon) for d in range(self.tensor_parallelism)]
+
+
 
         # need to synchronize to make sure the sharding is complete
         #self._sync_all()

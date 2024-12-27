@@ -146,11 +146,7 @@ class MuiParallelMultiLinear(MuiModule):
         # norm_weights are not sharded
         if norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities
-            norm_weights_requires_grad = norm_weights.requires_grad
-            self.linear.norm_weights = nn.Parameter(norm_weights.detach())
-            self.linear.norm_weights.requires_grad = norm_weights_requires_grad
-
-            self.linear.norm_weights = norm_weights
+            self.linear._set_norm_weights(norm_weights)
 
         # Need to synchronize after copying the tensors to make sure the transfers
         # completed

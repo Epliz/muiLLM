@@ -87,7 +87,7 @@ class MuiMultiLinear(MuiModule):
 
         linears = [self._get_linear_back(slice_start, slice_end) for slice_start, slice_end in zip(self.slice_starts, self.slice_ends)]
 
-        return linears, norm_weights
+        return linears, norm_weights[0]
 
     def copy_modules(self, prev_modules: List[nn.Linear], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
         has_bias = self.linear.bias is not None
@@ -102,12 +102,7 @@ class MuiMultiLinear(MuiModule):
 
         if norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities
-
-            norm_weights_requires_grad = norm_weights.requires_grad
-            self.linear.norm_weights = nn.Parameter(norm_weights.detach())
-            self.linear.norm_weights.requires_grad = norm_weights_requires_grad
-
-            self.linear.norm_weights = norm_weights
+            self.linear._set_norm_weights(norm_weights)
 
     def forward(self, input: Tensor) -> Tuple[Tensor, ...]:
         all_outputs = self.linear(input)
