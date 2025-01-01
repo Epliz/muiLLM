@@ -15,6 +15,7 @@ at::Tensor muillm_linear_activ_forward(
     mui_activation activ,
     torch::Tensor mul_bias,
     torch::Tensor add_bias,
+    torch::Tensor residual,
     torch::Tensor x
 );
 

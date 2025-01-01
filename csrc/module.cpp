@@ -11,10 +11,12 @@ at::Tensor muillm_linear_forward_trampoline(
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
     std::optional<torch::Tensor> mul_bias_,
-    std::optional<torch::Tensor> add_bias_) {
+    std::optional<torch::Tensor> add_bias_,
+    std::optional<torch::Tensor> residual_) {
     torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
     torch::Tensor mul_bias = mul_bias_.has_value() ? mul_bias_.value() : torch::Tensor();
     torch::Tensor add_bias = add_bias_.has_value() ? add_bias_.value() : torch::Tensor();
+    torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
     return muillm_linear_activ_forward(
         norm_weights,
         epsilon,
@@ -22,6 +24,38 @@ at::Tensor muillm_linear_forward_trampoline(
         mui_activation::Identity,
         mul_bias,
         add_bias,
+        residual,
+        x
+    );
+}
+
+#include "parallel_linear_kernels.cuh"
+
+std::vector<at::Tensor> muillm_parallel_linear_forward_trampoline(
+    std::vector<torch::Tensor> x,
+    std::vector<torch::Tensor> weights,
+    std::optional<std::vector<torch::Tensor>> norm_weights_,
+    float epsilon,
+    std::optional<std::vector<torch::Tensor>> mul_biases_,
+    std::optional<std::vector<torch::Tensor>> add_biases_,
+    std::optional<torch::Tensor> residual_) {
+
+    auto undef_tensor = torch::Tensor();
+    std::vector<torch::Tensor> empty_tensor_list;
+
+    std::vector<torch::Tensor>& norm_weights = norm_weights_.has_value() ? norm_weights_.value() : empty_tensor_list;
+    std::vector<torch::Tensor>& mul_biases = mul_biases_.has_value() ? mul_biases_.value() : empty_tensor_list;
+    std::vector<torch::Tensor>& add_biases = add_biases_.has_value() ? add_biases_.value() : empty_tensor_list;
+    torch::Tensor residual = residual_.has_value() ? residual_.value() : undef_tensor;
+
+    return muillm_parallel_linear_activ_forward(
+        norm_weights,
+        epsilon,
+        weights,
+        mui_activation::Identity,
+        mul_biases,
+        add_biases,
+        residual,
         x
     );
 }
@@ -191,7 +225,8 @@ at::Tensor muillm_to_cpu_trampoline(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
+  m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none());
+  m.def("muillm_parallel_linear_forward", &muillm_parallel_linear_forward_trampoline, "muillm parallel linear forward", py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_biases") = py::none(), py::arg("add_biases") = py::none(), py::arg("residual") = py::none());
   m.def("muillm_int8_dequantize_forward", &muillm_int8_dequantize_forward, "muillm int8 dequantize forward");
   m.def("muillm_int8_linear_forward", &muillm_int8_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("scales_min_vals"), py::arg("group_size_shift"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_gateupsilu_forward", &muillm_gateupsilu_forward, "muillm gate up silu forward");

@@ -45,6 +45,7 @@ setup(
         CUDAExtension('muillm_ext', [
             'csrc/module.cpp',
             'csrc/linear_kernels.cu',
+            'csrc/parallel_linear_kernels.cu',
             'csrc/int8_dequantization_kernel.cu',
             'csrc/int8_linear_kernels.cu',
             'csrc/gateup_kernels.cu',

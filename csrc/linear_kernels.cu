@@ -81,6 +81,7 @@ __global__ void muillm_gemv_kernel(
     mui_activation activation, // activation function 
     const half* __restrict__ MB, // optional multiplicative bias - size N (applied before additive bias)
     const half* __restrict__ AB, // optional additive bias - size N
+    const half* __restrict__ RB, // optional residual - size N
     half* __restrict__ Y, // output - size N
     unsigned N,
     unsigned K
@@ -220,7 +221,9 @@ __global__ void muillm_gemv_kernel(
       if (AB != nullptr) { // apply the additive bias if there is one
         acc += __half2float(AB[current_row]);
       }
-
+      if (RB != nullptr) { // apply the residual if there is one
+        acc += __half2float(RB[current_row]);
+      }
       // write the output value
       Y[current_row] = __float2half(acc);
     }
@@ -235,6 +238,7 @@ __global__ void muillm_gemv_norm_inputs_kernel(
     mui_activation activation, // activation function 
     const half* __restrict__ MB, // optional multiplicative bias - size N (applied before additive bias)
     const half* __restrict__ AB, // optional additive bias - size N
+    const half* __restrict__ RB, // optional residual - size N
     half* __restrict__ Y, // output - size N
     unsigned N,
     unsigned K,
@@ -433,7 +437,9 @@ __global__ void muillm_gemv_norm_inputs_kernel(
       if (AB != nullptr) { // apply the additive bias if there is one
         acc += __half2float(AB[current_row]);
       }
-
+      if (RB != nullptr) { // apply the residual if there is one
+        acc += __half2float(RB[current_row]);
+      }
       // write the output value
       Y[current_row] = __float2half(acc);
     }
@@ -451,6 +457,7 @@ at::Tensor muillm_linear_activ_forward(
     mui_activation activ,
     torch::Tensor mul_bias,
     torch::Tensor add_bias,
+    torch::Tensor residual,
     torch::Tensor x) {
   bool normalize = norm_weights.defined();
   if (normalize) {
@@ -463,9 +470,13 @@ at::Tensor muillm_linear_activ_forward(
   if (add_bias.defined()) {
     CHECK_INPUT(add_bias);
   }
+  if (residual.defined()) {
+    CHECK_INPUT(residual);
+  }
   CHECK_INPUT(x);
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto device = x.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   const auto N = weights.size(0);
   const auto K = weights.size(1);
@@ -474,7 +485,7 @@ at::Tensor muillm_linear_activ_forward(
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
-                            .device(at::kCUDA)
+                            .device(device) // same output device as inputs
                             .requires_grad(false);
 
   // y has the same dimensions as x, except the last dim that is given by
@@ -488,6 +499,9 @@ at::Tensor muillm_linear_activ_forward(
   const int num_blocks = DIV_ROUND_UP(N, ROWS_PER_BLOCK);
 
   if (normalize) {
+    const auto NORM_K = norm_weights.size(0);
+    TORCH_CHECK(K == NORM_K, "fused normalization is not supported when sharding on dim 1 (K != NORM_K)");
+
     float scale = 1.f / K;
 
     muillm_gemv_norm_inputs_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
@@ -497,6 +511,7 @@ at::Tensor muillm_linear_activ_forward(
       activ,
       mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
       add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
+      residual.defined() ? (const half*)residual.data_ptr() : nullptr,
       (half*)y.data_ptr(),
       N,
       K,
@@ -510,6 +525,7 @@ at::Tensor muillm_linear_activ_forward(
       activ,
       mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
       add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
+      residual.defined() ? (const half*)residual.data_ptr() : nullptr,
       (half*)y.data_ptr(),
       N,
       K
