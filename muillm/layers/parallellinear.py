@@ -15,16 +15,10 @@ import muillm_ext
 
 class _MuiParallelLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weights, norm_weights, variance_epsilon, add_bias, residual):
-        if (add_bias is not None) and (residual is not None):
-            raise ValueError("bias and residual at the same time is not supported")
+    def forward(ctx, x, weights, norm_weights, variance_epsilon, add_biases, residual):
+        output = muillm_ext.muillm_parallel_linear_forward(x, weights, norm_weights, variance_epsilon, mul_biases=None, add_biases=add_biases, residual=residual)
 
-        if residual is not None:
-            add_bias = residual
-
-        output = muillm_ext.muillm_linear_forward(x, weights, norm_weights, variance_epsilon, mul_bias=None, add_bias=add_bias)
-
-        ctx.save_for_backward(x, weights, norm_weights, variance_epsilon, add_bias)
+        ctx.save_for_backward(x, weights, norm_weights, variance_epsilon, add_biases, residual)
 
         return output
 
@@ -230,6 +224,7 @@ class MuiParallelLinear(MuiModule):
     @staticmethod
     def _shard_weigths(engine_config: MuiEngineConfig, tensor: Tensor, tensor_parallelism: int, sharding_dim: int) -> List[Tensor]:
         tensors = torch.tensor_split(tensor, tensor_parallelism, sharding_dim)
+        tensors = [t.contiguous() for t in tensors]
         return MuiParallelLinear._transfer_across(engine_config, tensors)
 
     def __shard_inputs(self, tensor: Tensor) -> List[Tensor]:
@@ -304,51 +299,36 @@ class MuiParallelLinear(MuiModule):
             raise ValueError("Not supported")
 
     def parallel_forward(self, input: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None, collect_outputs: bool = True) -> List[Tensor]:
-        # TODO: adapt
-        # if self.dispatchable and (input.numel() == input.shape[-1]):
-        #     # input is effectively 1D, and we support the type
-        #     if (self.sharding_dim == 1) and self.normalize:
-        #         # when splitting along k-dim, we need to normalize first
-        #         input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
-        #         return _MuiParallelLinear.apply(input, self.weight, None, 0, self.bias, residual)
-        #     else:
-        #         return _MuiParallelLinear.apply(input, self.weight, self.norm_weights, self.variance_epsilon, self.bias, residual)
-
         sharded_inputs = isinstance(input, list)
 
-        # Not dispatchable
-
         if not sharded_inputs:
-            if self.normalize:
-                input = _MuiRMSNorm.apply(input, self.norm_weights[0], self.variance_epsilon)
             inputs = self.__shard_inputs(input)
         else:
             # already sharded
             inputs = input
 
+        # TODO: move the reduction inside
+        if self.dispatchable and (inputs[0].numel() == inputs[0].shape[-1]):
+            # input is effectively 1D, and we support the type
+            outputs = _MuiParallelLinear.apply(inputs, self.weights, self.norm_weights, self.variance_epsilon, self.biases, residual)
+        else:
+            # TODO: do this case in the C++ part as well
             if self.normalize:
                 if self.sharding_dim == 1:
                     raise ValueError("normalizing sharded inputs is unsupported for sharding dim 1")
                 
                 inputs = [_MuiRMSNorm.apply(inputs[d], self.norm_weights[d], self.variance_epsilon) for d in range(self.tensor_parallelism)]
 
+            # Do the sharded computation
+            outputs = [F.linear(inputs[i], self.weights[i], self.biases[i] if self.biases is not None else None) for i in range(self.tensor_parallelism)]
 
-
-        # need to synchronize to make sure the sharding is complete
-        #self._sync_all()
-
-        # Do the sharded computation
-        outputs = [F.linear(inputs[i], self.weights[i], self.biases[i] if self.biases is not None else None) for i in range(self.tensor_parallelism)]
-
-        # Apply the residual on GPU0
-        if residual is not None:
-            outputs[0] = outputs[0] + residual
+            # Apply the residual on GPU0
+            if residual is not None:
+                outputs[0] = outputs[0] + residual
 
         # reduce
         if collect_outputs:
             outputs = self.__collect_outputs(outputs)
-
-        #output = F.linear(input, self.weight, self.bias)
 
         return outputs
 
