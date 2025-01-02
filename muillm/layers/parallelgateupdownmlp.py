@@ -14,8 +14,6 @@ from transformers.models.mistral.modeling_mistral import MistralMLP
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
-from muillm.layers.linear import MuiLinear
-
 from muillm.layers.rmsnorm import _MuiRMSNorm
 import muillm_ext
 
@@ -32,7 +30,7 @@ class _MuiParallelGateUpSiLUMethod(Enum):
 class _MuiParallelGateUpSiLU(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs, norm_weights, variance_epsilon, gate_weights, up_weights):
-        output = muillm_ext.muillm_gateupsilu_forward(norm_weights, variance_epsilon, gate_weights, up_weights, inputs)
+        output = muillm_ext.muillm_parallel_gateupsilu_forward(norm_weights, variance_epsilon, gate_weights, up_weights, inputs)
 
         ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights)
 
@@ -45,7 +43,7 @@ class _MuiParallelGateUpSiLU(torch.autograd.Function):
 class _MuiParallelGateUpSiLUSplit(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs, norm_weights, variance_epsilon, gate_weights, up_weights):
-        output = muillm_ext.muillm_gateupsilu_split_forward(norm_weights, variance_epsilon, gate_weights, up_weights, inputs)
+        output = muillm_ext.muillm_parallel_gateupsilu_split_forward(norm_weights, variance_epsilon, gate_weights, up_weights, inputs)
 
         ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights)
 
@@ -154,32 +152,36 @@ class MuiParallelGateUpDownMLP(MuiModule):
         return outputs
 
     def _parallel_forward_fused(self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None) -> List[Tensor]:
-        if False: #self.dispatchable and (input.numel() == input.shape[-1]):
+        inputs = self.gate_proj._shard_inputs_if_needed(inputs)
+
+        if self.dispatchable and (inputs[0].numel() == inputs[0].shape[-1]):
             # input is effectively 1D, and we support the type
 
             # Also check that we don't have quantized linear
-            if isinstance(self.gate_proj, MuiLinear) and isinstance(self.up_proj, MuiLinear):
-                gateup = _MuiParallelGateUpSiLU.apply(input, self.norm_weights[d], self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight)
-                return self.down_proj(gateup, residual=residual)
+            if isinstance(self.gate_proj, MuiParallelLinear) and isinstance(self.up_proj, MuiParallelLinear):
+                gateup = _MuiParallelGateUpSiLU.apply(inputs, self.norm_weights, self.variance_epsilon, self.gate_proj.weights, self.up_proj.weights)
+                return self.down_proj.parallel_forward(gateup, residual=residual)
 
         # else: # not dispatchable or not MuiLinear
         return self._parallel_forward_unfused(inputs=inputs, residual=residual)
 
     def _parallel_forward_split(self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None) -> List[Tensor]:
-        if False: #self.dispatchable and (input.numel() == input.shape[-1]):
+        inputs = self.gate_proj._shard_inputs_if_needed(inputs)
+
+        if self.dispatchable and (inputs[0].numel() == inputs[0].shape[-1]):
             # input is effectively 1D, and we support the type
 
             # Also check that we don't have quantized linear
-            if isinstance(self.gate_proj, MuiLinear) and isinstance(self.up_proj, MuiLinear):
+            if isinstance(self.gate_proj, MuiParallelLinear) and isinstance(self.up_proj, MuiParallelLinear):
                 # we shard gate/up by rows so that we can still use the fused kernel and
                 # the all_reduce from the gate/up linears can be avoided
 
                 # as we shard gate/up by rows, we don't need to shard the input and we
                 # still can use the fused RMSNorm
-                gateup = _MuiParallelGateUpSiLUSplit.apply(input, self.norm_weights[d], self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight)
+                gateup = _MuiParallelGateUpSiLUSplit.apply(inputs, self.norm_weights, self.variance_epsilon, self.gate_proj.weights, self.up_proj.weights)
 
                 # we need to do an all_reduce here if we are using sharding (tensor parallelism)
-                return self.down_proj(gateup, residual=residual)
+                return self.down_proj.parallel_forward(gateup, residual=residual)
 
         # else: # not dispatchable or not MuiLinear
         return self._parallel_forward_unfused(inputs=inputs, residual=residual)

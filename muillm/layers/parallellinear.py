@@ -227,7 +227,7 @@ class MuiParallelLinear(MuiModule):
         tensors = [t.contiguous() for t in tensors]
         return MuiParallelLinear._transfer_across(engine_config, tensors)
 
-    def __shard_inputs(self, tensor: Tensor) -> List[Tensor]:
+    def _shard_inputs(self, tensor: Tensor) -> List[Tensor]:
         if self.sharding_dim == 1:
             # if we are sharding along the k-dim, we need to shard the input accordingly
             tensors = torch.tensor_split(tensor, self.tensor_parallelism, -1)
@@ -239,6 +239,15 @@ class MuiParallelLinear(MuiModule):
 
         return self.__transfer_across(tensors)
 
+    def _shard_inputs_if_needed(self, tensors: Union[Tensor, List[Tensor]]) -> List[Tensor]:
+        sharded_inputs = isinstance(tensors, list)
+
+        if not sharded_inputs:
+            return self._shard_inputs(tensors)
+        else:
+            # already sharded
+            return tensors
+    
     def __shard_bias(self, bias: Optional[Tensor]) -> Optional[List[Tensor]]:
         return MuiParallelLinear._shard_bias(self.engine_config, bias, tensor_parallelism=self.tensor_parallelism, sharding_dim=self.sharding_dim)
 
@@ -299,13 +308,7 @@ class MuiParallelLinear(MuiModule):
             raise ValueError("Not supported")
 
     def parallel_forward(self, input: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None, collect_outputs: bool = True) -> List[Tensor]:
-        sharded_inputs = isinstance(input, list)
-
-        if not sharded_inputs:
-            inputs = self.__shard_inputs(input)
-        else:
-            # already sharded
-            inputs = input
+        inputs = self._shard_inputs_if_needed(input)
 
         # TODO: move the reduction inside
         if self.dispatchable and (inputs[0].numel() == inputs[0].shape[-1]):

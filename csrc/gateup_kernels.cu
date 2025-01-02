@@ -626,8 +626,8 @@ at::Tensor muillm_gateupsilu_forward(
   CHECK_INPUT(up_weights);
   CHECK_INPUT(x);
 
-
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto device = x.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   const auto N = gate_weights.size(0);
   const auto K = gate_weights.size(1);
@@ -636,7 +636,7 @@ at::Tensor muillm_gateupsilu_forward(
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
-                            .device(at::kCUDA)
+                            .device(device) // same output device as inputs
                             .requires_grad(false);
 
   // y has the same dimensions as x, except the last dim that is given by
@@ -1046,8 +1046,8 @@ at::Tensor muillm_gateupsilu_split_forward(
   CHECK_INPUT(up_weights);
   CHECK_INPUT(x);
 
-
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto device = x.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   const auto N = gate_weights.size(0);
   const auto K = gate_weights.size(1);
@@ -1056,7 +1056,7 @@ at::Tensor muillm_gateupsilu_split_forward(
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
-                            .device(at::kCUDA)
+                            .device(device) // same output device as inputs
                             .requires_grad(false);
 
   // y has the same dimensions as x, except the last dim that is given by
