@@ -169,8 +169,3 @@ class MuiMistralRotaryEmbedding(MuiModule):
             key_states, value_states = cache.update(key_states, v, self.layer_idx, cache_kwargs)
 
         return query_states, key_states, value_states
-
-
-    def apply_rotary_pos_emb(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor, kv_seq_len: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        query_states, key_states, _ = self.apply_rotary_pos_emb_write_kv_cache(q, k, position_ids, kv_seq_len, v=None, cache=None)
-        return query_states, key_states
