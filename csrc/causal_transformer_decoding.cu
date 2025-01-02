@@ -547,7 +547,8 @@ at::Tensor muillm_causal_transformer_apply_softmax_scores(
   return hidden_out;
 }
 
-at::Tensor muillm_causal_transformer_decoding_no_mask(
+// this one does not perform so well, but maybe is fixable?
+at::Tensor muillm_causal_transformer_decoding_no_mask_fully_fused(
     torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
     torch::Tensor& k, // [B, num_k_heads, NEW_T, embed_dim]
     torch::Tensor& v  // [B, num_v_heads, NEW_T, embed_dim]
@@ -611,4 +612,20 @@ at::Tensor muillm_causal_transformer_decoding_no_mask(
   );
 
   return attention_out;
+}
+
+at::Tensor muillm_causal_transformer_decoding_no_mask(
+    torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
+    torch::Tensor& k, // [B, num_k_heads, NEW_T, embed_dim]
+    torch::Tensor& v  // [B, num_v_heads, NEW_T, embed_dim]
+) {
+  auto attention_scores = muillm_causal_transformer_compute_softmax_scores_no_mask(
+    q,
+    k
+  );
+
+  return muillm_causal_transformer_apply_softmax_scores(
+    attention_scores,
+    v
+  );
 }

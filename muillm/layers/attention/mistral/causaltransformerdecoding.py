@@ -17,33 +17,6 @@ class _MuiCausalDecoding(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise NotImplementedError("causal decoding backward not implemented")
 
-
-class _MuiCausalSoftmaxScoreComputation(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, q, k):
-        output = muillm_ext.muillm_causal_transformer_compute_softmax_scores_no_mask(q, k)
-
-        ctx.save_for_backward(q, k)
-
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        raise NotImplementedError("causal decoding backward not implemented")
-
-class _MuiCausalSoftmaxScoreApplication(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, attention_weights, v):
-        output = muillm_ext.muillm_causal_transformer_apply_softmax_scores(attention_weights, v)
-
-        ctx.save_for_backward(attention_weights, v)
-
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        raise NotImplementedError("causal decoding backward not implemented")
-
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -60,12 +33,4 @@ def mui_causally_decode(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> to
     #  q: [B, num_q_heads, T, embed_dim]
     #  k: [B, num_k_heads, NEW_T, embed_dim]
     #  v: [B, num_v_heads, NEW_T, embed_dim]
-    if False:
-        return _MuiCausalDecoding.apply(q, k, v)
-    else:
-        # Non fully fused
-        attn_weights =  _MuiCausalSoftmaxScoreComputation.apply(q, k)
-
-        #v = repeat_kv(v, int(q.shape[1] / v.shape[1]))
-        #return torch.matmul(attn_weights, v)
-        return _MuiCausalSoftmaxScoreApplication.apply(attn_weights, v)
+    return _MuiCausalDecoding.apply(q, k, v)
