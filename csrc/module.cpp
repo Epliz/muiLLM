@@ -93,19 +93,21 @@ at::Tensor muillm_int8_linear_forward_trampoline(
     );
 }
 
-at::Tensor muillm_gateupsilu_forward(
-    torch::Tensor norm_weights,
-    float epsilon,
-    torch::Tensor gate_weights,
-    torch::Tensor up_weights,
-    torch::Tensor x);
+#include "gateup_kernels.cuh"
 
-at::Tensor muillm_gateupsilu_split_forward(
-    torch::Tensor norm_weights,
+std::vector<at::Tensor> muillm_parallel_gateupsilu_forward(
+    std::vector<torch::Tensor> norm_weights,
     float epsilon,
-    torch::Tensor gate_weights,
-    torch::Tensor up_weights,
-    torch::Tensor x);
+    std::vector<torch::Tensor> gate_weights,
+    std::vector<torch::Tensor> up_weights,
+    std::vector<torch::Tensor> x);
+
+std::vector<at::Tensor> muillm_parallel_gateupsilu_split_forward(
+    std::vector<torch::Tensor> norm_weights,
+    float epsilon,
+    std::vector<torch::Tensor> gate_weights,
+    std::vector<torch::Tensor> up_weights,
+    std::vector<torch::Tensor> x);
 
 std::tuple<at::Tensor, at::Tensor> muillm_int8_gateupsilu_dequantize_forward(
     torch::Tensor gate_up_weights,
@@ -230,7 +232,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_int8_dequantize_forward", &muillm_int8_dequantize_forward, "muillm int8 dequantize forward");
   m.def("muillm_int8_linear_forward", &muillm_int8_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("scales_min_vals"), py::arg("group_size_shift"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_gateupsilu_forward", &muillm_gateupsilu_forward, "muillm gate up silu forward");
+  m.def("muillm_parallel_gateupsilu_forward", &muillm_parallel_gateupsilu_forward, "muillm parallel gate up silu forward");
   m.def("muillm_gateupsilu_split_forward", &muillm_gateupsilu_split_forward, "muillm gate up silu split K forward");
+  m.def("muillm_parallel_gateupsilu_split_forward", &muillm_parallel_gateupsilu_split_forward, "muillm parallel gate up silu split K forward");
   m.def("muillm_int8_gateupsilu_dequantize_forward", &muillm_int8_gateupsilu_dequantize_forward, "muillm int8 gate up dequantize");
   m.def("muillm_int8_gateupsilu_forward", &muillm_int8_gateupsilu_forward, "muillm int8 gate up silu forward");
   m.def("muillm_rmsnorm_forward", &muillm_rmsnorm_forward, "muillm rmsnorm forward");
