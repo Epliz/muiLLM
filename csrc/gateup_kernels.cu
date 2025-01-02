@@ -1,3 +1,5 @@
+#include "linear_kernels.cuh"
+
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 
@@ -617,6 +619,8 @@ at::Tensor muillm_gateupsilu_forward(
     float epsilon,
     torch::Tensor gate_weights,
     torch::Tensor up_weights,
+    torch::Tensor down_weights,
+    torch::Tensor residual,
     torch::Tensor x) {
   bool normalize = norm_weights.defined();
   if (normalize) {
@@ -675,7 +679,18 @@ at::Tensor muillm_gateupsilu_forward(
     );
   }
 
-  return y;
+  // down proj
+  auto undef_tensor = torch::Tensor();
+  return muillm_linear_activ_forward(
+      undef_tensor /*norm_weights*/,
+      epsilon,
+      down_weights,
+      mui_activation::Identity,
+      undef_tensor /*mul_bias*/,
+      undef_tensor/*add_bias*/,
+      residual,
+      y
+  );
 }
 
 __global__ void muillm_gateupsilu_gemv_norm_inputs_split_kernel(
@@ -1037,6 +1052,8 @@ at::Tensor muillm_gateupsilu_split_forward(
     float epsilon,
     torch::Tensor gate_weights,
     torch::Tensor up_weights,
+    torch::Tensor down_weights,
+    torch::Tensor residual,
     torch::Tensor x) {
   bool normalize = norm_weights.defined();
   if (normalize) {
@@ -1110,5 +1127,16 @@ at::Tensor muillm_gateupsilu_split_forward(
     N
   );
 
-  return y;
+  // down proj
+  auto undef_tensor = torch::Tensor();
+  return muillm_linear_activ_forward(
+      undef_tensor /*norm_weights*/,
+      epsilon,
+      down_weights,
+      mui_activation::Identity,
+      undef_tensor /*mul_bias*/,
+      undef_tensor/*add_bias*/,
+      residual,
+      y
+  );
 }

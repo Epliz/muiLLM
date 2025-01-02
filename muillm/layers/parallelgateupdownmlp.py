@@ -29,10 +29,10 @@ class _MuiParallelGateUpSiLUMethod(Enum):
 
 class _MuiParallelGateUpSiLU(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inputs, norm_weights, variance_epsilon, gate_weights, up_weights):
-        output = muillm_ext.muillm_parallel_gateupsilu_forward(norm_weights, variance_epsilon, gate_weights, up_weights, inputs)
+    def forward(ctx, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
+        output = muillm_ext.muillm_parallel_gateupsilu_forward(norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
 
-        ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights)
+        ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual)
 
         return output
 
@@ -42,10 +42,10 @@ class _MuiParallelGateUpSiLU(torch.autograd.Function):
 
 class _MuiParallelGateUpSiLUSplit(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inputs, norm_weights, variance_epsilon, gate_weights, up_weights):
-        output = muillm_ext.muillm_parallel_gateupsilu_split_forward(norm_weights, variance_epsilon, gate_weights, up_weights, inputs)
+    def forward(ctx, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
+        output = muillm_ext.muillm_parallel_gateupsilu_split_forward(norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
 
-        ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights)
+        ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual)
 
         return output
 
@@ -159,8 +159,9 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
             # Also check that we don't have quantized linear
             if isinstance(self.gate_proj, MuiParallelLinear) and isinstance(self.up_proj, MuiParallelLinear):
-                gateup = _MuiParallelGateUpSiLU.apply(inputs, self.norm_weights, self.variance_epsilon, self.gate_proj.weights, self.up_proj.weights)
-                return self.down_proj.parallel_forward(gateup, residual=residual)
+                outputs = _MuiParallelGateUpSiLU.apply(inputs, self.norm_weights, self.variance_epsilon, self.gate_proj.weights, self.up_proj.weights, self.down_proj.weights, residual)
+                outputs = MuiParallelLinear._collect_outputs(self.engine_config, outputs, self.tensor_parallelism, 1)
+                return outputs
 
         # else: # not dispatchable or not MuiLinear
         return self._parallel_forward_unfused(inputs=inputs, residual=residual)
@@ -178,10 +179,9 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
                 # as we shard gate/up by rows, we don't need to shard the input and we
                 # still can use the fused RMSNorm
-                gateup = _MuiParallelGateUpSiLUSplit.apply(inputs, self.norm_weights, self.variance_epsilon, self.gate_proj.weights, self.up_proj.weights)
-
-                # we need to do an all_reduce here if we are using sharding (tensor parallelism)
-                return self.down_proj.parallel_forward(gateup, residual=residual)
+                outputs = _MuiParallelGateUpSiLUSplit.apply(inputs, self.norm_weights, self.variance_epsilon, self.gate_proj.weights, self.up_proj.weights, self.down_proj.weights, residual)
+                outputs = MuiParallelLinear._collect_outputs(self.engine_config, outputs, self.tensor_parallelism, 1)
+                return outputs
 
         # else: # not dispatchable or not MuiLinear
         return self._parallel_forward_unfused(inputs=inputs, residual=residual)

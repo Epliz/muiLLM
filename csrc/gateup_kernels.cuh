@@ -8,6 +8,8 @@ at::Tensor muillm_gateupsilu_forward(
     float epsilon,
     torch::Tensor gate_weights,
     torch::Tensor up_weights,
+    torch::Tensor down_weights,
+    torch::Tensor residual,
     torch::Tensor x);
 
 at::Tensor muillm_gateupsilu_split_forward(
@@ -15,6 +17,8 @@ at::Tensor muillm_gateupsilu_split_forward(
     float epsilon,
     torch::Tensor gate_weights,
     torch::Tensor up_weights,
+    torch::Tensor down_weights,
+    torch::Tensor residual,
     torch::Tensor x);
 
 #endif // __MUILLM_GATEUP_KERNELS_CUH__
