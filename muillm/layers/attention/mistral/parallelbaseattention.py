@@ -2,6 +2,7 @@ import math
 from typing import List, Optional, Tuple, Union
 import warnings
 from muillm.layers.attention.mistral.baseattention import MuiMistralAttention
+from muillm.layers.attention.mistral.parallelcausaltransformerdecoding import mui_parallel_causally_decode
 from muillm.layers.parallellinear import MuiParallelLinear
 import torch
 import torch.nn as nn
@@ -176,7 +177,7 @@ class MuiParallelMistralAttention(MuiModule):
 
         if (bsz == 1) and (q_len == 1) and all_ones_mask and (query_states[0].dtype == torch.float16):
             #
-            attn_outputs = [mui_causally_decode(query_states[d], key_states[d], value_states[d]) for d in range(num_head_groups)]
+            attn_outputs = mui_parallel_causally_decode(query_states, key_states, value_states)
         else:
             attn_outputs = []
             for d in range(num_head_groups):
