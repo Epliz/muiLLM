@@ -55,6 +55,7 @@ setup(
             'csrc/rmsnorm_kernels.cu',
             'csrc/rotary_kernels.cu',
             'csrc/causal_transformer_decoding.cu',
+            'csrc/parallel_causal_transformer_decoding.cu',
             'csrc/sync.cu',
             'csrc/sync_torch.cpp',
         ])

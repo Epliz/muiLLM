@@ -153,20 +153,12 @@ std::vector<at::Tensor> muillm_rope_forward_dynamic_cache(
     torch::Tensor& prev_v_cache
 );
 
-at::Tensor muillm_causal_transformer_compute_softmax_scores_no_mask(
-    torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
-    torch::Tensor& k // [B, num_k_heads, NEW_T, embed_dim]
-);
+#include "causal_transformer_decoding.cuh"
 
-at::Tensor muillm_causal_transformer_apply_softmax_scores(
-    torch::Tensor& attention_weights, // [B, num_q_heads, T, NEW_T]
-    torch::Tensor& v // [B, num_v_heads, NEW_T, embed_dim]
-);
-
-at::Tensor muillm_causal_transformer_decoding_no_mask(
-    torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
-    torch::Tensor& k, // [B, num_k_heads, NEW_T, embed_dim]
-    torch::Tensor& v  // [B, num_v_heads, NEW_T, embed_dim]
+std::vector<at::Tensor> muillm_parallel_causal_transformer_decoding_no_mask(
+    std::vector<torch::Tensor>& qs, // [B, num_q_heads, T, embed_dim]
+    std::vector<torch::Tensor>& ks, // [B, num_k_heads, NEW_T, embed_dim]
+    std::vector<torch::Tensor>& vs  // [B, num_v_heads, NEW_T, embed_dim]
 );
 
 #include "sync.h"
@@ -251,6 +243,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_causal_transformer_compute_softmax_scores_no_mask", &muillm_causal_transformer_compute_softmax_scores_no_mask, "muillm causal transformer compute softmax scores no mask");
   m.def("muillm_causal_transformer_apply_softmax_scores", &muillm_causal_transformer_apply_softmax_scores, "muillm causal transformer apply softmax scores");
   m.def("muillm_causal_transformer_decoding_no_mask", &muillm_causal_transformer_decoding_no_mask, "muillm causal transformer decoding no mask");
+  m.def("muillm_parallel_causal_transformer_decoding_no_mask", &muillm_parallel_causal_transformer_decoding_no_mask, "muillm parallel causal transformer decoding no mask");
 
   // synchronization
   pybind11::class_<muillm_synchronizer_ptr> cl_sync(m, "muillm_synchronizer_ptr");
