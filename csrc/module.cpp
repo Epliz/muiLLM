@@ -13,10 +13,12 @@ at::Tensor muillm_linear_forward_trampoline(
     std::optional<torch::Tensor> mul_bias_,
     std::optional<torch::Tensor> add_bias_,
     std::optional<torch::Tensor> residual_) {
-    torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
-    torch::Tensor mul_bias = mul_bias_.has_value() ? mul_bias_.value() : torch::Tensor();
-    torch::Tensor add_bias = add_bias_.has_value() ? add_bias_.value() : torch::Tensor();
-    torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
+    auto undef_tensor = torch::Tensor();
+
+    torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : undef_tensor;
+    torch::Tensor mul_bias = mul_bias_.has_value() ? mul_bias_.value() : undef_tensor;
+    torch::Tensor add_bias = add_bias_.has_value() ? add_bias_.value() : undef_tensor;
+    torch::Tensor residual = residual_.has_value() ? residual_.value() : undef_tensor;
     return muillm_linear_activ_forward(
         norm_weights,
         epsilon,
@@ -100,6 +102,8 @@ std::vector<at::Tensor> muillm_parallel_gateupsilu_forward(
     float epsilon,
     std::vector<torch::Tensor> gate_weights,
     std::vector<torch::Tensor> up_weights,
+    std::vector<torch::Tensor> down_weights,
+    torch::Tensor residual,
     std::vector<torch::Tensor> x);
 
 std::vector<at::Tensor> muillm_parallel_gateupsilu_split_forward(
@@ -107,6 +111,8 @@ std::vector<at::Tensor> muillm_parallel_gateupsilu_split_forward(
     float epsilon,
     std::vector<torch::Tensor> gate_weights,
     std::vector<torch::Tensor> up_weights,
+    std::vector<torch::Tensor> down_weights,
+    torch::Tensor residual,
     std::vector<torch::Tensor> x);
 
 std::tuple<at::Tensor, at::Tensor> muillm_int8_gateupsilu_dequantize_forward(
