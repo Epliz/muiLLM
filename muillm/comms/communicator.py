@@ -11,6 +11,7 @@ class Communicator:
 
         self.devices = devices
         self.tensor_parallelism = tensor_parallelism
+        self.comm = muillm_ext.muillm_comm_init(local_size=int(len(self.devices)), allocate_streams=False)
 
     def transfer_back(self, tensors: Optional[List[torch.Tensor]]) -> List[torch.Tensor]:
         if tensors is None:
@@ -39,21 +40,9 @@ class Communicator:
         return moved_tensors
     
     def all_reduce(self, tensors: List[torch.Tensor]) -> List[torch.Tensor]:
+        muillm_ext.muillm_all_reduce_sum(self.comm, tensors)
 
-        # transfer all outputs back on GPU0 
-        tensors = self.transfer_back(tensors)
-
-        # reduce on GPU0
-        output = tensors[0]
-        for i in range(1, self.tensor_parallelism):
-            output = output + tensors[i]
-
-        outputs = [output] * self.tensor_parallelism
-
-        # transfer to the different GPUs
-        outputs = self.transfer_across(outputs)
-
-        return outputs
+        return tensors
     
     def concat_all(self, tensors: List[torch.Tensor]) -> List[torch.Tensor]:
         # transfer all outputs back on GPU0 

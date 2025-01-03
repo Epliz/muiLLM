@@ -58,6 +58,8 @@ setup(
             'csrc/parallel_causal_transformer_decoding.cu',
             'csrc/sync.cu',
             'csrc/sync_torch.cpp',
+            'csrc/comm.cu',
+            'csrc/comm_torch.cu',
         ])
     ],
     cmdclass={
