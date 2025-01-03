@@ -1,4 +1,5 @@
 from typing import Optional
+from muillm.comms.communicator import Communicator
 from muillm.quantization.quantizationmethod import QuantizationMethod
 from muillm.synchronization.synchronizer import Synchronizer
 
@@ -31,3 +32,5 @@ class MuiEngineConfig:
             torch.cuda.set_stream(s)
 
         torch.cuda.set_device(self.devices[0])
+
+        self.comms = Communicator(tensor_parallelism=tensor_parallelism, devices=self.devices)
