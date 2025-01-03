@@ -224,6 +224,40 @@ at::Tensor muillm_to_cpu_trampoline(
   return muillm_to_cpu(sync.sync_ptr, tensor);
 }
 
+#include "comm.h"
+
+// needed because Pybind11 can't seem to be able to deal with opaque pointers
+struct muillm_comm_ptr {
+  muillm_comm_t* comm_ptr;
+};
+
+muillm_comm_ptr muillm_comm_init_trampoline(
+  int local_size,
+  bool allocate_streams
+) {
+  muillm_comm_t* ptr;
+  if (muillm_comm_init(local_size, allocate_streams, &ptr) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "comm init failed");
+  }
+
+  muillm_comm_ptr ret;
+  ret.comm_ptr = ptr;
+  return ret;
+}
+
+void muillm_all_reduce_sum(
+    muillm_comm_t* comm,
+    std::vector<torch::Tensor>& tensors
+);
+
+void muillm_all_reduce_sum_trampoline(
+    muillm_comm_ptr comm,
+    std::vector<torch::Tensor>& tensors
+) {
+  muillm_all_reduce_sum(comm.comm_ptr, tensors);
+}
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none());
   m.def("muillm_parallel_linear_forward", &muillm_parallel_linear_forward_trampoline, "muillm parallel linear forward", py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_biases") = py::none(), py::arg("add_biases") = py::none(), py::arg("residual") = py::none());
@@ -255,4 +289,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_item_f32", &muillm_item_f32_trampoline, "muillm item f32");
   m.def("muillm_to_cpu", &muillm_to_cpu_trampoline, "muillm to cpu");
 
+  // comms
+  pybind11::class_<muillm_comm_ptr> cl_comm(m, "muillm_comm_ptr");
+  cl_comm.def(pybind11::init<>());
+
+  m.def("muillm_comm_init", &muillm_comm_init_trampoline, "muillm comm init", py::arg("local_size"), py::arg("allocate_streams"));
+  m.def("muillm_all_reduce_sum", &muillm_all_reduce_sum_trampoline, "muillm all reduce sum");
 }

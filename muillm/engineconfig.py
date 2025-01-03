@@ -31,6 +31,7 @@ class MuiEngineConfig:
         for s in self.streams:
             torch.cuda.set_stream(s)
 
-        torch.cuda.set_device(self.devices[0])
-
         self.comms = Communicator(tensor_parallelism=tensor_parallelism, devices=self.devices)
+
+        # set default device correctly (comm init might have changed it)
+        torch.cuda.set_device(self.devices[0])
