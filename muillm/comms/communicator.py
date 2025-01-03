@@ -3,6 +3,19 @@ import torch
 
 import muillm_ext
 
+class _MuiAllReduce(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, comm, tensors):
+        muillm_ext.muillm_all_reduce_sum(comm, tensors)
+
+        ctx.save_for_backward(tensors)
+
+        return tensors
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
+    
 class Communicator:
     """
     Provides functionalities to multi-GPU communications (but single-process)
@@ -40,8 +53,7 @@ class Communicator:
         return moved_tensors
     
     def all_reduce(self, tensors: List[torch.Tensor]) -> List[torch.Tensor]:
-        muillm_ext.muillm_all_reduce_sum(self.comm, tensors)
-
+        _MuiAllReduce.apply(self.comm, tensors)
         return tensors
     
     def concat_all(self, tensors: List[torch.Tensor]) -> List[torch.Tensor]:
