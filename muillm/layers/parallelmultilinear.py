@@ -159,7 +159,7 @@ class MuiParallelMultiLinear(MuiModule):
         return [[all_outputs[t][..., slice_start:slice_end] for t in range(self.tensor_parallelism)] for slice_start, slice_end in self.slices]
 
     def __collect_outputs(self, tensors: List[torch.Tensor]) -> Tuple[List[torch.Tensor], ...]:
-        return MuiParallelLinear._collect_outputs(self.engine_config, tensors, tensor_parallelism=self.tensor_parallelism, sharding_dim=self.sharding_dim)
+        return MuiParallelLinear._collect_outputs(self.engine_config, tensors, sharding_dim=self.sharding_dim)
 
     def parallel_forward(self, input: Tensor, collect_outputs: bool = True) -> List[Tuple[Tensor, ...]]:
         num_slices = len(self.slice_starts)

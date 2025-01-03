@@ -160,7 +160,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
             # Also check that we don't have quantized linear
             if isinstance(self.gate_proj, MuiParallelLinear) and isinstance(self.up_proj, MuiParallelLinear):
                 outputs = _MuiParallelGateUpSiLU.apply(inputs, self.norm_weights, self.variance_epsilon, self.gate_proj.weights, self.up_proj.weights, self.down_proj.weights, residual)
-                outputs = MuiParallelLinear._collect_outputs(self.engine_config, outputs, self.tensor_parallelism, 1)
+                outputs = MuiParallelLinear._collect_outputs(self.engine_config, outputs, sharding_dim=1)
                 return outputs
 
         # else: # not dispatchable or not MuiLinear
@@ -180,7 +180,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
                 # as we shard gate/up by rows, we don't need to shard the input and we
                 # still can use the fused RMSNorm
                 outputs = _MuiParallelGateUpSiLUSplit.apply(inputs, self.norm_weights, self.variance_epsilon, self.gate_proj.weights, self.up_proj.weights, self.down_proj.weights, residual)
-                outputs = MuiParallelLinear._collect_outputs(self.engine_config, outputs, self.tensor_parallelism, 1)
+                outputs = MuiParallelLinear._collect_outputs(self.engine_config, outputs, sharding_dim=1)
                 return outputs
 
         # else: # not dispatchable or not MuiLinear

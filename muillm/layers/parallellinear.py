@@ -40,6 +40,7 @@ class MuiParallelLinear(MuiModule):
 
         linear = nn.Linear(in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
 
+        self.comms = engine_config.comms
         self.tensor_parallelism = engine_config.tensor_parallelism
         self.sharding_dim = sharding_dim + len(linear.weight.shape) if sharding_dim < 0 else sharding_dim
 
@@ -147,23 +148,6 @@ class MuiParallelLinear(MuiModule):
         for d in devices:
             torch.cuda.synchronize(d)
 
-    def __wait_for(self, d: int):
-        streams = self.engine_config.streams
-        event = streams[d].record_event()
-
-        for i in range(self.tensor_parallelism):
-            if i != d:
-                streams[i].wait_event(event)
-
-    def __wait_for_others(self, d: int):
-        streams = self.engine_config.streams
-
-        for i in range(self.tensor_parallelism):
-            if i != d:
-                event = streams[i].record_event()
-                streams[d].wait_event(event)
-
-
     @staticmethod
     def _broadcast(engine_config: MuiEngineConfig, tensor: Tensor) -> Optional[List[Tensor]]:
         if tensor is None:
@@ -174,50 +158,6 @@ class MuiParallelLinear(MuiModule):
 
         return moved_tensors
 
-    def __transfer_across(self, tensors: Optional[List[Tensor]]) -> Optional[List[Tensor]]:
-        if tensors is None:
-            return None
-        
-        devices = self.engine_config.devices
-        moved_tensors = [t.to(device=devices[i], dtype=t.dtype) if t is not None else None for i, t in enumerate(tensors)] 
-
-        # make all streams of the other devices wait on the GPU0
-        # torch already inserts waits
-        #self._wait_for(d = 0)
-
-        return moved_tensors
-
-    @staticmethod
-    def _transfer_across(engine_config: MuiEngineConfig, tensors: Optional[List[Tensor]]) -> Optional[List[Tensor]]:
-        if tensors is None:
-            return None
-        
-        devices = engine_config.devices
-        moved_tensors = [t.to(device=devices[i], dtype=t.dtype) if t is not None else None for i, t in enumerate(tensors)] 
-
-        # make all streams of the other devices wait on the GPU0
-        # torch already inserts waits
-        #self._wait_for(d = 0)
-
-        return moved_tensors
-
-    def __transfer_back(self, tensors: Optional[List[Tensor]]) -> List[Tensor]:
-        return MuiParallelLinear._transfer_back(self.engine_config, tensors)
-
-    @staticmethod
-    def _transfer_back(engine_config: MuiEngineConfig, tensors: Optional[List[Tensor]]) -> List[Tensor]:
-        if tensors is None:
-            return None
-        
-        device = engine_config.devices[0]
-        moved_tensors = [t.to(device=device, dtype=t.dtype) if t is not None else None for t in tensors] 
-
-        # make the stream 0 wait for the other GPUs
-        # torch already inserts waits
-        #self._wait_for_others(d = 0)
-
-        return moved_tensors
-
     def __shard_weigths(self, tensor: Tensor) -> List[Tensor]:
         return MuiParallelLinear._shard_weigths(self.engine_config, tensor, self.tensor_parallelism, self.sharding_dim)
 
@@ -225,7 +165,7 @@ class MuiParallelLinear(MuiModule):
     def _shard_weigths(engine_config: MuiEngineConfig, tensor: Tensor, tensor_parallelism: int, sharding_dim: int) -> List[Tensor]:
         tensors = torch.tensor_split(tensor, tensor_parallelism, sharding_dim)
         tensors = [t.contiguous() for t in tensors]
-        return MuiParallelLinear._transfer_across(engine_config, tensors)
+        return engine_config.comms.transfer_across(tensors)
 
     def _shard_inputs(self, tensor: Tensor) -> List[Tensor]:
         if self.sharding_dim == 1:
@@ -237,7 +177,7 @@ class MuiParallelLinear(MuiModule):
         else:
             raise ValueError("Unsupported sharding dimension")
 
-        return self.__transfer_across(tensors)
+        return self.comms.transfer_across(tensors)
 
     def _shard_inputs_if_needed(self, tensors: Union[Tensor, List[Tensor]]) -> List[Tensor]:
         sharded_inputs = isinstance(tensors, list)
@@ -266,43 +206,19 @@ class MuiParallelLinear(MuiModule):
         else:
             raise ValueError("Unsupported sharding dimension")
         
-        return MuiParallelLinear._transfer_across(engine_config, tensors)
+        return engine_config.comms.transfer_across(tensors)
 
     def __collect_outputs(self, tensors: List[Tensor]) -> List[Tensor]:
-        return MuiParallelLinear._collect_outputs(self.engine_config, tensors, self.tensor_parallelism, self.sharding_dim)
+        return MuiParallelLinear._collect_outputs(self.engine_config, tensors, self.sharding_dim)
 
     @staticmethod
-    def _collect_outputs(engine_config: MuiEngineConfig, tensors: List[Tensor], tensor_parallelism: int, sharding_dim: int) -> List[Tensor]:
+    def _collect_outputs(engine_config: MuiEngineConfig, tensors: List[Tensor], sharding_dim: int) -> List[Tensor]:
         if sharding_dim == 1:
-            # transfer all outputs back on GPU0 
-            tensors = MuiParallelLinear._transfer_back(engine_config, tensors)
-
-            # reduce on GPU0
-            output = tensors[0]
-            for i in range(1, tensor_parallelism):
-                output = output + tensors[i]
-
-            outputs = [output] * tensor_parallelism
-
-            # transfer to the different GPUs
-            outputs = MuiParallelLinear._transfer_across(engine_config, outputs)
-
-            return outputs
+            # reduce
+            return engine_config.comms.all_reduce(tensors)
         elif sharding_dim == 0:
-            # transfer all outputs back on GPU0 
-            tensors = MuiParallelLinear._transfer_back(engine_config, tensors)
-
-            # concatenate them all on GPU0
-            # sharding the weights by row means we need to concatenate all out features
-            # which is concatenating on the last dimension
-            output = torch.cat(tensors, dim=-1)
-
-            outputs = [output] * tensor_parallelism
-
-            # transfer to the different GPUs
-            outputs = MuiParallelLinear._transfer_across(engine_config, outputs)
-
-            return outputs
+            # concat all
+            return engine_config.comms.concat_all(tensors)
         else:
             # TODO: implement for sharding_dim == 0 (needed by parallel multi linear)
             raise ValueError("Not supported")
