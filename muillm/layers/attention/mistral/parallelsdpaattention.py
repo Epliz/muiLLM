@@ -101,10 +101,16 @@ class MuiParallelMistralSdpaAttention(MuiParallelMistralAttention):
 
         bsz, q_len, _ = query_states[0].size()
 
-        query_states = [query_state.view(bsz, q_len, self.num_tp_heads, self.head_dim).transpose(1, 2) for query_state in query_states]
-        key_states = [key_state.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2) for key_state in key_states]
-        value_states = [value_state.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2) for value_state in value_states]
-
+        if q_len == 1:
+            # the transposition doesn nothing, so we can just avoid it to avoid the CPU cost of the operation
+            query_states = [query_state.view(bsz, self.num_tp_heads, q_len, self.head_dim) for query_state in query_states]
+            key_states = [key_state.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim) for key_state in key_states]
+            value_states = [value_state.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim) for value_state in value_states]
+        else:
+            query_states = [query_state.view(bsz, q_len, self.num_tp_heads, self.head_dim).transpose(1, 2) for query_state in query_states]
+            key_states = [key_state.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2) for key_state in key_states]
+            value_states = [value_state.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2) for value_state in value_states]
+    
         kv_seq_len = key_states[0].shape[-2]
         if past_key_values is not None:
             kv_seq_len += past_key_values[0].get_usable_length(kv_seq_len, self.layer_idx)
