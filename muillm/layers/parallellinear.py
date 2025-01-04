@@ -15,8 +15,8 @@ import muillm_ext
 
 class _MuiParallelLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weights, norm_weights, variance_epsilon, add_biases, residual):
-        output = muillm_ext.muillm_parallel_linear_forward(x, weights, norm_weights, variance_epsilon, mul_biases=None, add_biases=add_biases, residual=residual)
+    def forward(ctx, comm, x, weights, norm_weights, variance_epsilon, add_biases, residual, reduce):
+        output = muillm_ext.muillm_parallel_linear_forward(comm.comm, x, weights, norm_weights, variance_epsilon, mul_biases=None, add_biases=add_biases, residual=residual, reduce=reduce)
 
         ctx.save_for_backward(x, weights, norm_weights, variance_epsilon, add_biases, residual)
 
@@ -226,10 +226,11 @@ class MuiParallelLinear(MuiModule):
     def parallel_forward(self, input: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None, collect_outputs: bool = True) -> List[Tensor]:
         inputs = self._shard_inputs_if_needed(input)
 
-        # TODO: move the reduction inside
         if self.dispatchable and (inputs[0].numel() == inputs[0].shape[-1]):
             # input is effectively 1D, and we support the type
-            outputs = _MuiParallelLinear.apply(inputs, self.weights, self.norm_weights, self.variance_epsilon, self.biases, residual)
+            if self.sharding_dim == 0 and collect_outputs:
+                raise ValueError("Collecting outputs when sharded by rows is not supported")
+            outputs = _MuiParallelLinear.apply(self.comms, inputs, self.weights, self.norm_weights, self.variance_epsilon, self.biases, residual, collect_outputs)
         else:
             # TODO: do this case in the C++ part as well
             if self.normalize:
@@ -245,9 +246,10 @@ class MuiParallelLinear(MuiModule):
             if residual is not None:
                 outputs[0] = outputs[0] + residual
 
-        # reduce
-        if collect_outputs:
-            outputs = self.__collect_outputs(outputs)
+            # reduce
+            if collect_outputs:
+                # TODO: push reduction in C++
+                outputs = self.__collect_outputs(outputs)
 
         return outputs
 
