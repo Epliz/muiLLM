@@ -205,6 +205,14 @@ muillm_comm_error_t muillm_comm_all_reduce_sum(
   muillm_comm_datatype_t datatype
 ) {
 
+  // TODO:
+  //  try approach where
+  // 1) place vectors in remote GPU memories (double buffed)
+  // 2) do a rendez-vous (record event, wait on other gpus)
+  // 3) finalize reduction
+  // it should have lower latency than rendez-vous, reduce-broadcast, rendez-vous
+  // TODO next:
+  // fuse all reduce vector copy in gemv
   int local_size = comm->local_size;
 
   if (comm->signals != nullptr) {
