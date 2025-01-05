@@ -4,6 +4,132 @@
 
 #define DIV_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
+#define MUILLM_COMM_INITIAL_BUFFER_CAPACITY (1024 * 1024) // 1MiB
+
+size_t __next_power_of_2(size_t n) {
+  size_t r = 1;
+  while (r < n) {
+    r *= 2;
+  }
+  return r;
+}
+
+// returns the size in bytes for the given datatype and number of elements
+static inline size_t __comm_size(
+    muillm_comm_datatype_t datatype,
+    size_t count
+) {
+  switch (datatype) {
+    case MUILLM_COMM_FP16: {
+      return 2 * count;
+    }
+    case MUILLM_COMM_FP32: {
+      return 4 * count;
+    }
+    default: {
+      return 0;
+    }
+  }
+}
+
+muillm_comm_error_t __ensure_buffer_set_capacity(muillm_comm_buffer_set_t* buffer_set, size_t capacity, int local_size) {
+  if (capacity <= buffer_set->capacity) {
+    // the buffers are big enough
+    return MUILLM_COMM_SUCCESS;
+  }
+
+  int default_device_id;
+  if (hipGetDevice(&default_device_id) != hipSuccess) {
+    std::cout<<"Error getting the default device"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // if needed deallocate previous memory
+  for (int i = 0; i < MUILLM_COMM_MAX_GPUS; i++) {
+    void* ptr = buffer_set->buffers[i];
+    if (ptr != nullptr) {
+      if (hipFree(ptr) != hipSuccess) {
+        std::cout<<"Error free buffer "<<i<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+
+      buffer_set->buffers[i] = nullptr;
+    }
+  }
+
+  // allocate new buffers
+  capacity = __next_power_of_2(capacity);
+
+  for (int i = 0; i < local_size; i++) {
+    if (hipSetDevice(i) != hipSuccess) {
+      std::cout<<"Error setting the device before allocation"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+
+    void* ptr = nullptr;
+    if (hipMalloc((void**)&ptr, capacity) != hipSuccess || ptr == nullptr) {
+      std::cout<<"Allocation of buffer "<<i<<" failed"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+    
+    buffer_set->buffers[i] = ptr;
+  }
+
+  // all buffer allocations suceeded
+  buffer_set->capacity = capacity;
+
+  // set back the correct default device
+  if (hipSetDevice(default_device_id) != hipSuccess) {
+    std::cout<<"Error setting back the default device"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+
+muillm_comm_error_t muillm_comm_get_buffer_set(muillm_comm_t* comm, size_t count, muillm_comm_datatype_t datatype, muillm_comm_buffer_set_t** buffer_set) {
+  
+  muillm_comm_error_t muillm_error;
+
+  size_t capacity = __comm_size(datatype, count);
+  if ((muillm_error = __ensure_buffer_set_capacity(comm->first_buffers, capacity, comm->local_size)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+
+  // always return the current first buffer set
+  *buffer_set = comm->first_buffers;
+
+  // swap buffer sets for next time
+  muillm_comm_buffer_set_t* tmp = comm->first_buffers;
+  comm->first_buffers = comm->second_buffers;
+  comm->second_buffers = tmp;
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+muillm_comm_error_t __init_buffer_set(int local_size, muillm_comm_buffer_set_t** buffer_set_ptr) {
+  muillm_comm_buffer_set_t* buffer_set = new muillm_comm_buffer_set_t;
+  buffer_set->capacity = 0;
+
+  if (buffer_set == nullptr) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  for (int i = 0; i < MUILLM_COMM_MAX_GPUS; i++) {
+    buffer_set->buffers[i] = nullptr;
+  }
+
+  // ensure a certain good initial size
+  muillm_comm_error_t muillm_error;
+  if ((muillm_error = __ensure_buffer_set_capacity(buffer_set, MUILLM_COMM_INITIAL_BUFFER_CAPACITY, local_size)) != MUILLM_COMM_SUCCESS) {
+    *buffer_set_ptr = nullptr;
+    return muillm_error;
+  }
+
+  *buffer_set_ptr = buffer_set;
+  return MUILLM_COMM_SUCCESS;
+}
 
 muillm_comm_error_t muillm_comm_init(
   int local_size,
@@ -12,6 +138,7 @@ muillm_comm_error_t muillm_comm_init(
 ) {
 
   hipError_t error;
+  muillm_comm_error_t muillm_error;
 
   int device_count;
   if (hipGetDeviceCount(&device_count) != hipSuccess) {
@@ -95,21 +222,32 @@ muillm_comm_error_t muillm_comm_init(
 
     // need to allocate 8 bytes
     for (int r = 0; r < local_size; r++) {
+      if (hipSetDevice(r) != hipSuccess) {
+        std::cout<<"(rank "<<r<<") Error setting the device"<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
       if ((error = hipExtMallocWithFlags((void**) &comm->signals[r], sizeof(uint64_t), hipMallocSignalMemory)) == hipSuccess) {
-        std::cout<<"Succeeded allocating signal memory"<<std::endl;
         *comm->signals[r] = 0;
       } else {
         delete[] comm->signals;
         comm->signals = nullptr;
         return MUILLM_COMM_UNKNOWN_ERROR;
       }
-      std::cout<<"signal "<<r<<" ptr: "<<comm->signals[r]<<std::endl;
     }
   } else {
     delete[] comm->signals;
     comm->signals = nullptr;
   }
 
+  // initialize buffer sets
+  if ((muillm_error = __init_buffer_set(local_size, &comm->first_buffers)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+  if ((muillm_error = __init_buffer_set(local_size, &comm->second_buffers)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+
+  // set back the correct default device
   if (hipSetDevice(default_device_id) != hipSuccess) {
     std::cout<<"Error setting back the default device"<<std::endl;
     return MUILLM_COMM_UNKNOWN_ERROR;
@@ -121,7 +259,79 @@ muillm_comm_error_t muillm_comm_init(
 
 #define THREADS_PER_BLOCK 256
 
+
+// each threads can copy 16 bytes
+#define BYTES_PER_THREAD 16
+#define BYTES_PER_BLOCK (THREADS_PER_BLOCK * BYTES_PER_THREAD)
+
+typedef struct uint32x4{
+  uint32_t x, y, z, w;
+} uint32x4_t;
+
+__global__ void __muillm_copy_kernel(
+    const uint8_t* src_ptr,
+    uint8_t* dst_ptr,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * BYTES_PER_BLOCK + (threadIdx.x * BYTES_PER_THREAD);
+  if (i + (BYTES_PER_THREAD - 1) < N) {
+    // can copy 16 bytes
+
+    const uint32x4_t* src_x16_ptr = (const uint32x4_t*)(&src_ptr[i]);
+    uint32x4_t* dst_x16_ptr = (uint32x4_t*)(&dst_ptr[i]);
+    *dst_x16_ptr = *src_x16_ptr;
+
+    i += BYTES_PER_THREAD;
+  } else {
+    // non vectorized copy
+    for (unsigned b = 0; b < BYTES_PER_THREAD; b++) {
+      if (i < N) {
+        dst_ptr[i] = src_ptr[i];
+        i++;
+      }
+    }
+  }
+}
+
+static void __muillm_gpu_copy(void* dst, const void* src, size_t count, hipStream_t stream) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(count, BYTES_PER_BLOCK);
+
+  // a copy kernel is faster than a hipMemcpyAsync
+  __muillm_copy_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    (const uint8_t*) src,
+    (uint8_t*) dst,
+    count
+  );
+}
+
 // TP2 kernels
+
+__global__ void __all_reduce_fp16_tp2_kernel(
+    const half* x1,
+    const half* x2,
+    half* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    half res = __hadd(x1[i], x2[i]);
+    y[i] = res;
+  }
+}
+
+__global__ void __all_reduce_fp32_tp2_kernel(
+    const float* x1,
+    const float* x2,
+    float* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    float res = x1[i] + x2[i];
+    y[i] = res;
+  }
+}
 
 __global__ void __all_reduce_fp16_tp2_multi_write_out_kernel(
     const half* x1,
@@ -154,6 +364,36 @@ __global__ void __all_reduce_fp32_tp2_multi_write_out_kernel(
 }
 
 // TP4 kernels
+
+__global__ void __all_reduce_fp16_tp4_kernel(
+    const half* x1,
+    const half* x2,
+    const half* x3,
+    const half* x4,
+    half* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    half res = __hadd(__hadd(x1[i], x2[i]), __hadd(x3[i], x4[i]));
+    y[i] = res;
+  }
+}
+
+__global__ void __all_reduce_fp32_tp4_kernel(
+    const float* x1,
+    const float* x2,
+    const float* x3,
+    const float* x4,
+    float* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    float res = x1[i] + x2[i] + x3[i] + x4[i];
+    y[i] = res;
+  }
+}
 
 __global__ void __all_reduce_fp16_tp4_multi_write_out_kernel(
     const half* x1,
@@ -197,22 +437,20 @@ __global__ void __all_reduce_fp32_tp4_multi_write_out_kernel(
   }
 }
 
-muillm_comm_error_t muillm_comm_all_reduce_sum(
+
+muillm_comm_error_t muillm_comm_all_reduce_sum_single_gpu(
   muillm_comm_t* comm,
   const void** src_ptrs,
   void** dst_ptrs,
   size_t count,
   muillm_comm_datatype_t datatype
 ) {
+  hipError_t hip_error;
 
-  // TODO:
-  //  try approach where
-  // 1) place vectors in remote GPU memories (double buffed)
-  // 2) do a rendez-vous (record event, wait on other gpus)
-  // 3) finalize reduction
-  // it should have lower latency than rendez-vous, reduce-broadcast, rendez-vous
-  // TODO next:
-  // fuse all reduce vector copy in gemv
+  // an approach doing
+  // 1) barrier
+  // 2) reduce on GPU0
+  // 3) barrier
   int local_size = comm->local_size;
 
   if (comm->signals != nullptr) {
@@ -221,7 +459,7 @@ muillm_comm_error_t muillm_comm_all_reduce_sum(
 
     // GPU barrier: GPU0 will wait on the others
     for (int r = 1; r < local_size; r++) {
-      if (hipStreamWriteValue32(comm->streams[r], (uint32_t*)comm->signals[r], seq_no, 0) != hipSuccess) {
+      if ((hip_error = hipStreamWriteValue32(comm->streams[r], (uint32_t*)comm->signals[r], seq_no, 0)) != hipSuccess) {
         std::cout<<"Failed to write value "<<r<<std::endl;
         return MUILLM_COMM_UNKNOWN_ERROR;
       }
@@ -229,9 +467,7 @@ muillm_comm_error_t muillm_comm_all_reduce_sum(
 
     // wait for the other ranks
     for (int other_rank = 1; other_rank < local_size; other_rank++) {
-
-      hipError_t error;
-      if ((error = hipStreamWaitValue32(comm->streams[0], (uint32_t*)comm->signals[other_rank], seq_no, hipStreamWaitValueEq, -1)) != hipSuccess) {
+      if ((hip_error = hipStreamWaitValue32(comm->streams[0], (uint32_t*)comm->signals[other_rank], seq_no, hipStreamWaitValueEq, -1)) != hipSuccess) {
         std::cout<<"Failed to wait for value"<<std::endl;
         return MUILLM_COMM_UNKNOWN_ERROR;
       }
@@ -247,9 +483,7 @@ muillm_comm_error_t muillm_comm_all_reduce_sum(
 
     // wait for the other ranks
     for (int other_rank = 1; other_rank < local_size; other_rank++) {
-
-      hipError_t error;
-      if ((error = hipStreamWaitEvent(comm->streams[0], comm->acquire_events[other_rank], 0)) != hipSuccess) {
+      if ((hip_error = hipStreamWaitEvent(comm->streams[0], comm->acquire_events[other_rank], 0)) != hipSuccess) {
         std::cout<<"Failed to wait for event"<<std::endl;
         return MUILLM_COMM_UNKNOWN_ERROR;
       }
@@ -335,8 +569,7 @@ On MI100:
 
     // wait for the other ranks
     for (int other_rank = 1; other_rank < local_size; other_rank++) {
-      hipError_t error;
-      if ((error = hipStreamWaitValue32(comm->streams[other_rank], (uint32_t*)comm->signals[0], seq_no, hipStreamWaitValueEq, -1)) != hipSuccess) {
+      if ((hip_error = hipStreamWaitValue32(comm->streams[other_rank], (uint32_t*)comm->signals[0], seq_no, hipStreamWaitValueEq, -1)) != hipSuccess) {
         std::cout<<"Failed to wait for value"<<std::endl;
         return MUILLM_COMM_UNKNOWN_ERROR;
       }
@@ -348,13 +581,169 @@ On MI100:
     }
 
     for (int other_rank = 1; other_rank < local_size; other_rank++) {
-
-      hipError_t error;
-      if ((error = hipStreamWaitEvent(comm->streams[other_rank], comm->release_events[0], 0)) != hipSuccess) {
+      if ((hip_error = hipStreamWaitEvent(comm->streams[other_rank], comm->release_events[0], 0)) != hipSuccess) {
         std::cout<<"Failed to wait for event"<<std::endl;
         return MUILLM_COMM_UNKNOWN_ERROR;
       }
     }
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+muillm_comm_error_t muillm_comm_all_reduce_sum(
+  muillm_comm_t* comm,
+  const void** src_ptrs,
+  void** dst_ptrs,
+  size_t count,
+  muillm_comm_datatype_t datatype
+) {
+  hipError_t hip_error;
+  muillm_comm_error_t muillm_error;
+
+  int local_size = comm->local_size;
+
+  // we only do the copy in the reduction buffers only if there is aliasing
+  bool aliasing = false;
+
+  for (int r = 0; r < local_size; r++) {
+    if (src_ptrs[r] == dst_ptrs[r]) {
+      aliasing = true;
+      break;
+    }
+  }
+
+  // get reduction buffer set
+  muillm_comm_buffer_set_t* buffer_set = nullptr;
+
+  if ((muillm_error = muillm_comm_get_buffer_set(comm, count, datatype, &buffer_set)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"Reduction failed when ensuring capacity"<<std::endl;
+    return muillm_error;
+  }
+
+  // copy into reduction buffers if needed
+  if (aliasing) {
+    size_t byte_count = __comm_size(datatype, count);
+    for (int r = 0; r < local_size; r++) {
+
+      __muillm_gpu_copy(buffer_set->buffers[r], src_ptrs[r], byte_count, comm->streams[r]);
+    }
+  }
+
+  // ensure all GPUs have copied into the reduction buffers
+  if (comm->signals != nullptr) {
+    comm->signal_seq_no++;
+    uint64_t seq_no = comm->signal_seq_no;
+
+    // GPU barrier: all GPUs wait on each other
+    for (int r = 0; r < local_size; r++) {
+      if ((hip_error = hipStreamWriteValue32(comm->streams[r], (uint32_t*)comm->signals[r], seq_no, 0)) != hipSuccess) {
+        std::cout<<"Failed to write value "<<r<<std::endl;
+        std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+
+      // wait for the other ranks
+      for (int other_rank = 0; other_rank < local_size; other_rank++) {
+        if (other_rank == r) continue;
+        if ((hip_error = hipStreamWaitValue32(comm->streams[r], (uint32_t*)comm->signals[other_rank], seq_no, hipStreamWaitValueEq, -1)) != hipSuccess) {
+          std::cout<<"Failed to wait for value"<<std::endl;
+          std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
+          return MUILLM_COMM_UNKNOWN_ERROR;
+        }
+      }
+    }
+  } else {
+    // GPU barrier: all GPUs wait on each other
+    for (int r = 0; r < local_size; r++) {
+      if (hipEventRecord(comm->acquire_events[r], comm->streams[r]) != hipSuccess) {
+        std::cout<<"Failed to record event "<<r<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+    }
+
+    // wait for the other ranks
+    for (int r = 0; r < local_size; r++) {
+      for (int other_rank = 0; other_rank < local_size; other_rank++) {
+        if (other_rank == r) continue;
+
+        hipError_t error;
+        if ((error = hipStreamWaitEvent(comm->streams[r], comm->acquire_events[other_rank], 0)) != hipSuccess) {
+          std::cout<<"Failed to wait for event"<<std::endl;
+          std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
+          return MUILLM_COMM_UNKNOWN_ERROR;
+        }
+      }
+    }
+  }
+
+  // do the reduction
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
+
+/*
+On MI300x :
+  4 GPUs:
+
+  2 GPUs:
+
+On MI100:
+  2 GPUs:
+  426843us -> 26us/reduce
+*/
+
+  // reduce on one GPU
+  if (datatype == MUILLM_COMM_FP16) {
+    if (local_size == 4) {
+      for (int r = 0; r < local_size; r++) {
+        __all_reduce_fp16_tp4_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const half*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const half*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (const half*) (aliasing ? buffer_set->buffers[2] : src_ptrs[2]),
+          (const half*) (aliasing ? buffer_set->buffers[3] : src_ptrs[3]),
+          (half*) dst_ptrs[r],
+          count
+        );
+      }
+    } else if (local_size == 2) {
+      for (int r = 0; r < local_size; r++) {
+        __all_reduce_fp16_tp2_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const half*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const half*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (half*) dst_ptrs[r],
+          count
+        );
+      }
+    } else {
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else if (datatype == MUILLM_COMM_FP32) {
+    if (local_size == 4) {
+      for (int r = 0; r < local_size; r++) {
+        __all_reduce_fp32_tp4_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const float*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const float*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (const float*) (aliasing ? buffer_set->buffers[2] : src_ptrs[2]),
+          (const float*) (aliasing ? buffer_set->buffers[3] : src_ptrs[3]),
+          (float*) dst_ptrs[r],
+          count
+        );
+      }
+    } else if (local_size == 2) {
+
+      for (int r = 0; r < local_size; r++) {
+        __all_reduce_fp32_tp2_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const float*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const float*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (float*) dst_ptrs[r],
+          count
+        );
+      }
+    } else {
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else {
+    return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
   return MUILLM_COMM_SUCCESS;

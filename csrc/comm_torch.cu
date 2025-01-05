@@ -19,6 +19,9 @@ void muillm_all_reduce_sum(
   if (num_tensors > MAX_GPUS) {
     TORCH_CHECK(false, "too many tensors were provided to reduce");
   }
+  if (num_tensors != comm->local_size) {
+    TORCH_CHECK(false, "incorrect number of tensors passed");
+  }
 
   void* src_ptrs[MAX_GPUS];
   for (size_t i = 0; i < num_tensors; i++) {
