@@ -614,14 +614,16 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_kernel(
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-at::Tensor muillm_gateupsilu_forward(
-    torch::Tensor norm_weights,
+
+void muillm_gateupsilu_forward_placed_output(
+    torch::Tensor& norm_weights,
     float epsilon,
-    torch::Tensor gate_weights,
-    torch::Tensor up_weights,
-    torch::Tensor down_weights,
-    torch::Tensor residual,
-    torch::Tensor x) {
+    torch::Tensor& gate_weights,
+    torch::Tensor& up_weights,
+    torch::Tensor& down_weights,
+    torch::Tensor& residual,
+    torch::Tensor& x,
+    void* output_ptr) {
   bool normalize = norm_weights.defined();
   if (normalize) {
     CHECK_INPUT(norm_weights);
@@ -633,15 +635,15 @@ at::Tensor muillm_gateupsilu_forward(
   auto device = x.device();
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
-  const auto N = gate_weights.size(0);
-  const auto K = gate_weights.size(1);
-
   auto dtype = torch::kFloat16;
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
                             .device(device) // same output device as inputs
                             .requires_grad(false);
+
+  const auto N = gate_weights.size(0);
+  const auto K = gate_weights.size(1);
 
   // y has the same dimensions as x, except the last dim that is given by
   // the out_features of weights
@@ -681,7 +683,8 @@ at::Tensor muillm_gateupsilu_forward(
 
   // down proj
   auto undef_tensor = torch::Tensor();
-  return muillm_linear_activ_forward(
+
+  muillm_linear_activ_forward_placed_output(
       undef_tensor /*norm_weights*/,
       epsilon,
       down_weights,
@@ -689,8 +692,52 @@ at::Tensor muillm_gateupsilu_forward(
       undef_tensor /*mul_bias*/,
       undef_tensor/*add_bias*/,
       residual,
-      y
+      y,
+      output_ptr
   );
+}
+
+at::Tensor muillm_gateupsilu_forward(
+    torch::Tensor& norm_weights,
+    float epsilon,
+    torch::Tensor& gate_weights,
+    torch::Tensor& up_weights,
+    torch::Tensor& down_weights,
+    torch::Tensor& residual,
+    torch::Tensor& x) {
+  auto device = x.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  auto dtype = torch::kFloat16;
+  auto output_options = at::TensorOptions()
+                            .dtype(dtype)
+                            .layout(at::kStrided)
+                            .device(device) // same output device as inputs
+                            .requires_grad(false);
+
+  const auto N = down_weights.size(0);
+
+  // output has the same dimensions as x, except the last dim that is given by
+  // the out_features of weights
+  auto output_sizes = x.sizes().vec();
+  output_sizes[output_sizes.size() - 1] = N;
+
+  auto output = torch::empty(output_sizes, output_options);
+
+  void* output_ptr = output.data_ptr();
+
+  muillm_gateupsilu_forward_placed_output(
+    norm_weights,
+    epsilon,
+    gate_weights,
+    up_weights,
+    down_weights,
+    residual,
+    x,
+    output_ptr
+  );
+
+  return output;
 }
 
 __global__ void muillm_gateupsilu_gemv_norm_inputs_split_kernel(
@@ -1047,14 +1094,16 @@ __global__ void muillm_gateupsilu_combine_kernel(
   }
 }
 
-at::Tensor muillm_gateupsilu_split_forward(
-    torch::Tensor norm_weights,
+
+void muillm_gateupsilu_split_forward_placed_output(
+    torch::Tensor& norm_weights,
     float epsilon,
-    torch::Tensor gate_weights,
-    torch::Tensor up_weights,
-    torch::Tensor down_weights,
-    torch::Tensor residual,
-    torch::Tensor x) {
+    torch::Tensor& gate_weights,
+    torch::Tensor& up_weights,
+    torch::Tensor& down_weights,
+    torch::Tensor& residual,
+    torch::Tensor& x,
+    void* output_ptr) {
   bool normalize = norm_weights.defined();
   if (normalize) {
     CHECK_INPUT(norm_weights);
@@ -1085,7 +1134,7 @@ at::Tensor muillm_gateupsilu_split_forward(
   auto gy = torch::empty(output_sizes, output_options);
   // output for up projection
   auto uy = torch::empty(output_sizes, output_options);
-  // output for everything combined
+  // output for the reduction
   auto y = torch::empty(output_sizes, output_options);
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
@@ -1129,7 +1178,7 @@ at::Tensor muillm_gateupsilu_split_forward(
 
   // down proj
   auto undef_tensor = torch::Tensor();
-  return muillm_linear_activ_forward(
+  muillm_linear_activ_forward_placed_output(
       undef_tensor /*norm_weights*/,
       epsilon,
       down_weights,
@@ -1137,6 +1186,51 @@ at::Tensor muillm_gateupsilu_split_forward(
       undef_tensor /*mul_bias*/,
       undef_tensor/*add_bias*/,
       residual,
-      y
+      y,
+      output_ptr
   );
+}
+
+at::Tensor muillm_gateupsilu_split_forward(
+    torch::Tensor& norm_weights,
+    float epsilon,
+    torch::Tensor& gate_weights,
+    torch::Tensor& up_weights,
+    torch::Tensor& down_weights,
+    torch::Tensor& residual,
+    torch::Tensor& x) {
+
+  auto device = x.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  auto dtype = torch::kFloat16;
+  auto output_options = at::TensorOptions()
+                            .dtype(dtype)
+                            .layout(at::kStrided)
+                            .device(device) // same output device as inputs
+                            .requires_grad(false);
+
+  const auto N = down_weights.size(0);
+
+  // output has the same dimensions as x, except the last dim that is given by
+  // the out_features of weights
+  auto output_sizes = x.sizes().vec();
+  output_sizes[output_sizes.size() - 1] = N;
+
+  auto output = torch::empty(output_sizes, output_options);
+
+  void* output_ptr = output.data_ptr();
+  
+  muillm_gateupsilu_split_forward_placed_output(
+    norm_weights,
+    epsilon,
+    gate_weights,
+    up_weights,
+    down_weights,
+    residual,
+    x,
+    output_ptr
+  );
+
+  return output;
 }
