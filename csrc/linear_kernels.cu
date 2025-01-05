@@ -450,15 +450,17 @@ __global__ void muillm_gemv_norm_inputs_kernel(
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-at::Tensor muillm_linear_activ_forward(
-    torch::Tensor norm_weights,
+
+void muillm_linear_activ_forward_placed_output(
+    torch::Tensor& norm_weights,
     float epsilon,
-    torch::Tensor weights,
+    torch::Tensor& weights,
     mui_activation activ,
-    torch::Tensor mul_bias,
-    torch::Tensor add_bias,
-    torch::Tensor residual,
-    torch::Tensor x) {
+    torch::Tensor& mul_bias,
+    torch::Tensor& add_bias,
+    torch::Tensor& residual,
+    torch::Tensor& x,
+    void* output_ptr) {
   bool normalize = norm_weights.defined();
   if (normalize) {
     CHECK_INPUT(norm_weights);
@@ -481,20 +483,6 @@ at::Tensor muillm_linear_activ_forward(
   const auto N = weights.size(0);
   const auto K = weights.size(1);
 
-  auto dtype = torch::kFloat16;
-  auto output_options = at::TensorOptions()
-                            .dtype(dtype)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  // y has the same dimensions as x, except the last dim that is given by
-  // the out_features of weights
-  auto output_sizes = x.sizes().vec();
-  output_sizes[output_sizes.size() - 1] = N;
-
-  auto y = torch::empty(output_sizes, output_options);
-
   const int threads_per_blocks = THREADS_PER_BLOCK;
   const int num_blocks = DIV_ROUND_UP(N, ROWS_PER_BLOCK);
 
@@ -512,7 +500,7 @@ at::Tensor muillm_linear_activ_forward(
       mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
       add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
       residual.defined() ? (const half*)residual.data_ptr() : nullptr,
-      (half*)y.data_ptr(),
+      (half*) output_ptr,
       N,
       K,
       epsilon,
@@ -526,11 +514,55 @@ at::Tensor muillm_linear_activ_forward(
       mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
       add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
       residual.defined() ? (const half*)residual.data_ptr() : nullptr,
-      (half*)y.data_ptr(),
+      (half*) output_ptr,
       N,
       K
     );
   }
+}
+
+at::Tensor muillm_linear_activ_forward(
+    torch::Tensor& norm_weights,
+    float epsilon,
+    torch::Tensor& weights,
+    mui_activation activ,
+    torch::Tensor& mul_bias,
+    torch::Tensor& add_bias,
+    torch::Tensor& residual,
+    torch::Tensor& x) {
+  CHECK_INPUT(x);
+
+  auto device = x.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  const auto N = weights.size(0);
+
+  auto dtype = torch::kFloat16;
+  auto output_options = at::TensorOptions()
+                            .dtype(dtype)
+                            .layout(at::kStrided)
+                            .device(device) // same output device as inputs
+                            .requires_grad(false);
+
+  // y has the same dimensions as x, except the last dim that is given by
+  // the out_features of weights
+  auto output_sizes = x.sizes().vec();
+  output_sizes[output_sizes.size() - 1] = N;
+
+  auto y = torch::empty(output_sizes, output_options);
+
+  void* output_ptr = y.data_ptr();
+
+  muillm_linear_activ_forward_placed_output(
+    norm_weights,
+    epsilon,
+    weights,
+    activ,
+    mul_bias,
+    add_bias,
+    residual,
+    x,
+    output_ptr);
 
   return y;
 }
