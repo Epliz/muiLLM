@@ -184,6 +184,12 @@ class MuiParallelMistralAttention(MuiModule):
         if (bsz == 1) and (q_len == 1) and all_ones_mask and (query_states[0].dtype == torch.float16):
             #
             attn_outputs = mui_parallel_causally_decode(query_states, key_states, value_states)
+
+            # from shape [B, num_q_heads, T, embed_dim], go to [B, T, num_q_heads, embed_dim]
+            # then from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
+
+            # q_len is 1 so we can remove the transposition
+            attn_outputs = [attn_output.reshape(bsz, q_len, self.tp_hidden_size) for attn_output in attn_outputs]
         else:
             attn_outputs = []
             for d in range(num_head_groups):
@@ -220,11 +226,11 @@ class MuiParallelMistralAttention(MuiModule):
                         f" {attn_output.size()}"
                     )
                 
-                attn_outputs.append(attn_output)
+                # from shape [B, num_q_heads, T, embed_dim], go to [B, T, num_q_heads, embed_dim]
+                # then from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
+                attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, self.tp_hidden_size)
 
-        # from shape [B, num_q_heads, T, embed_dim], go to [B, T, num_q_heads, embed_dim]
-        # then from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
-        attn_outputs = [attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, self.tp_hidden_size) for attn_output in attn_outputs]
+                attn_outputs.append(attn_output)
 
         attn_outputs = self.o_proj.parallel_forward(attn_outputs, residual=residual)
 
