@@ -65,5 +65,5 @@ setup(
     cmdclass={
         'build_ext': NinjaBuildExtension
     },
-    install_requires=["torch", "transformers==4.39.2"],
+    install_requires=["torch", "transformers==4.40.0"],
     version=get_version("muillm/__init__.py"))
