@@ -10,9 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from muillm.engineconfig import MuiEngineConfig
-from transformers.models.mistral.modeling_mistral import MistralMLP
-from transformers.models.llama.modeling_llama import LlamaRMSNorm
-from transformers.models.mistral.modeling_mistral import MistralRMSNorm
+from transformers.models.mistral.modeling_mistral import MistralMLP, MistralRMSNorm
+from transformers.models.llama.modeling_llama import LlamaMLP, LlamaRMSNorm
 
 from muillm.layers.rmsnorm import _MuiRMSNorm
 import muillm_ext
@@ -82,7 +81,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
         self.method = _MuiParallelGateUpSiLUMethod.GATEUPSILU_FUSED
 
     @staticmethod
-    def replace(prev_module: Union[MistralMLP, MuiGateUpDownMLP], engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiGateUpDownMLP":
+    def replace(prev_module: Union[LlamaMLP, MistralMLP, MuiGateUpDownMLP], engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiGateUpDownMLP":
         dtype=prev_module.gate_proj.weight.dtype
         device=prev_module.gate_proj.weight.device
 
@@ -102,6 +101,14 @@ class MuiParallelGateUpDownMLP(MuiModule):
             normalize = prev_layernorm_module is not None
             variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
             norm_weights = prev_layernorm_module.weight if normalize else None
+        elif isinstance(prev_module, LlamaMLP):
+            hidden_size = prev_module.hidden_size
+            intermediate_size = prev_module.intermediate_size
+            activation_function = prev_module.act_fn
+
+            normalize = prev_layernorm_module is not None
+            variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
+            norm_weights = prev_layernorm_module.weight if normalize else None
         else:
             raise ValueError(f"Unsupported replacement: {prev_module.__class__.__name__}")
 
@@ -111,7 +118,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
         return new_module
 
-    def copy_module(self, prev_module: Union[MistralMLP, MuiGateUpDownMLP], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
+    def copy_module(self, prev_module: Union[LlamaMLP, MistralMLP, MuiGateUpDownMLP], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
         self.gate_proj.copy_module(prev_module.gate_proj)
         self.up_proj.copy_module(prev_module.up_proj)
 
@@ -120,6 +127,9 @@ class MuiParallelGateUpDownMLP(MuiModule):
                 raise ValueError("norm_weights should be None")
             norm_weights = prev_module.norm_weights
         elif isinstance(prev_module, MistralMLP):
+            # norm_weights need to be set in calling args if needed
+            pass
+        elif isinstance(prev_module, LlamaMLP):
             # norm_weights need to be set in calling args if needed
             pass
         else:

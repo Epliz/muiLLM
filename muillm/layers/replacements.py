@@ -17,7 +17,7 @@ from muillm.layers.models.mistral.model import MuiMistralModel, MuiMistralForCau
 from muillm.memorymanagement.gc import trigger_gc
 
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm, MistralSdpaAttention, MistralMLP, MistralDecoderLayer, MistralModel, MistralForCausalLM
-from transformers.models.llama.modeling_llama import LlamaRMSNorm
+from transformers.models.llama.modeling_llama import LlamaMLP, LlamaDecoderLayer, LlamaRMSNorm
 
 from muillm.layers.transformer.decoder import MuiDecoderLayer
 
@@ -28,8 +28,9 @@ _LAYER_REPLACEMENTS = {
     nn.Linear: MuiLinear,
 
     # We replace the full decoder all at once to avoid issues due to replacement order
-    # (e.g. replacing the MLP then the decoder)
+    # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
     MistralDecoderLayer : MuiDecoderLayer,
+    LlamaDecoderLayer : MuiDecoderLayer,
 
     # replacements for full models
     MistralModel : MuiMistralModel,
@@ -43,6 +44,7 @@ _TP_LAYER_REPLACEMENTS = {
     MuiMultiLinear: MuiParallelMultiLinear,
 
     MistralMLP: MuiParallelGateUpDownMLP,
+    LlamaMLP: MuiParallelGateUpDownMLP,
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
 
     # We replace the full decoder all at once to avoid issues due to replacement order

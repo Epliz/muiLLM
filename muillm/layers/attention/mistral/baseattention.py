@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 import warnings
 import torch
 import torch.nn as nn
@@ -8,6 +8,8 @@ import transformers.utils.logging as logging
 from transformers.cache_utils import Cache
 from transformers.models.mistral.configuration_mistral import MistralConfig
 from transformers.models.mistral.modeling_mistral import MistralAttention
+from transformers.models.llama.modeling_llama import LlamaAttention
+from transformers.models.llama.configuration_llama import LlamaConfig
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.module import MuiModule
@@ -24,7 +26,7 @@ class MuiMistralAttention(MuiModule):
     and "Generating Long Sequences with Sparse Transformers".
     """
 
-    def __init__(self, engine_config: MuiEngineConfig, config: MistralConfig, layer_idx: Optional[int] = None, device=None, dtype=None):
+    def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx: Optional[int] = None, device=None, dtype=None):
         super().__init__(engine_config=engine_config)
         self.config = config
         self.layer_idx = layer_idx
@@ -64,7 +66,7 @@ class MuiMistralAttention(MuiModule):
         )
 
     @staticmethod
-    def replace(prev_module: MistralAttention, engine_config: MuiEngineConfig) -> "MuiMistralAttention":
+    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig) -> "MuiMistralAttention":
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
@@ -88,6 +90,7 @@ class MuiMistralAttention(MuiModule):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,
@@ -117,7 +120,16 @@ class MuiMistralAttention(MuiModule):
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
 
-        query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(query_states, key_states, position_ids, kv_seq_len, value_states, past_key_value, cache_position)
+        query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+            query_states,
+            key_states,
+            position_ids,
+            position_embeddings,
+            kv_seq_len,
+            value_states,
+            past_key_value,
+            cache_position
+        )
 
         # at this point, we have the following shapes:
         #  q: [B, num_q_heads, T, embed_dim]

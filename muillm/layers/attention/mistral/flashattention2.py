@@ -1,6 +1,6 @@
 import math
 import inspect
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 import warnings
 import torch
 import torch.nn as nn
@@ -8,6 +8,7 @@ import torch.nn as nn
 import transformers.utils.logging as logging
 from transformers.cache_utils import Cache
 from transformers.models.mistral.modeling_mistral import MistralFlashAttention2
+from transformers.models.llama.modeling_llama import LlamaFlashAttention2
 from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
 
 from muillm.engineconfig import MuiEngineConfig
@@ -52,7 +53,7 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
     """
 
     @staticmethod
-    def replace(prev_module: MistralFlashAttention2, engine_config: MuiEngineConfig) -> "MuiMistralFlashAttention2":
+    def replace(prev_module: Union[LlamaFlashAttention2, MistralFlashAttention2], engine_config: MuiEngineConfig) -> "MuiMistralFlashAttention2":
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
@@ -82,6 +83,7 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,

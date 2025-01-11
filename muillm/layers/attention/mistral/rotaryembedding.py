@@ -123,8 +123,26 @@ class MuiMistralRotaryEmbedding(MuiModule):
             self.sin_cached[:seq_len].to(dtype=x.dtype),
         )
     
-    def apply_rotary_pos_emb_write_kv_cache(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor, kv_seq_len: int, v: Optional[torch.Tensor] = None, cache: Optional[Cache] = None, cache_position: Optional[torch.LongTensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        cos, sin = self.forward(k, seq_len=kv_seq_len)
+    def apply_rotary_pos_emb_write_kv_cache(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            position_ids: torch.Tensor,
+            position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]],
+            kv_seq_len: int,
+            v: Optional[torch.Tensor] = None,
+            cache: Optional[Cache] = None,
+            cache_position: Optional[torch.LongTensor] = None
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if position_embeddings is None:
+            cos, sin = self.forward(k, seq_len=kv_seq_len)
+        else:
+            cos, sin = position_embeddings
+            print("cos : ", cos.shape)
+            print("sin : ", sin.shape)
+            cos, sin = self.forward(k, seq_len=kv_seq_len)
+            print("r cos : ", cos.shape)
+            print("r sin : ", sin.shape)
 
         if self.dispatchable:
             if isinstance(cache, DynamicCache):
