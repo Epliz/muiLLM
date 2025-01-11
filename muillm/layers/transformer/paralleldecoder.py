@@ -77,6 +77,7 @@ class MuiParallelDecoderLayer(MuiModule):
         past_key_values: Optional[List[Cache]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        cache_positions: Optional[List[torch.LongTensor]] = None,
         all_ones_mask: Optional[bool] = None,
         **kwargs,
     ) -> Tuple[List[torch.FloatTensor], Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
@@ -125,6 +126,7 @@ class MuiParallelDecoderLayer(MuiModule):
             past_key_values=past_key_values,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            cache_positions=cache_positions,
             all_ones_mask=all_ones_mask,
             residual=residual,
         )
@@ -153,6 +155,7 @@ class MuiParallelDecoderLayer(MuiModule):
         past_key_values: Optional[List[Cache]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
         all_ones_mask: Optional[bool] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
@@ -164,6 +167,7 @@ class MuiParallelDecoderLayer(MuiModule):
                 past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
+                cache_positions=MuiParallelLinear._broadcast(self.engine_config, cache_position),
                 all_ones_mask=all_ones_mask,
                 **kwargs)
             

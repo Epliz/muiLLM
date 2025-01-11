@@ -53,6 +53,7 @@ class MuiDecoderLayer(MuiModule):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
         all_ones_mask: Optional[bool] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
@@ -90,6 +91,7 @@ class MuiDecoderLayer(MuiModule):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            cache_position=cache_position,
             all_ones_mask=all_ones_mask,
             residual=residual,
         )

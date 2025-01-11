@@ -123,7 +123,7 @@ class MuiMistralRotaryEmbedding(MuiModule):
             self.sin_cached[:seq_len].to(dtype=x.dtype),
         )
     
-    def apply_rotary_pos_emb_write_kv_cache(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor, kv_seq_len: int, v: Optional[torch.Tensor] = None, cache: Optional[Cache] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def apply_rotary_pos_emb_write_kv_cache(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor, kv_seq_len: int, v: Optional[torch.Tensor] = None, cache: Optional[Cache] = None, cache_position: Optional[torch.LongTensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         cos, sin = self.forward(k, seq_len=kv_seq_len)
 
         if self.dispatchable:
@@ -163,9 +163,7 @@ class MuiMistralRotaryEmbedding(MuiModule):
             value_states = v
 
         if cache is not None:
-            # TODO: bug here static cache not getting cache_position, need to get latest transformer library
-            #cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            cache_kwargs = {}
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = cache.update(key_states, v, self.layer_idx, cache_kwargs)
 
         return query_states, key_states, value_states

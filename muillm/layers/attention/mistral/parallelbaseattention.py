@@ -111,6 +111,7 @@ class MuiParallelMistralAttention(MuiModule):
         past_key_values: Optional[List[Cache]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_positions: Optional[List[torch.LongTensor]] = None,
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,
@@ -174,7 +175,7 @@ class MuiParallelMistralAttention(MuiModule):
             # do the rotary embeddings on each head group
             pos_ids = position_ids[d] if position_ids is not None else None
             past_key_value = past_key_values[d] if past_key_values is not None else None
-            query_states[d], key_states[d], value_states[d] = self.rotary_embs[d].apply_rotary_pos_emb_write_kv_cache(query_states[d], key_states[d], pos_ids, kv_seq_len, value_states[d], past_key_value)
+            query_states[d], key_states[d], value_states[d] = self.rotary_embs[d].apply_rotary_pos_emb_write_kv_cache(query_states[d], key_states[d], pos_ids, kv_seq_len, value_states[d], past_key_value, cache_positions[d])
 
         # at this point, we have the following shapes:
         #  q: [B, num_q_heads, T, embed_dim]
@@ -206,14 +207,9 @@ class MuiParallelMistralAttention(MuiModule):
                         f" {attn_weights.size()}"
                     )
 
-                if attention_masks is not None:
-                    attention_mask = attention_masks[d]
-                    if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                        raise ValueError(
-                            f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                        )
-
-                    attn_weights = attn_weights + attention_mask
+                if attention_masks is not None:  # no matter the length, we just slice it
+                    causal_mask = attention_masks[d][:, :, :, : key_states.shape[-2]]
+                    attn_weights = attn_weights + causal_mask
 
                 # upcast attention to fp32
                 attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_state.dtype)
@@ -246,6 +242,7 @@ class MuiParallelMistralAttention(MuiModule):
         past_key_value: Optional[List[Cache]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[List[Cache]]]:
@@ -259,6 +256,7 @@ class MuiParallelMistralAttention(MuiModule):
                 past_key_value=past_key_value,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
+                cache_positions=MuiParallelLinear._broadcast(self.engine_config, cache_position),
                 all_ones_mask=all_ones_mask,
                 residual=residual,
             )
