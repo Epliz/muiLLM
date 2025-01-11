@@ -8,9 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from muillm.engineconfig import MuiEngineConfig
-from transformers.models.mistral.modeling_mistral import MistralMLP
-from transformers.models.llama.modeling_llama import LlamaRMSNorm
-from transformers.models.mistral.modeling_mistral import MistralRMSNorm
+from transformers.models.llama.modeling_llama import LlamaMLP, LlamaRMSNorm
+from transformers.models.mistral.modeling_mistral import MistralMLP, MistralRMSNorm
 
 from muillm.layers.linear import MuiLinear
 
@@ -78,7 +77,7 @@ class MuiGateUpDownMLP(MuiModule):
         self.method = _MuiGateUpSiLUMethod.GATEUPSILU_FUSED
 
     @staticmethod
-    def replace(prev_module: MistralMLP, engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiGateUpDownMLP":
+    def replace(prev_module: Union[LlamaMLP, MistralMLP], engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiGateUpDownMLP":
         dtype=prev_module.gate_proj.weight.dtype
         device=prev_module.gate_proj.weight.device
 
@@ -95,7 +94,7 @@ class MuiGateUpDownMLP(MuiModule):
 
         return new_module
 
-    def copy_module(self, prev_module: MistralMLP, norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
+    def copy_module(self, prev_module: Union[LlamaMLP, MistralMLP], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
         self.gate_proj.copy_module(prev_module.gate_proj)
         self.up_proj.copy_module(prev_module.up_proj)
 

@@ -10,6 +10,11 @@
 
 #include <iostream>
 
+
+#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
+#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
+
 #define THREADS_PER_BLOCK 256
 
 template <typename T>
@@ -32,12 +37,18 @@ static inline T* __device__ addr(T* p, unsigned index) {
 // 1) check layouts
 // 2) optimize array addressing in loops
 
+typedef enum muillm_rotary_cache_layout {
+  // [S, E] where S is the size of the cache, E embedding size
+  ROTARY_CACHE_SE_LAYOUT = 0,
+  // [B, T, E] where B is the input batch size, T number of tokens in the input, E embedding size
+  ROTARY_CACHE_BTE_LAYOUT = 1
+} muillm_rotary_cache_layout_t;
 
 // expected block dimensions: [x=num_q_heads+num_k_heads, y=T, z=B]
 void __global__ apply_rope_kernel_no_cache(
   const uint64_t* __restrict__ position_ids, // shape [B, T]
-  const half* __restrict__ cos_cached, // shape [S, embed_dim]
-  const half* __restrict__ sin_cached, // shape [S, embed_dim]
+  const half* __restrict__ cos_cached, // shape [S, embed_dim] or [B, T, embed_dim]
+  const half* __restrict__ sin_cached, // shape [S, embed_dim] or [B, T, embed_dim]
   const half* __restrict__ q_in, // shape [B, num_q_heads, T, embed_dim]
   const half* __restrict__ k_in, // shape [B, num_k_heads, T, embed_dim]
   half* __restrict__ q_out, // shape [B, num_q_heads, T, embed_dim]
@@ -45,7 +56,6 @@ void __global__ apply_rope_kernel_no_cache(
   // tensor dimension sizes
   unsigned B, // batch size
   unsigned T, // num new tokens
-  unsigned S, // number of rotary embeddings in the rotary cache
   unsigned num_q_heads, // number of heads for q
   unsigned num_k_heads, // number of heads for k
   unsigned embed_dim, // half of the size of embeddings in each head
@@ -56,8 +66,10 @@ void __global__ apply_rope_kernel_no_cache(
   // k strides
   unsigned k_in_batch_stride,
   unsigned k_in_head_stride,
-  unsigned k_in_tok_stride
+  unsigned k_in_tok_stride,
   // v strides?
+  //
+  muillm_rotary_cache_layout_t cache_layout
 ) {
     // one block does one head of a new token
     unsigned head_idx = blockIdx.x;
@@ -101,9 +113,17 @@ void __global__ apply_rope_kernel_no_cache(
     }
     // TODO: v cache case
 
-    // index for where to read into the cos/sin caches, if we need to
+    // index for where to read into the cos/sin caches
     // (try to trigger the read before the cache copy - need to check if done by the compiler)
-    uint64_t position_id = tok_idx < T ? position_ids[pos_idx] : 0;
+    uint64_t position_id;
+
+    // there are two possible layouts for the cache
+    if (cache_layout == ROTARY_CACHE_SE_LAYOUT) {
+      position_id = tok_idx < T ? position_ids[pos_idx] : 0;
+    } else {
+      // ROTARY_CACHE_BTE_LAYOUT
+      position_id = tok_idx < T ? pos_idx : 0;
+    }
 
     // realign the pointer to where we are supposed to write out if needed
 
@@ -185,7 +205,6 @@ static inline std::vector<at::Tensor> muillm_rope_forward_no_cache_cuda(
 
   unsigned B = q_sizes[0];
   unsigned T = q_sizes[2];
-  unsigned S = cache_sizes[0];
   unsigned num_q_heads = q_sizes[1];
   unsigned num_k_heads = k_sizes[1];
   unsigned embed_dim = q_sizes[3];
@@ -199,8 +218,18 @@ static inline std::vector<at::Tensor> muillm_rope_forward_no_cache_cuda(
   unsigned k_in_head_stride = k_strides[1];
   unsigned k_in_tok_stride = k_strides[2];
 
-  const dim3 threads_per_blocks = dim3(THREADS_PER_BLOCK);
+  muillm_rotary_cache_layout_t cache_layout;
 
+  auto cache_dim = cache_sizes.size();
+  if (cache_dim == 2) {
+    cache_layout = ROTARY_CACHE_SE_LAYOUT;
+  } else if (cache_dim == 3) {
+    cache_layout = ROTARY_CACHE_BTE_LAYOUT;
+  } else {
+    TORCH_CHECK(false, "Unknown rotary cache layout");
+  }
+
+  const dim3 threads_per_blocks = dim3(THREADS_PER_BLOCK);
 
   // expected block dimensions: [x=num_q_heads+num_k_heads, y=max(PREV_T, T), z=B]
   const dim3 num_blocks = dim3(num_q_heads + num_k_heads, T, B);
@@ -216,7 +245,6 @@ static inline std::vector<at::Tensor> muillm_rope_forward_no_cache_cuda(
     // tensor dimension sizes
     B,
     T,
-    S,
     num_q_heads,
     num_k_heads,
     embed_dim,
@@ -227,7 +255,9 @@ static inline std::vector<at::Tensor> muillm_rope_forward_no_cache_cuda(
     // k strides
     k_in_batch_stride,
     k_in_head_stride,
-    k_in_tok_stride
+    k_in_tok_stride,
+    // cache layout
+    cache_layout
   );
 
   return {q_out, k_out};
@@ -236,8 +266,8 @@ static inline std::vector<at::Tensor> muillm_rope_forward_no_cache_cuda(
 // expected block dimensions: [x=num_q_heads+num_k_heads+num_v_heads, y=max(PREV_T, T), z=B]
 void __global__ apply_rope_kernel_write_cache(
   const uint64_t* __restrict__ position_ids, // shape [B, T]
-  const half* __restrict__ cos_cached, // shape [S, embed_dim]
-  const half* __restrict__ sin_cached, // shape [S, embed_dim]
+  const half* __restrict__ cos_cached, // shape [S, embed_dim] or [B, T, embed_dim]
+  const half* __restrict__ sin_cached, // shape [S, embed_dim] or [B, T, embed_dim]
   const half* __restrict__ q_in, // shape [B, num_q_heads, T, embed_dim]
   const half* __restrict__ k_in, // shape [B, num_k_heads, T, embed_dim]
   const half* __restrict__ v_in, // shape [B, num_v_heads, T, embed_dim]
@@ -251,7 +281,6 @@ void __global__ apply_rope_kernel_write_cache(
   // tensor dimension sizes
   unsigned B, // batch size
   unsigned T, // num new tokens
-  unsigned S, // number of rotary embeddings in the rotary cache
   unsigned PREV_T, // number of tokens previously in the KV cache
   unsigned num_q_heads, // number of heads for q
   unsigned num_k_heads, // number of heads for k
@@ -268,7 +297,9 @@ void __global__ apply_rope_kernel_write_cache(
   // v strides
   unsigned v_in_batch_stride,
   unsigned v_in_head_stride,
-  unsigned v_in_tok_stride
+  unsigned v_in_tok_stride,
+  //
+  muillm_rotary_cache_layout_t cache_layout
 ) {
     // one block does one head of a new token
     unsigned head_idx = blockIdx.x;
@@ -331,7 +362,15 @@ void __global__ apply_rope_kernel_write_cache(
 
     // index for where to read into the cos/sin caches, if we need to
     // (try to trigger the read before the cache copy - need to check if done by the compiler)
-    uint64_t position_id = tok_idx < T ? position_ids[pos_idx] : 0;
+    uint64_t position_id;
+
+    // there are two possible layouts for the cache
+    if (cache_layout == ROTARY_CACHE_SE_LAYOUT) {
+      position_id = tok_idx < T ? position_ids[pos_idx] : 0;
+    } else {
+      // ROTARY_CACHE_BTE_LAYOUT
+      position_id = tok_idx < T ? pos_idx : 0;
+    }
 
     // realign the pointer to where we are supposed to write out if needed
 
@@ -481,7 +520,6 @@ static inline std::vector<at::Tensor> muillm_rope_forward_write_dynamic_cache_cu
 
   unsigned B = q_sizes[0];
   unsigned T = q_sizes[2];
-  unsigned S = cache_sizes[0];
   unsigned PREV_T = prev_k_cache_sizes[2];
   unsigned num_q_heads = q_sizes[1];
   unsigned num_k_heads = k_sizes[1];
@@ -509,6 +547,17 @@ static inline std::vector<at::Tensor> muillm_rope_forward_write_dynamic_cache_cu
   unsigned v_in_head_stride = v_strides[1];
   unsigned v_in_tok_stride = v_strides[2];
 
+  muillm_rotary_cache_layout_t cache_layout;
+
+  auto cache_dim = cache_sizes.size();
+  if (cache_dim == 2) {
+    cache_layout = ROTARY_CACHE_SE_LAYOUT;
+  } else if (cache_dim == 3) {
+    cache_layout = ROTARY_CACHE_BTE_LAYOUT;
+  } else {
+    TORCH_CHECK(false, "Unknown rotary cache layout");
+  }
+
   const dim3 threads_per_blocks = dim3(THREADS_PER_BLOCK);
 
 
@@ -532,7 +581,6 @@ static inline std::vector<at::Tensor> muillm_rope_forward_write_dynamic_cache_cu
     // tensor dimension sizes
     B,
     T,
-    S,
     PREV_T,
     num_q_heads,
     num_k_heads,
@@ -549,15 +597,13 @@ static inline std::vector<at::Tensor> muillm_rope_forward_write_dynamic_cache_cu
     // v strides
     v_in_batch_stride,
     v_in_head_stride,
-    v_in_tok_stride
+    v_in_tok_stride,
+    // cache layout
+    cache_layout
   );
 
   return {q_out, k_out, k_cache_out, v_cache_out};
 }
-
-#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
 std::vector<at::Tensor> muillm_rope_forward_no_cache(
     torch::Tensor& position_ids,

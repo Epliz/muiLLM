@@ -1,4 +1,7 @@
 
+from muillm.layers.attention.mistral.rotaryembedding import MuiMistralRotaryEmbedding
+from muillm.layers.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
+from muillm.layers.models.llama.parallelmodel import MuiParallelLlamaForCausalLM, MuiParallelLlamaModel
 from muillm.layers.models.mistral.parallelmodel import MuiParallelMistralForCausalLM, MuiParallelMistralModel
 from muillm.layers.multilinear import MuiMultiLinear
 from muillm.layers.parallellinear import MuiParallelLinear
@@ -16,8 +19,8 @@ from muillm.layers.attention.mistral.sdpaattention import MuiMistralSdpaAttentio
 from muillm.layers.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
 from muillm.memorymanagement.gc import trigger_gc
 
-from transformers.models.mistral.modeling_mistral import MistralRMSNorm, MistralSdpaAttention, MistralMLP, MistralDecoderLayer, MistralModel, MistralForCausalLM
-from transformers.models.llama.modeling_llama import LlamaRMSNorm
+from transformers.models.mistral.modeling_mistral import MistralRotaryEmbedding, MistralRMSNorm, MistralSdpaAttention, MistralMLP, MistralDecoderLayer, MistralModel, MistralForCausalLM
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaMLP, LlamaDecoderLayer, LlamaRMSNorm, LlamaModel, LlamaForCausalLM
 
 from muillm.layers.transformer.decoder import MuiDecoderLayer
 
@@ -27,27 +30,44 @@ from muillm.layers.transformer.decoder import MuiDecoderLayer
 _LAYER_REPLACEMENTS = {
     nn.Linear: MuiLinear,
 
+    MistralRMSNorm: MuiRMSNorm,
+    LlamaRMSNorm: MuiRMSNorm,
+
+    MistralRotaryEmbedding: MuiMistralRotaryEmbedding,
+    LlamaRotaryEmbedding: MuiMistralRotaryEmbedding,
+
     # We replace the full decoder all at once to avoid issues due to replacement order
-    # (e.g. replacing the MLP then the decoder)
+    # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
     MistralDecoderLayer : MuiDecoderLayer,
+    LlamaDecoderLayer : MuiDecoderLayer,
 
     # replacements for full models
     MistralModel : MuiMistralModel,
     MistralForCausalLM : MuiMistralForCausalLM,
+    LlamaModel : MuiLlamaModel,
+    LlamaForCausalLM : MuiLlamaForCausalLM,
 }
 
 _TP_LAYER_REPLACEMENTS = {
     nn.Linear: MuiParallelLinear,
     MuiLinear: MuiParallelLinear,
 
+    MistralRMSNorm: MuiRMSNorm,
+    LlamaRMSNorm: MuiRMSNorm,
+
+    MistralRotaryEmbedding: MuiMistralRotaryEmbedding,
+    LlamaRotaryEmbedding: MuiMistralRotaryEmbedding,
+
     MuiMultiLinear: MuiParallelMultiLinear,
 
     MistralMLP: MuiParallelGateUpDownMLP,
+    LlamaMLP: MuiParallelGateUpDownMLP,
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
 
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. replacing the MLP then the decoder)
     MistralDecoderLayer : MuiParallelDecoderLayer,
+    LlamaDecoderLayer : MuiParallelDecoderLayer,
     MuiDecoderLayer: MuiParallelDecoderLayer,
 
     # replacements for full layers
@@ -55,6 +75,11 @@ _TP_LAYER_REPLACEMENTS = {
     MistralForCausalLM : MuiParallelMistralForCausalLM,
     MuiMistralModel : MuiParallelMistralModel,
     MuiMistralForCausalLM : MuiParallelMistralForCausalLM,
+
+    LlamaModel : MuiParallelLlamaModel,
+    LlamaForCausalLM : MuiParallelLlamaForCausalLM,
+    MuiLlamaModel : MuiParallelLlamaModel,
+    MuiLlamaForCausalLM : MuiParallelLlamaForCausalLM,
 }
 
 def _recursive_setattr(model: nn.Module, module_name: str, new_module: nn.Module):

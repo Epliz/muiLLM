@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 import warnings
 from muillm.layers.module import MuiModule
 import torch
@@ -11,8 +11,8 @@ from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
 from muillm.layers.rmsnorm import MuiRMSNorm
 from muillm.layers.multilinear import MuiMultiLinear
 
-from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralAttention, MistralSdpaAttention, MISTRAL_ATTENTION_CLASSES
-
+from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralSdpaAttention
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaSdpaAttention
 
 class MuiDecoderLayer(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, qkv_proj: MuiMultiLinear, self_attn: MuiMistralAttention, mlp: MuiGateUpDownMLP):
@@ -24,13 +24,13 @@ class MuiDecoderLayer(MuiModule):
         self.mlp = mlp
 
     @staticmethod
-    def replace(prev_module: MistralDecoderLayer, engine_config: MuiEngineConfig) -> "MuiDecoderLayer":
+    def replace(prev_module: Union[LlamaDecoderLayer, MistralDecoderLayer], engine_config: MuiEngineConfig) -> "MuiDecoderLayer":
         prev_attn = prev_module.self_attn
 
         input_layernorm = prev_module.input_layernorm
         qkv_proj = None
         self_attn = None
-        if isinstance(prev_attn, MistralSdpaAttention):
+        if isinstance(prev_attn, MistralSdpaAttention) or isinstance(prev_attn, LlamaSdpaAttention):
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
             qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm)
             self_attn = MuiMistralSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config)
@@ -53,6 +53,8 @@ class MuiDecoderLayer(MuiModule):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
         all_ones_mask: Optional[bool] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
@@ -90,6 +92,8 @@ class MuiDecoderLayer(MuiModule):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
             all_ones_mask=all_ones_mask,
             residual=residual,
         )

@@ -1,6 +1,6 @@
 import math
 import inspect
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 import warnings
 import torch
 import torch.nn as nn
@@ -8,6 +8,8 @@ import torch.nn as nn
 import transformers.utils.logging as logging
 from transformers.cache_utils import Cache
 from transformers.models.mistral.modeling_mistral import MistralFlashAttention2
+from transformers.models.llama.modeling_llama import LlamaFlashAttention2
+from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.attention.mistral.rotaryembedding import apply_rotary_pos_emb
@@ -51,11 +53,16 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
     """
 
     @staticmethod
-    def replace(prev_module: MistralFlashAttention2, engine_config: MuiEngineConfig) -> "MuiMistralFlashAttention2":
+    def replace(prev_module: Union[LlamaFlashAttention2, MistralFlashAttention2], engine_config: MuiEngineConfig) -> "MuiMistralFlashAttention2":
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
-        new_module = MuiMistralFlashAttention2(engine_config=engine_config, config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
+        layer_idx=prev_module.layer_idx
+        config=prev_module.config
+
+        rotary_emb = MuiMistralAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
+
+        new_module = MuiMistralFlashAttention2(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 
@@ -80,17 +87,18 @@ class MuiMistralFlashAttention2(MuiMistralAttention):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        if "padding_mask" in kwargs:
-            warnings.warn(
-                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+        if isinstance(past_key_value, StaticCache):
+            raise ValueError(
+                "`static` cache implementation is not compatible with `attn_implementation==flash_attention_2` "
+                "make sure to use `sdpa` in the mean time, and open an issue at https://github.com/huggingface/transformers"
             )
 
-            # overwrite attention_mask with padding_mask
-            attention_mask = kwargs.pop("padding_mask")
         bsz, q_len, _ = query_states.size()
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
