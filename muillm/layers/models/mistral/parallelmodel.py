@@ -2,15 +2,15 @@
 # and modified to remove some GPU synchronization points
 
 from typing import List, Optional, Tuple, Union
-from muillm.layers.models.mistral.model import MuiMistralForCausalLM, MuiMistralModel, _prepare_4d_causal_attention_mask_for_sdpa
+from muillm.layers.models.mistral.model import MuiMistralForCausalLM, MuiMistralModel, _ignore_causal_mask_sdpa
 from muillm.layers.parallellinear import MuiParallelLinear
 import torch
 import torch.nn as nn
 
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.modeling_attn_mask_utils import AttentionMaskConverter, _prepare_4d_causal_attention_mask
+from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
+from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.models.mistral.configuration_mistral import MistralConfig
 from transformers.models.mistral.modeling_mistral import MistralPreTrainedModel, MistralModel, MistralForCausalLM, MistralRMSNorm, MistralSdpaAttention, MistralMLP, MistralDecoderLayer, MISTRAL_INPUTS_DOCSTRING, MISTRAL_START_DOCSTRING
@@ -74,12 +74,13 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[List[Cache]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         all_ones_mask: Optional[bool] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -107,7 +108,8 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
                 )
                 use_cache = False
 
-        past_key_values_length = 0
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache:
             no_previous_cache = (past_key_values is None )
@@ -120,52 +122,20 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
                 # one cache per GPU
                 past_key_values = [DynamicCache.from_legacy_cache(past_key_values[i]) for i, d in enumerate(self.engine_config.devices)]
 
-            past_key_values_length = past_key_values[0].get_usable_length(seq_length)
+        past_seen_tokens = past_key_values[0].get_seq_length() if past_key_values is not None else 0
+        tot_seq_len = past_seen_tokens + inputs_embeds.shape[1]
+
+        if cache_position is None:
+            cache_position = torch.arange(
+                past_seen_tokens, tot_seq_len, device=inputs_embeds.device
+            )
 
         if position_ids is None:
-            device = input_ids.device if input_ids is not None else inputs_embeds.device
-            position_ids = torch.arange(
-                past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
-            )
-            position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
-        else:
-            position_ids = position_ids.view(-1, seq_length).long()
+            position_ids = cache_position.unsqueeze(0)
 
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
-
-        if attention_mask is not None and self._attn_implementation == "flash_attention_2" and use_cache:
-            is_padding_right = attention_mask[:, -1].sum().item() != batch_size
-            if is_padding_right:
-                raise ValueError(
-                    "You are attempting to perform batched generation with padding_side='right'"
-                    " this may lead to unexpected behaviour for Flash Attention version of Mistral. Make sure to "
-                    " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
-                )
-
-        if self._attn_implementation == "flash_attention_2":
-            # 2d mask is passed through the layers
-            attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
-        elif self._attn_implementation == "sdpa" and not output_attentions:
-            # output_attentions=True can not be supported when using SDPA, and we fall back on
-            # the manual implementation that requires a 4D causal mask in all cases.
-            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                attention_mask,
-                (batch_size, seq_length),
-                inputs_embeds,
-                past_key_values_length,
-                all_ones_mask=all_ones_mask,
-            )
-        else:
-            # 4d mask is passed through the layers
-            # TODO: replace this one to avoid  sync? (it seems like it doesn't cause syncs)
-            attention_mask = _prepare_4d_causal_attention_mask(
-                attention_mask,
-                (batch_size, seq_length),
-                inputs_embeds,
-                past_key_values_length,
-                sliding_window=self.config.sliding_window,
-            )
+        causal_mask = self._update_causal_mask(
+            attention_mask, inputs_embeds, cache_position, past_key_values, use_cache, output_attentions, all_ones_mask
+        )
 
         hidden_states = inputs_embeds
 
@@ -174,8 +144,9 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_caches = None
     
-        attention_mask=MuiParallelLinear._broadcast(self.engine_config, attention_mask)
+        causal_masks=MuiParallelLinear._broadcast(self.engine_config, causal_mask)
         position_ids=MuiParallelLinear._broadcast(self.engine_config, position_ids)
+        cache_positions=MuiParallelLinear._broadcast(self.engine_config, cache_position)
 
         for decoder_layer in self.layers:
             if output_hidden_states:
@@ -185,21 +156,23 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.parallel_forward,
                     hidden_states,
-                    attention_mask,
+                    causal_masks,
                     position_ids,
                     past_key_values,
                     output_attentions,
                     use_cache,
-                    all_ones_mask=all_ones_mask,
+                    cache_positions,
+                    all_ones_mask,
                 )
             else:
                 layer_outputs = decoder_layer.parallel_forward(
                     hidden_states,
-                    attention_mask=attention_mask,
+                    attention_masks=causal_masks,
                     position_ids=position_ids,
                     past_key_values=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
+                    cache_positions=cache_positions,
                     all_ones_mask=all_ones_mask,
                 )
 
@@ -211,6 +184,7 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
+
         # keep the output from GPU0
         hidden_states = hidden_states[0]
 
@@ -220,18 +194,128 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        next_cache = None
+        next_caches = None
         if use_cache:
             next_caches = [next_decoder_cache.to_legacy_cache() for next_decoder_cache in next_decoder_caches] if use_legacy_cache else next_decoder_caches
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+            return tuple(v for v in [hidden_states, next_caches, all_hidden_states, all_self_attns] if v is not None)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_caches,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
+
+    def _update_causal_mask(
+        self,
+        attention_mask: torch.Tensor,
+        input_tensor: torch.Tensor,
+        cache_position: torch.Tensor,
+        past_key_values: List[Cache],
+        use_cache: bool,
+        output_attentions: bool,
+        all_ones_mask: Optional[bool] = None,
+    ):
+        # TODO: As of torch==2.2.0, the `attention_mask` passed to the model in `generate` is 2D and of dynamic length even when the static
+        # KV cache is used. This is an issue for torch.compile which then recaptures cudagraphs at each decode steps due to the dynamic shapes.
+        # (`recording cudagraph tree for symint key 13`, etc.), which is VERY slow. A workaround is `@torch.compiler.disable`, but this prevents using
+        # `fullgraph=True`. See more context in https://github.com/huggingface/transformers/pull/29114
+
+        if self._attn_implementation == "flash_attention_2":
+            if attention_mask is not None and use_cache:
+                is_padding_right = attention_mask[:, -1].sum().item() != input_tensor.size()[0]
+                if is_padding_right:
+                    raise ValueError(
+                        "You are attempting to perform batched generation with padding_side='right'"
+                        " this may lead to unexpected behaviour for Flash Attention version of Mistral. Make sure to "
+                        " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
+                    )
+            if attention_mask is not None and 0.0 in attention_mask:
+                return attention_mask
+            return None
+
+        # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
+        # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
+        # to infer the attention mask.
+
+        # cache_position must be valid here no matter which cache we use
+        past_seen_tokens = cache_position[0] if past_key_values[0] is not None else 0
+        using_static_cache = isinstance(past_key_values[0], StaticCache)
+        using_sliding_window_cache = isinstance(past_key_values[0], SlidingWindowCache)
+
+        if (
+            self.config._attn_implementation == "sdpa"
+            and not (using_static_cache or using_sliding_window_cache)
+            and not output_attentions
+        ):
+            if _ignore_causal_mask_sdpa(
+                attention_mask,
+                inputs_embeds=input_tensor,
+                past_key_values_length=past_seen_tokens,
+                sliding_window=self.config.sliding_window,
+                is_training=self.training,
+                all_ones_mask=all_ones_mask,
+            ):
+                return None
+
+        dtype, device = input_tensor.dtype, input_tensor.device
+        min_dtype = torch.finfo(dtype).min
+        sequence_length = input_tensor.shape[1]
+        # SlidingWindowCache
+        if using_sliding_window_cache:
+            target_length = max(sequence_length, self.config.sliding_window)
+        # StaticCache
+        elif using_static_cache:
+            target_length = past_key_values[0].get_max_length()
+        # DynamicCache or no cache
+        else:
+            target_length = (
+                attention_mask.shape[-1]
+                if isinstance(attention_mask, torch.Tensor)
+                else past_seen_tokens + sequence_length + 1
+            )
+
+        if attention_mask is not None and attention_mask.dim() == 4:
+            # in this case we assume that the mask comes already in inverted form and requires no inversion or slicing
+            if attention_mask.max() != 0:
+                raise ValueError("Custom 4D attention mask should be passed in inverted form with max==0`")
+            causal_mask = attention_mask
+        else:
+            causal_mask = torch.full(
+                (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device
+            )
+            exclude_mask = torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
+            if self.config.sliding_window is not None:
+                if not using_sliding_window_cache or sequence_length > self.config.sliding_window:
+                    exclude_mask.bitwise_or_(
+                        torch.arange(target_length, device=device)
+                        <= (cache_position.reshape(-1, 1) - self.config.sliding_window)
+                    )
+            causal_mask *= exclude_mask
+            causal_mask = causal_mask[None, None, :, :].expand(input_tensor.shape[0], 1, -1, -1)
+            if attention_mask is not None:
+                causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
+                if attention_mask.dim() == 2:
+                    mask_length = attention_mask.shape[-1]
+                    padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :]
+                    padding_mask = padding_mask == 0
+                    causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
+                        padding_mask, min_dtype
+                    )
+
+        if (
+            self.config._attn_implementation == "sdpa"
+            and attention_mask is not None
+            and attention_mask.device.type == "cuda"
+            and not output_attentions
+        ):
+            # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
+            # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
+            # Details: https://github.com/pytorch/pytorch/issues/110213
+            causal_mask = AttentionMaskConverter._unmask_unattended(causal_mask, min_dtype)
+
+        return causal_mask
 
 
 class MuiParallelMistralForCausalLM(MistralPreTrainedModel):
@@ -278,13 +362,14 @@ class MuiParallelMistralForCausalLM(MistralPreTrainedModel):
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[List[Cache]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         all_ones_mask: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -333,6 +418,7 @@ class MuiParallelMistralForCausalLM(MistralPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            cache_position=cache_position,
             all_ones_mask=self.all_ones_mask
         )
 
@@ -366,39 +452,25 @@ class MuiParallelMistralForCausalLM(MistralPreTrainedModel):
         )
 
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        use_cache=True,
+        **kwargs
     ):
-        # Omit tokens covered by past_key_values
+        # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
+        # Exception 1: when passing input_embeds, input_ids may be missing entries
+        # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
         if past_key_values is not None:
-            if isinstance(past_key_values[0], Cache):
-                cache_length = past_key_values[0].get_seq_length()
-                past_length = past_key_values[0].seen_tokens
-                max_cache_length = past_key_values[0].get_max_length()
-            else:
-                cache_length = past_length = past_key_values[0][0][0].shape[2]
-                max_cache_length = None
+            if inputs_embeds is not None:  # Exception 1
+                input_ids = input_ids[:, -cache_position.shape[0] :]
+            elif input_ids.shape[1] != cache_position.shape[0]:  # Default case (the "else", a no op, is Exception 2)
+                input_ids = input_ids[:, cache_position]
 
-            # Keep only the unprocessed tokens:
-            # 1 - If the length of the attention_mask exceeds the length of input_ids, then we are in a setting where
-            # some of the inputs are exclusively passed as part of the cache (e.g. when passing input_embeds as
-            # input)
-            if attention_mask is not None and attention_mask.shape[1] > input_ids.shape[1]:
-                input_ids = input_ids[:, -(attention_mask.shape[1] - past_length) :]
-            # 2 - If the past_length is smaller than input_ids', then input_ids holds all input tokens. We can discard
-            # input_ids based on the past_length.
-            elif past_length < input_ids.shape[1]:
-                input_ids = input_ids[:, past_length:]
-            # 3 - Otherwise (past_length >= input_ids.shape[1]), let's assume input_ids only has unprocessed tokens.
-
-            # If we are about to go beyond the maximum cache length, we need to crop the input attention mask.
-            if (
-                max_cache_length is not None
-                and attention_mask is not None
-                and cache_length + input_ids.shape[1] > max_cache_length
-            ):
-                attention_mask = attention_mask[:, -max_cache_length:]
-
-        position_ids = kwargs.get("position_ids", None)
         if attention_mask is not None and position_ids is None:
             # create position_ids on the fly for batch generation
             position_ids = attention_mask.long().cumsum(-1) - 1
@@ -407,17 +479,18 @@ class MuiParallelMistralForCausalLM(MistralPreTrainedModel):
                 position_ids = position_ids[:, -input_ids.shape[1] :]
 
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
+        if inputs_embeds is not None and cache_position[0] == 0:
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
-            model_inputs = {"input_ids": input_ids}
+            model_inputs = {"input_ids": input_ids.contiguous()}  # `contiguous()` needed for compilation use cases
 
         model_inputs.update(
             {
                 "position_ids": position_ids,
+                "cache_position": cache_position,
                 "past_key_values": past_key_values,
-                "use_cache": kwargs.get("use_cache"),
-                "attention_mask": attention_mask
+                "use_cache": use_cache,
+                "attention_mask": attention_mask,
             }
         )
 
@@ -427,12 +500,3 @@ class MuiParallelMistralForCausalLM(MistralPreTrainedModel):
             model_inputs["all_ones_mask"] = self.all_ones_mask
 
         return model_inputs
-
-    @staticmethod
-    def _reorder_cache(past_key_values, beam_idx):
-        reordered_past = ()
-        for layer_past in past_key_values:
-            reordered_past += (
-                tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past),
-            )
-        return reordered_past

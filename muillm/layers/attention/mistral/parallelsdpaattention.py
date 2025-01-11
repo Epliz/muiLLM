@@ -9,6 +9,7 @@ import torch.nn as nn
 import transformers.utils.logging as logging
 from transformers.cache_utils import Cache
 from transformers.models.mistral.modeling_mistral import MistralAttention
+from transformers.models.llama.modeling_llama import LlamaAttention
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.attention.mistral.rotaryembedding import apply_rotary_pos_emb
@@ -27,7 +28,7 @@ class MuiParallelMistralSdpaAttention(MuiParallelMistralAttention):
 
     @staticmethod
     def replace(prev_module: Union[MistralAttention, MuiMistralAttention], engine_config: MuiEngineConfig) -> "MuiParallelMistralSdpaAttention":
-        if isinstance(prev_module, MistralAttention):
+        if isinstance(prev_module, MistralAttention) or isinstance(prev_module, LlamaAttention):
             device = prev_module.o_proj.weight.device
             dtype = prev_module.o_proj.weight.dtype
         elif isinstance(prev_module, MuiMistralAttention):
@@ -37,7 +38,12 @@ class MuiParallelMistralSdpaAttention(MuiParallelMistralAttention):
             raise ValueError(f"unsupported module type: {type(prev_module)}")
 
 
-        new_module = MuiParallelMistralSdpaAttention(engine_config=engine_config, config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
+        layer_idx=prev_module.layer_idx
+        config=prev_module.config
+
+        rotary_embs = MuiParallelMistralAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
+
+        new_module = MuiParallelMistralSdpaAttention(engine_config=engine_config, config=config, rotary_embs=rotary_embs, layer_idx=layer_idx, device=device, dtype=dtype)
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 
@@ -54,6 +60,8 @@ class MuiParallelMistralSdpaAttention(MuiParallelMistralAttention):
         past_key_values: Optional[List[Cache]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_positions: Optional[List[torch.LongTensor]] = None,
+        position_embeddings: Optional[Tuple[List[torch.Tensor], List[torch.Tensor]]] = None,  # will become mandatory in v4.45
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
     ) -> Tuple[List[torch.Tensor], Optional[List[torch.Tensor]], Optional[List[Cache]]]:
@@ -79,6 +87,7 @@ class MuiParallelMistralSdpaAttention(MuiParallelMistralAttention):
                 past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
+                cache_positions=cache_positions,
                 all_ones_mask=all_ones_mask,
             )
 
@@ -118,8 +127,23 @@ class MuiParallelMistralSdpaAttention(MuiParallelMistralAttention):
         for d in range(len(query_states)):
             # do the rotary embeddings on each head group
             pos_ids = position_ids[d] if position_ids is not None else None
+            pos_embeds = None
+            if position_embeddings is not None:
+                coses, sins = position_embeddings
+                pos_embeds = coses[d], sins[d]
+
             past_key_value = past_key_values[d] if past_key_values is not None else None
-            query_states[d], key_states[d], value_states[d] = self.rotary_embs[d].apply_rotary_pos_emb_write_kv_cache(query_states[d], key_states[d], pos_ids, kv_seq_len, value_states[d], past_key_value)
+
+            query_states[d], key_states[d], value_states[d] = self.rotary_embs[d].apply_rotary_pos_emb_write_kv_cache(
+                query_states[d], 
+                key_states[d],
+                pos_ids,
+                pos_embeds,
+                kv_seq_len,
+                value_states[d],
+                past_key_value,
+                cache_positions[d]
+            )
 
         # at this point, we have the following shapes:
         #  q: [B, num_q_heads, T, embed_dim]
@@ -141,13 +165,9 @@ class MuiParallelMistralSdpaAttention(MuiParallelMistralAttention):
                 value_state = repeat_kv(value_states[d], self.num_key_value_groups)
                 query_state = query_states[d]
 
-                attention_mask = None
-                if attention_masks is not None:
-                    attention_mask = attention_masks[d]
-                    if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                        raise ValueError(
-                            f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                        )
+                causal_mask = None
+                if attention_masks is not None:  # no matter the length, we just slice it
+                    causal_mask = attention_masks[d][:, :, :, : key_states.shape[-2]]
 
                 # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
                 # Reference: https://github.com/pytorch/pytorch/issues/112577.
@@ -160,10 +180,9 @@ class MuiParallelMistralSdpaAttention(MuiParallelMistralAttention):
                     query_state,
                     key_state,
                     value_state,
-                    attn_mask=attention_mask,
+                    attn_mask=causal_mask,
                     dropout_p=self.attention_dropout if self.training else 0.0,
-                    # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
-                    is_causal=self.is_causal and attention_mask is None and q_len > 1,
+                    is_causal=self.is_causal,
                 )
 
                 # from shape [B, num_q_heads, T, embed_dim], go to [B, T, num_q_heads, embed_dim]

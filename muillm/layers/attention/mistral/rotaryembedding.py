@@ -1,10 +1,16 @@
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.module import MuiModule
 import torch
 import torch.nn as nn
 
 from transformers.cache_utils import Cache, DynamicCache
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+from transformers.models.mistral.configuration_mistral import MistralConfig
+from transformers.models.llama.configuration_llama import LlamaConfig
+
+from transformers.models.mistral.modeling_mistral import MistralRotaryEmbedding
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
 import muillm_ext
 
@@ -80,17 +86,41 @@ class _MuiRotaryDynamicCache(torch.autograd.Function):
         raise NotImplementedError("rotary backward not implemented")
 
 class MuiMistralRotaryEmbedding(MuiModule):
-    def __init__(self, engine_config: MuiEngineConfig, dim, max_position_embeddings=2048, base=10000, layer_idx: int = None, device=None, dtype=None):
+    def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], rope_kwargs: Dict[str, Any] = None, layer_idx: int = 0, device=None, dtype=None):
         super().__init__(engine_config=engine_config)
+
+        self.config = config
+        self.rope_kwargs = {}
 
         self.layer_idx = layer_idx
 
         dtype = dtype if dtype is not None else torch.get_default_dtype()
 
-        self.dim = dim
+        if config is not None:
+            if isinstance(config, LlamaConfig):
+                if config.rope_scaling is not None:
+                    self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+                else:
+                    self.rope_type = "default"
+            elif isinstance(config, MistralConfig):
+                self.rope_type = "default"
+            else:
+                raise ValueError("Unsupported config type")
+            
+            max_position_embeddings = config.max_position_embeddings
+        else:
+            if rope_kwargs is None:
+                raise ValueError("Either config or rope_kwargs should be not None")
+
+            self.rope_kwargs = rope_kwargs
+            self.rope_type = rope_kwargs["rope_type"]
+            max_position_embeddings = rope_kwargs["max_position_embeddings"]
+
         self.max_position_embeddings = max_position_embeddings
-        self.base = base
-        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
+
+        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, **self.rope_kwargs)
+
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         # Build here to make `torch.jit.trace` work.
@@ -102,6 +132,30 @@ class MuiMistralRotaryEmbedding(MuiModule):
         dispatchable_device = inv_freq.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
 
+    @staticmethod
+    def replace(prev_module: Union[LlamaRotaryEmbedding, MistralRotaryEmbedding], engine_config: MuiEngineConfig) -> "MuiMistralRotaryEmbedding":
+        device = prev_module.inv_freq.device
+        dtype = prev_module.inv_freq.dtype
+
+        # we either need a model config for Llama or rope_kwargs
+        config = None
+        rope_kwargs = None
+        if isinstance(prev_module, LlamaRotaryEmbedding):
+            config = prev_module.config
+        elif isinstance(prev_module, MistralRotaryEmbedding):
+            rope_kwargs = {
+                "rope_type": "default",
+                "dim": prev_module.dim,
+                "base": prev_module.base,
+                "max_position_embeddings": prev_module.max_position_embeddings,
+            }
+        else:
+            raise ValueError("Unsupported type of module")
+
+        new_module = MuiMistralRotaryEmbedding(engine_config=engine_config, config=config, rope_kwargs=rope_kwargs, device=device, dtype=dtype)
+
+        return new_module
+
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
@@ -109,10 +163,18 @@ class MuiMistralRotaryEmbedding(MuiModule):
         freqs = torch.outer(t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
 
-    def forward(self, x, seq_len=None):
+        cos = emb.cos()
+        sin = emb.sin()
+
+        # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
+        cos = cos * self.attention_scaling
+        sin = sin * self.attention_scaling
+
+        self.register_buffer("cos_cached", cos.to(dtype), persistent=False)
+        self.register_buffer("sin_cached", sin.to(dtype), persistent=False)
+
+    def forward(self, x, seq_len: int):
         # x: [bs, num_attention_heads, seq_len, head_size]
         if seq_len > self.max_seq_len_cached:
             # TODO: amortize resizing?
@@ -123,8 +185,24 @@ class MuiMistralRotaryEmbedding(MuiModule):
             self.sin_cached[:seq_len].to(dtype=x.dtype),
         )
     
-    def apply_rotary_pos_emb_write_kv_cache(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor, kv_seq_len: int, v: Optional[torch.Tensor] = None, cache: Optional[Cache] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        cos, sin = self.forward(k, seq_len=kv_seq_len)
+    def apply_rotary_pos_emb_write_kv_cache(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            position_ids: torch.Tensor,
+            position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]],
+            kv_seq_len: int,
+            v: Optional[torch.Tensor] = None,
+            cache: Optional[Cache] = None,
+            cache_position: Optional[torch.LongTensor] = None
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if position_embeddings is None:
+            # Shape [S, E]
+            cos, sin = self.forward(k, seq_len=kv_seq_len)
+        else:
+            # shape [B, T, E]
+            cos, sin = position_embeddings
+            #cos, sin = self.forward(k, seq_len=kv_seq_len)
 
         if self.dispatchable:
             if isinstance(cache, DynamicCache):
@@ -163,9 +241,7 @@ class MuiMistralRotaryEmbedding(MuiModule):
             value_states = v
 
         if cache is not None:
-            # TODO: bug here static cache not getting cache_position, need to get latest transformer library
-            #cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            cache_kwargs = {}
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = cache.update(key_states, v, self.layer_idx, cache_kwargs)
 
         return query_states, key_states, value_states

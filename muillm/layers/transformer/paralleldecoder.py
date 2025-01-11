@@ -14,7 +14,8 @@ from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
 from muillm.layers.multilinear import MuiMultiLinear
 
 from transformers.cache_utils import Cache
-from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralSdpaAttention, MistralMLP
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaMLP
+from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralMLP
 
 
 class MuiParallelDecoderLayer(MuiModule):
@@ -49,7 +50,7 @@ class MuiParallelDecoderLayer(MuiModule):
                 # replace the attention module itself if necessary
                 self_attn = MuiParallelMistralSdpaAttention.replace(self_attn, engine_config=engine_config)
 
-        elif isinstance(prev_module, MistralDecoderLayer):
+        elif isinstance(prev_module, MistralDecoderLayer) or isinstance(prev_module, LlamaDecoderLayer):
             input_layernorm = prev_module.input_layernorm
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
             qkv_proj = MuiParallelMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm, sharding_dim=0)
@@ -60,7 +61,7 @@ class MuiParallelDecoderLayer(MuiModule):
         mlp = None
         if isinstance(prev_module.mlp, MuiGateUpDownMLP):
             mlp = MuiParallelGateUpDownMLP.replace(prev_module=prev_module.mlp, engine_config=engine_config)
-        elif isinstance(prev_module.mlp, MistralMLP):
+        elif isinstance(prev_module.mlp, MistralMLP) or isinstance(prev_module.mlp, LlamaMLP):
             post_attention_layernorm = prev_module.post_attention_layernorm
             mlp = MuiParallelGateUpDownMLP.replace(prev_module=prev_module.mlp, engine_config=engine_config, prev_layernorm_module=post_attention_layernorm)
         else:
@@ -77,6 +78,8 @@ class MuiParallelDecoderLayer(MuiModule):
         past_key_values: Optional[List[Cache]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        cache_positions: Optional[List[torch.LongTensor]] = None,
+        position_embeddings: Optional[Tuple[List[torch.Tensor], List[torch.Tensor]]] = None,  # will become mandatory in v4.45
         all_ones_mask: Optional[bool] = None,
         **kwargs,
     ) -> Tuple[List[torch.FloatTensor], Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
@@ -125,6 +128,8 @@ class MuiParallelDecoderLayer(MuiModule):
             past_key_values=past_key_values,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            cache_positions=cache_positions,
+            position_embeddings=position_embeddings,
             all_ones_mask=all_ones_mask,
             residual=residual,
         )
@@ -153,10 +158,19 @@ class MuiParallelDecoderLayer(MuiModule):
         past_key_values: Optional[List[Cache]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
         all_ones_mask: Optional[bool] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         if self.tensor_parallelism > 1:
+            broadcast_position_embeddings = None
+            if position_embeddings is not None:
+                cos, sin = position_embeddings
+                cos = MuiParallelLinear._broadcast(self.engine_config, cos)
+                sin = MuiParallelLinear._broadcast(self.engine_config, sin)
+                broadcast_position_embeddings = cos, sin
+
             outputs = self.parallel_forward(
                 hidden_states=hidden_states,
                 attention_masks=MuiParallelLinear._broadcast(self.engine_config, attention_mask),
@@ -164,6 +178,8 @@ class MuiParallelDecoderLayer(MuiModule):
                 past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
+                cache_positions=MuiParallelLinear._broadcast(self.engine_config, cache_position),
+                position_embeddings=broadcast_position_embeddings,
                 all_ones_mask=all_ones_mask,
                 **kwargs)
             

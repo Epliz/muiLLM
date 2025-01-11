@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 import warnings
 import torch
 import torch.nn as nn
@@ -7,6 +7,7 @@ import torch.nn as nn
 import transformers.utils.logging as logging
 from transformers.cache_utils import Cache
 from transformers.models.mistral.modeling_mistral import MistralSdpaAttention
+from transformers.models.llama.modeling_llama import LlamaSdpaAttention
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.attention.mistral.rotaryembedding import apply_rotary_pos_emb
@@ -16,6 +17,61 @@ from muillm.layers.attention.mistral.baseattention import MuiMistralAttention
 
 logger = logging.get_logger(__name__)
 
+# Modified to avoid a sync
+def _ignore_causal_mask_sdpa(
+    attention_mask: Optional[torch.Tensor],
+    inputs_embeds: torch.Tensor,
+    past_key_values_length: int,
+    sliding_window: Optional[int] = None,
+    all_ones_mask: Optional[bool] = None,
+    is_training: bool = False,
+) -> bool:
+    """
+    Detects whether the optional user-specified attention_mask & the automatically created causal mask can be ignored in case PyTorch's SDPA is used, rather relying on SDPA's `is_causal` argument.
+
+    In case no token is masked in the `attention_mask` argument, if `query_length == 1` or
+    `key_value_length == query_length`, we rather rely on SDPA `is_causal` argument to use causal/non-causal masks,
+    allowing to dispatch to the flash attention kernel (that can otherwise not be used if a custom `attn_mask` is passed).
+    """
+
+    _, query_length = inputs_embeds.shape[0], inputs_embeds.shape[1]
+    key_value_length = query_length + past_key_values_length
+
+    is_tracing = (
+        torch.jit.is_tracing()
+        or isinstance(inputs_embeds, torch.fx.Proxy)
+        or (hasattr(torch, "_dynamo") and torch._dynamo.is_compiling())
+    )
+
+    ignore_causal_mask = False
+
+    if attention_mask is None:
+        # TODO: When tracing with TorchDynamo with fullgraph=True, the model is recompiled depending on the input shape, thus SDPA's `is_causal` argument is rightfully updated (see https://gist.github.com/fxmarty/1313f39037fc1c112508989628c57363). However, when using `torch.export` or
+        # or `torch.onnx.dynamo_export`, we must pass an example input, and `is_causal` behavior is hard-coded. If a user exports a model with q_len > 1, the exported model will hard-code `is_causal=True` which is in general wrong (see https://github.com/pytorch/pytorch/issues/108108).
+        # Thus, we only set `ignore_causal_mask = True` if the model is set to training.
+        #
+        # Besides, jit.trace can not handle the `q_len > 1` condition for `is_causal` (`TypeError: scaled_dot_product_attention(): argument 'is_causal' must be bool, not Tensor`).
+        if (
+            (is_training or not is_tracing)
+            and (query_length == 1 or key_value_length == query_length)
+            and (sliding_window is None or key_value_length < sliding_window)
+        ):
+            ignore_causal_mask = True
+    elif sliding_window is None or key_value_length < sliding_window:
+        if len(attention_mask.shape) == 4:
+            return False
+        elif (is_training or not is_tracing) and (((all_ones_mask is not None) and all_ones_mask == True) or ((all_ones_mask is None) and torch.all(attention_mask == 1))):
+            if query_length == 1 or key_value_length == query_length:
+                # For query_length == 1, causal attention and bi-directional attention are the same.
+                ignore_causal_mask = True
+
+            # Unfortunately, for query_length > 1 and key_value_length != query_length, we cannot generally ignore the attention mask, as SDPA causal mask generation
+            # may be wrong. We will set `is_causal=False` in SDPA and rely on Transformers attention_mask instead, hence not setting it to None here.
+            # Reference: https://github.com/pytorch/pytorch/issues/108108
+            # TODO: maybe revisit this with https://github.com/pytorch/pytorch/pull/114823 in PyTorch 2.3.
+
+    return ignore_causal_mask
+
 class MuiMistralSdpaAttention(MuiMistralAttention):
     """
     Mistral attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
@@ -24,11 +80,16 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
     """
 
     @staticmethod
-    def replace(prev_module: MistralSdpaAttention, engine_config: MuiEngineConfig) -> "MuiMistralSdpaAttention":
+    def replace(prev_module: Union[LlamaSdpaAttention, MistralSdpaAttention], engine_config: MuiEngineConfig) -> "MuiMistralSdpaAttention":
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
-        new_module = MuiMistralSdpaAttention(engine_config=engine_config, config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
+        layer_idx=prev_module.layer_idx
+        config=prev_module.config
+
+        rotary_emb = MuiMistralAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
+
+        new_module = MuiMistralSdpaAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 
@@ -45,6 +106,8 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -63,6 +126,7 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
                 past_key_value=past_key_value,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
+                cache_position=cache_position,
                 all_ones_mask=all_ones_mask,
             )
 
@@ -81,7 +145,16 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
         if past_key_value is not None:
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
 
-        query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(query_states, key_states, position_ids, kv_seq_len, value_states, past_key_value)
+        query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+            query_states,
+            key_states,
+            position_ids,
+            position_embeddings,
+            kv_seq_len,
+            value_states,
+            past_key_value,
+            cache_position
+        )
 
         # at this point, we have the following shapes:
         #  q: [B, num_q_heads, T, embed_dim]
@@ -94,27 +167,29 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
+
+            causal_mask = attention_mask
             if attention_mask is not None:
-                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                    raise ValueError(
-                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                    )
+                causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
 
             # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
             # Reference: https://github.com/pytorch/pytorch/issues/112577.
-            if query_states.device.type == "cuda" and attention_mask is not None:
+            if query_states.device.type == "cuda" and causal_mask is not None:
                 query_states = query_states.contiguous()
                 key_states = key_states.contiguous()
                 value_states = value_states.contiguous()
 
+            # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
+            # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
+            is_causal = True if causal_mask is None and q_len > 1 else False
+            
             attn_output = torch.nn.functional.scaled_dot_product_attention(
                 query_states,
                 key_states,
                 value_states,
-                attn_mask=attention_mask,
+                attn_mask=causal_mask,
                 dropout_p=self.attention_dropout if self.training else 0.0,
-                # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
-                is_causal=self.is_causal and attention_mask is None and q_len > 1,
+                is_causal=is_causal,
             )
 
         # from shape [B, num_q_heads, T, embed_dim], go to [B, T, num_q_heads, embed_dim]
