@@ -29,7 +29,12 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
-        new_module = MuiMistralSdpaAttention(engine_config=engine_config, config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
+        layer_idx=prev_module.layer_idx
+        config=prev_module.config
+
+        rotary_emb = MuiMistralAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
+
+        new_module = MuiMistralSdpaAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 

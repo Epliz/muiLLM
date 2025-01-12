@@ -90,7 +90,11 @@ class MuiMistralRotaryEmbedding(MuiModule):
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
+
+        # TODO: LLama3 uses something else
         inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
+        self.attention_scaling = 1.0
+
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         # Build here to make `torch.jit.trace` work.
@@ -109,8 +113,16 @@ class MuiMistralRotaryEmbedding(MuiModule):
         freqs = torch.outer(t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
+
+        cos = emb.cos()
+        sin = emb.sin()
+
+        # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
+        cos = cos * self.attention_scaling
+        sin = sin * self.attention_scaling
+
+        self.register_buffer("cos_cached", cos.to(dtype), persistent=False)
+        self.register_buffer("sin_cached", sin.to(dtype), persistent=False)
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
@@ -137,12 +149,12 @@ class MuiMistralRotaryEmbedding(MuiModule):
         if position_embeddings is None:
             cos, sin = self.forward(k, seq_len=kv_seq_len)
         else:
-            cos, sin = position_embeddings
-            print("cos : ", cos.shape)
-            print("sin : ", sin.shape)
+            # TODO: Fix this
+            # Always [B, NEW_T, D] which doesn't match what we get from the case where
+            # we don't have position_embeddings, in which case we get
+            # [B, SEQ_LEN, D]
+            #cos, sin = position_embeddings
             cos, sin = self.forward(k, seq_len=kv_seq_len)
-            print("r cos : ", cos.shape)
-            print("r sin : ", sin.shape)
 
         if self.dispatchable:
             if isinstance(cache, DynamicCache):

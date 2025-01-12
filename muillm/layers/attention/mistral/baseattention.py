@@ -26,7 +26,7 @@ class MuiMistralAttention(MuiModule):
     and "Generating Long Sequences with Sparse Transformers".
     """
 
-    def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx: Optional[int] = None, device=None, dtype=None):
+    def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], rotary_emb: MuiMistralRotaryEmbedding, layer_idx: Optional[int] = None, device=None, dtype=None):
         super().__init__(engine_config=engine_config)
         self.config = config
         self.layer_idx = layer_idx
@@ -55,22 +55,36 @@ class MuiMistralAttention(MuiModule):
 
         self.o_proj = MuiLinear(engine_config, self.num_heads * self.head_dim, self.hidden_size, bias=False, device=device, dtype=dtype)
 
-        self.rotary_emb = MuiMistralRotaryEmbedding(
+        self.rotary_emb = rotary_emb
+
+    staticmethod
+    def _create_rotary_embeddings(engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx:int, device=None, dtype=None) -> MuiMistralRotaryEmbedding:
+        hidden_size = config.hidden_size
+        num_heads = config.num_attention_heads
+        head_dim = hidden_size //num_heads
+
+        rotary_emb = MuiMistralRotaryEmbedding(
             engine_config,
-            self.head_dim,
-            max_position_embeddings=self.max_position_embeddings,
-            base=self.rope_theta,
+            head_dim,
+            max_position_embeddings=config.max_position_embeddings,
+            base=config.rope_theta,
             layer_idx=layer_idx,
             device=device,
             dtype=dtype,
         )
+        return rotary_emb
 
     @staticmethod
     def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig) -> "MuiMistralAttention":
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
-        new_module = MuiMistralAttention(engine_config=engine_config, config=prev_module.config, layer_idx=prev_module.layer_idx, device=device, dtype=dtype)
+        layer_idx=prev_module.layer_idx
+        config=prev_module.config
+
+        rotary_emb = MuiMistralAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
+
+        new_module = MuiMistralAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 
