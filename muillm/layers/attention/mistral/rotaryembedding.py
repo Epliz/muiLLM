@@ -1,10 +1,13 @@
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from muillm.engineconfig import MuiEngineConfig
 from muillm.layers.module import MuiModule
 import torch
 import torch.nn as nn
 
 from transformers.cache_utils import Cache, DynamicCache
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+from transformers.models.mistral.configuration_mistral import MistralConfig
+from transformers.models.llama.configuration_llama import LlamaConfig
 
 import muillm_ext
 
@@ -80,20 +83,27 @@ class _MuiRotaryDynamicCache(torch.autograd.Function):
         raise NotImplementedError("rotary backward not implemented")
 
 class MuiMistralRotaryEmbedding(MuiModule):
-    def __init__(self, engine_config: MuiEngineConfig, dim, max_position_embeddings=2048, base=10000, layer_idx: int = None, device=None, dtype=None):
+    def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx: int = None, device=None, dtype=None):
         super().__init__(engine_config=engine_config)
 
+        self.config = config
         self.layer_idx = layer_idx
 
         dtype = dtype if dtype is not None else torch.get_default_dtype()
 
-        self.dim = dim
+        max_position_embeddings = config.max_position_embeddings
         self.max_position_embeddings = max_position_embeddings
-        self.base = base
 
-        # TODO: LLama3 uses something else
-        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
-        self.attention_scaling = 1.0
+        if isinstance(config, LlamaConfig):
+            if config.rope_scaling is not None:
+                self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+            else:
+                self.rope_type = "default"
+        elif isinstance(config, MistralConfig):
+            self.rope_type = "default"
+
+        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
 
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -124,7 +134,7 @@ class MuiMistralRotaryEmbedding(MuiModule):
         self.register_buffer("cos_cached", cos.to(dtype), persistent=False)
         self.register_buffer("sin_cached", sin.to(dtype), persistent=False)
 
-    def forward(self, x, seq_len=None):
+    def forward(self, x, seq_len: int):
         # x: [bs, num_attention_heads, seq_len, head_size]
         if seq_len > self.max_seq_len_cached:
             # TODO: amortize resizing?

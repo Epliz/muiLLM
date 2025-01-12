@@ -59,15 +59,10 @@ class MuiMistralAttention(MuiModule):
 
     staticmethod
     def _create_rotary_embeddings(engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx:int, device=None, dtype=None) -> MuiMistralRotaryEmbedding:
-        hidden_size = config.hidden_size
-        num_heads = config.num_attention_heads
-        head_dim = hidden_size //num_heads
 
         rotary_emb = MuiMistralRotaryEmbedding(
             engine_config,
-            head_dim,
-            max_position_embeddings=config.max_position_embeddings,
-            base=config.rope_theta,
+            config,
             layer_idx=layer_idx,
             device=device,
             dtype=dtype,
