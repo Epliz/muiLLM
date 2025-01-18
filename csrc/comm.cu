@@ -257,6 +257,58 @@ muillm_comm_error_t muillm_comm_init(
   return MUILLM_COMM_SUCCESS;
 }
 
+static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_t* comm) {
+  int local_size = comm->local_size;
+  hipError_t hip_error;
+  if (comm->signals != nullptr) {
+    comm->signal_seq_no++;
+    uint64_t seq_no = comm->signal_seq_no;
+
+    // GPU barrier: all GPUs wait on each other
+    for (int r = 0; r < local_size; r++) {
+      if ((hip_error = hipStreamWriteValue32(comm->streams[r], (uint32_t*)comm->signals[r], seq_no, 0)) != hipSuccess) {
+        std::cout<<"Failed to write value "<<r<<std::endl;
+        std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+
+      // wait for the other ranks
+      for (int other_rank = 0; other_rank < local_size; other_rank++) {
+        if (other_rank == r) continue;
+        if ((hip_error = hipStreamWaitValue32(comm->streams[r], (uint32_t*)comm->signals[other_rank], seq_no, hipStreamWaitValueEq, -1)) != hipSuccess) {
+          std::cout<<"Failed to wait for value"<<std::endl;
+          std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
+          return MUILLM_COMM_UNKNOWN_ERROR;
+        }
+      }
+    }
+  } else {
+    // GPU barrier: all GPUs wait on each other
+    for (int r = 0; r < local_size; r++) {
+      if (hipEventRecord(comm->acquire_events[r], comm->streams[r]) != hipSuccess) {
+        std::cout<<"Failed to record event "<<r<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+    }
+
+    // wait for the other ranks
+    for (int r = 0; r < local_size; r++) {
+      for (int other_rank = 0; other_rank < local_size; other_rank++) {
+        if (other_rank == r) continue;
+
+        hipError_t error;
+        if ((error = hipStreamWaitEvent(comm->streams[r], comm->acquire_events[other_rank], 0)) != hipSuccess) {
+          std::cout<<"Failed to wait for event"<<std::endl;
+          std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
+          return MUILLM_COMM_UNKNOWN_ERROR;
+        }
+      }
+    }
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
 #define THREADS_PER_BLOCK 256
 
 
@@ -631,50 +683,8 @@ muillm_comm_error_t muillm_comm_all_reduce_sum(
   }
 
   // ensure all GPUs have copied into the reduction buffers
-  if (comm->signals != nullptr) {
-    comm->signal_seq_no++;
-    uint64_t seq_no = comm->signal_seq_no;
-
-    // GPU barrier: all GPUs wait on each other
-    for (int r = 0; r < local_size; r++) {
-      if ((hip_error = hipStreamWriteValue32(comm->streams[r], (uint32_t*)comm->signals[r], seq_no, 0)) != hipSuccess) {
-        std::cout<<"Failed to write value "<<r<<std::endl;
-        std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-
-      // wait for the other ranks
-      for (int other_rank = 0; other_rank < local_size; other_rank++) {
-        if (other_rank == r) continue;
-        if ((hip_error = hipStreamWaitValue32(comm->streams[r], (uint32_t*)comm->signals[other_rank], seq_no, hipStreamWaitValueEq, -1)) != hipSuccess) {
-          std::cout<<"Failed to wait for value"<<std::endl;
-          std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
-          return MUILLM_COMM_UNKNOWN_ERROR;
-        }
-      }
-    }
-  } else {
-    // GPU barrier: all GPUs wait on each other
-    for (int r = 0; r < local_size; r++) {
-      if (hipEventRecord(comm->acquire_events[r], comm->streams[r]) != hipSuccess) {
-        std::cout<<"Failed to record event "<<r<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-    }
-
-    // wait for the other ranks
-    for (int r = 0; r < local_size; r++) {
-      for (int other_rank = 0; other_rank < local_size; other_rank++) {
-        if (other_rank == r) continue;
-
-        hipError_t error;
-        if ((error = hipStreamWaitEvent(comm->streams[r], comm->acquire_events[other_rank], 0)) != hipSuccess) {
-          std::cout<<"Failed to wait for event"<<std::endl;
-          std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
-          return MUILLM_COMM_UNKNOWN_ERROR;
-        }
-      }
-    }
+  if ((muillm_error = __mui_gpu_barrier(comm)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
   }
 
   // do the reduction
@@ -737,6 +747,198 @@ On MI100:
           (const float*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
           (float*) dst_ptrs[r],
           count
+        );
+      }
+    } else {
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+
+
+// TP2 kernels
+
+__global__ void __all_gather_fp16_tp2_kernel(
+    const half* x1,
+    const half* x2,
+    half* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    half* y0 = y;
+    half* y1 = y0 + N;
+
+    y0[i] = x1[i];
+    y1[i] = x2[i];
+  }
+}
+
+__global__ void __all_gather_fp32_tp2_kernel(
+    const float* x1,
+    const float* x2,
+    float* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    float* y0 = y;
+    float* y1 = y0 + N;
+
+    y0[i] = x1[i];
+    y1[i] = x2[i];
+  }
+}
+
+// TP4 kernels
+
+__global__ void __all_gather_fp16_tp4_kernel(
+    const half* x1,
+    const half* x2,
+    const half* x3,
+    const half* x4,
+    half* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    half* y0 = y;
+    half* y1 = y0 + N;
+    half* y2 = y1 + N;
+    half* y3 = y2 + N;
+
+    y0[i] = x1[i];
+    y1[i] = x2[i];
+    y2[i] = x3[i];
+    y3[i] = x4[i];
+  }
+}
+
+__global__ void __all_gather_fp32_tp4_kernel(
+    const float* x1,
+    const float* x2,
+    const float* x3,
+    const float* x4,
+    float* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    float* y0 = y;
+    float* y1 = y0 + N;
+    float* y2 = y1 + N;
+    float* y3 = y2 + N;
+
+    y0[i] = x1[i];
+    y1[i] = x2[i];
+    y2[i] = x3[i];
+    y3[i] = x4[i];
+  }
+}
+
+muillm_comm_error_t muillm_comm_all_gather(
+  muillm_comm_t* comm,
+  const void** src_ptrs,
+  size_t in_count,
+  void** dst_ptrs,
+  size_t dst_count,
+  muillm_comm_datatype_t datatype
+) {
+  hipError_t hip_error;
+  muillm_comm_error_t muillm_error;
+
+  int local_size = comm->local_size;
+
+  if (dst_count != in_count * local_size) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // we only do the copy in the reduction buffers only if there is aliasing
+  bool aliasing = false;
+
+  for (int r = 0; r < local_size; r++) {
+    if (src_ptrs[r] == dst_ptrs[r]) {
+      aliasing = true;
+      break;
+    }
+  }
+
+  // get reduction buffer set
+  muillm_comm_buffer_set_t* buffer_set = nullptr;
+
+  if ((muillm_error = muillm_comm_get_buffer_set(comm, in_count, datatype, &buffer_set)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"Reduction failed when ensuring capacity"<<std::endl;
+    return muillm_error;
+  }
+
+  // copy into reduction buffers if needed
+  if (aliasing) {
+    size_t byte_count = __comm_size(datatype, in_count);
+    for (int r = 0; r < local_size; r++) {
+
+      __muillm_gpu_copy(buffer_set->buffers[r], src_ptrs[r], byte_count, comm->streams[r]);
+    }
+  }
+
+  // ensure all GPUs have copied into the reduction buffers
+  if ((muillm_error = __mui_gpu_barrier(comm)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+
+  // do the all-gather
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(in_count, THREADS_PER_BLOCK);
+
+  // gather
+  if (datatype == MUILLM_COMM_FP16) {
+    if (local_size == 4) {
+      for (int r = 0; r < local_size; r++) {
+        __all_gather_fp16_tp4_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const half*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const half*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (const half*) (aliasing ? buffer_set->buffers[2] : src_ptrs[2]),
+          (const half*) (aliasing ? buffer_set->buffers[3] : src_ptrs[3]),
+          (half*) dst_ptrs[r],
+          in_count
+        );
+      }
+    } else if (local_size == 2) {
+      for (int r = 0; r < local_size; r++) {
+        __all_gather_fp16_tp2_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const half*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const half*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (half*) dst_ptrs[r],
+          in_count
+        );
+      }
+    } else {
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else if (datatype == MUILLM_COMM_FP32) {
+    if (local_size == 4) {
+      for (int r = 0; r < local_size; r++) {
+        __all_gather_fp32_tp4_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const float*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const float*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (const float*) (aliasing ? buffer_set->buffers[2] : src_ptrs[2]),
+          (const float*) (aliasing ? buffer_set->buffers[3] : src_ptrs[3]),
+          (float*) dst_ptrs[r],
+          in_count
+        );
+      }
+    } else if (local_size == 2) {
+
+      for (int r = 0; r < local_size; r++) {
+        __all_gather_fp32_tp2_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const float*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const float*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (float*) dst_ptrs[r],
+          in_count
         );
       }
     } else {

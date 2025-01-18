@@ -216,6 +216,7 @@ std::vector<at::Tensor> muillm_parallel_linear_forward_trampoline(
     std::optional<std::vector<torch::Tensor>> mul_biases_,
     std::optional<std::vector<torch::Tensor>> add_biases_,
     std::optional<torch::Tensor> residual_,
+    int sharding_dim,
     bool reduce) {
 
     auto undef_tensor = torch::Tensor();
@@ -235,6 +236,7 @@ std::vector<at::Tensor> muillm_parallel_linear_forward_trampoline(
         mul_biases,
         add_biases,
         residual,
+        sharding_dim,
         reduce,
         x
     );
@@ -304,7 +306,7 @@ std::vector<at::Tensor> muillm_parallel_gateupsilu_split_forward_trampoline(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none());
-  m.def("muillm_parallel_linear_forward", &muillm_parallel_linear_forward_trampoline, "muillm parallel linear forward", py::arg("comm"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_biases") = py::none(), py::arg("add_biases") = py::none(), py::arg("residual") = py::none(), py::arg("reduce") = false);
+  m.def("muillm_parallel_linear_forward", &muillm_parallel_linear_forward_trampoline, "muillm parallel linear forward", py::arg("comm"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_biases") = py::none(), py::arg("add_biases") = py::none(), py::arg("residual") = py::none(), py::arg("sharding_dim") = 1, py::arg("reduce") = false);
   m.def("muillm_int8_dequantize_forward", &muillm_int8_dequantize_forward, "muillm int8 dequantize forward");
   m.def("muillm_int8_linear_forward", &muillm_int8_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("scales_min_vals"), py::arg("group_size_shift"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_gateupsilu_forward", &muillm_gateupsilu_forward, "muillm gate up silu forward");

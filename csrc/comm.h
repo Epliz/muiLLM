@@ -52,6 +52,15 @@ muillm_comm_error_t muillm_comm_all_reduce_sum(
   muillm_comm_datatype_t datatype
 );
 
+muillm_comm_error_t muillm_comm_all_gather(
+  muillm_comm_t* comm,
+  const void** src_ptrs,
+  size_t in_count,
+  void** dst_ptrs,
+  size_t dst_count,
+  muillm_comm_datatype_t datatype
+);
+
 muillm_comm_error_t muillm_comm_get_buffer_set(muillm_comm_t* comm, size_t count, muillm_comm_datatype_t datatype, muillm_comm_buffer_set_t** buffer_set);
 
 #endif // __MUILLM_COMM_HPP__

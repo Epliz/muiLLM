@@ -15,6 +15,7 @@ std::vector<at::Tensor> muillm_parallel_linear_activ_forward(
     std::vector<torch::Tensor>& mul_bias,
     std::vector<torch::Tensor>& add_bias,
     torch::Tensor& residual,
+    int sharding_dim, // 0 for row-wise, 1 for column-wise
     bool reduce,
     std::vector<torch::Tensor>& x
 );

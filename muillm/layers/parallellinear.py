@@ -15,8 +15,8 @@ import muillm_ext
 
 class _MuiParallelLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, comm, x, weights, norm_weights, variance_epsilon, add_biases, residual, reduce):
-        output = muillm_ext.muillm_parallel_linear_forward(comm.comm, x, weights, norm_weights, variance_epsilon, mul_biases=None, add_biases=add_biases, residual=residual, reduce=reduce)
+    def forward(ctx, comm, x, weights, norm_weights, variance_epsilon, add_biases, residual, sharding_dim, reduce):
+        output = muillm_ext.muillm_parallel_linear_forward(comm.comm, x, weights, norm_weights, variance_epsilon, mul_biases=None, add_biases=add_biases, residual=residual, sharding_dim=sharding_dim, reduce=reduce)
 
         ctx.save_for_backward(x, weights, norm_weights, variance_epsilon, add_biases, residual)
 
@@ -80,7 +80,7 @@ class MuiParallelLinear(MuiModule):
                 p.requires_grad = requires_grads
 
     @staticmethod
-    def replace(prev_module: Union[nn.Linear, MuiLinear], engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiParallelLinear":
+    def replace(prev_module: Union[nn.Linear, MuiLinear], engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None, sharding_dim: int = 1) -> "MuiParallelLinear":
         has_bias = prev_module.bias is not None
         in_features = prev_module.in_features
         out_features = prev_module.out_features
@@ -100,7 +100,7 @@ class MuiParallelLinear(MuiModule):
         else:
             raise ValueError(f"Unsupported replacement: {prev_module.__class__.__name__}")
 
-        new_module = MuiParallelLinear(engine_config=engine_config, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
+        new_module = MuiParallelLinear(engine_config=engine_config, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, sharding_dim=sharding_dim, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
         new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights)
 
         return new_module
@@ -218,7 +218,7 @@ class MuiParallelLinear(MuiModule):
             return engine_config.comms.all_reduce(tensors)
         elif sharding_dim == 0:
             # concat all
-            return engine_config.comms.concat_all(tensors)
+            return engine_config.comms.all_gather(tensors)
         else:
             # TODO: implement for sharding_dim == 0 (needed by parallel multi linear)
             raise ValueError("Not supported")
@@ -228,9 +228,7 @@ class MuiParallelLinear(MuiModule):
 
         if self.dispatchable and (inputs[0].numel() == inputs[0].shape[-1]):
             # input is effectively 1D, and we support the type
-            if self.sharding_dim == 0 and collect_outputs:
-                raise ValueError("Collecting outputs when sharded by rows is not supported")
-            outputs = _MuiParallelLinear.apply(self.comms, inputs, self.weights, self.norm_weights, self.variance_epsilon, self.biases, residual, collect_outputs)
+            outputs = _MuiParallelLinear.apply(self.comms, inputs, self.weights, self.norm_weights, self.variance_epsilon, self.biases, residual, self.sharding_dim, collect_outputs)
         else:
             # TODO: do this case in the C++ part as well
             if self.normalize:

@@ -56,7 +56,7 @@ class Communicator:
         _MuiAllReduce.apply(self.comm, tensors)
         return tensors
     
-    def concat_all(self, tensors: List[torch.Tensor]) -> List[torch.Tensor]:
+    def all_gather(self, tensors: List[torch.Tensor]) -> List[torch.Tensor]:
         # transfer all outputs back on GPU0 
         tensors = self.transfer_back(tensors)
 
