@@ -68,15 +68,38 @@ def profile_func(f, trace_path= "trace.json"):
     prof.export_chrome_trace(trace_path)
     return ret
 
-# Have a look at the original speed (~50 tokens/s generation on MI300x)
-text, time = time_func(lambda: generate(model, "Hello my name is", 50))
-text, time = time_func(lambda: generate(model, "Hello my name is", 50))
-text, time = time_func(lambda: generate(model, "Hello my name is", 50))
-print("[Original] Completion: ", text)
-print("[Original] Time: ", time)
+# 5 tokens prompt
+short_prompt = "Hello my name is"
+
+# 467 tokens prompt
+long_prompt = """Hello my name is Ashley and I am a 22 year old student at the University of California, Los Angeles (UCLA). I am currently studying business economics with a minor in psychology. I am a third year student and I am planning to graduate in 2018.
+I am originally from Los Angeles, California and I have always been passionate about business and entrepreneurship. I have had various internships and volunteer positions throughout my college career, including interning at a startup in downtown LA and volunteering at a non-profit organization that provides financial literacy to underprivileged youth.
+I am excited to be a part of the program and I am looking forward to learning from the other participants and gaining valuable experience in the field of business and entrepreneurship.
+Hi Ashley, I am also from LA, I went to Caltech for undergrad and now I am at UCLA for my MBA. I am also interested in business and entrepreneurship and I have also had various internships and volunteer positions throughout my college career. It's great to hear that you are interested in business and entrepreneurship, what are your goals and aspirations after graduation?
+Hi Ashley, I'm also from LA, I went to UCLA for undergrad and now I'm at USC for my MBA. I'm also interested in business and entrepreneurship and I've had various internships and volunteer positions throughout my college career. It's great to hear that you're interested in business and entrepreneurship, what are your goals and aspirations after graduation?
+Hi Ashley, I'm a fellow Bruin! I'm a junior majoring in economics and I'm really interested in finance. I've been thinking about pursuing a career in investment banking or private equity. Have you thought about what you want to do after graduation? Do you have any specific goals or industries in mind?
+Hi Ashley, I'm also a student at UCLA, I'm a senior majoring in business economics and I'm really interested in entrepreneurship. I've been working on a startup idea and I'm looking for potential partners or investors. Have you thought about starting your own business or working for a startup? I'd love to hear more about your interests and goals. Hi Ashley, I'm a fellow student at UCLA and I'm really interested in learning more about your experiences and goals. Can you tell me a bit more about your background and what you're hoping to"""
+
+prompt = long_prompt
+
+tokenized_prompt = tokenizer(prompt, return_tensors="pt", padding="longest")
+print("tokenized prompts: ", tokenized_prompt["input_ids"].shape)
+
+num_input_tokens = tokenized_prompt["input_ids"].shape[1]
+num_output_tokens = 256
+num_total_tokens = num_input_tokens + num_output_tokens
+
+# Have a look at the original speed
+if num_total_tokens < 100:
+    text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
+    text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
+    text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
+    print("[Original] Completion: ", text)
+    print("[Original] Time: ", time)
+    print("tot toks/s: ", num_total_tokens / time)
 
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-text, time = profile_func(lambda: time_func(lambda: generate(model, "Hello my name is", 50)), trace_path="trace_orig.json")
+text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, num_output_tokens)), trace_path="trace_orig.json")
 
 # Use the muiLLM replacements layers
 from muillm.engine import init_engine
@@ -85,11 +108,12 @@ model = init_engine(model)
 print("Optimized models: ", model)
 
 # Have a look at the speed (~140 token/s generation on MI300x)
-text, time = time_func(lambda: generate(model, "Hello my name is", 50))
-text, time = time_func(lambda: generate(model, "Hello my name is", 50))
-text, time = time_func(lambda: generate(model, "Hello my name is", 50))
+text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
+text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
+text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
 print("[Optimized] Completion: ", text)
 print("[Optimized] Time: ", time)
+print("tot toks/s: ", num_total_tokens / time)
 
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-text, time = profile_func(lambda: time_func(lambda: generate(model, "Hello my name is", 50)), trace_path="trace_muillm.json")
+text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, num_output_tokens)), trace_path="trace_muillm.json")
