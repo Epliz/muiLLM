@@ -415,25 +415,18 @@ class MuiParallelLlamaForCausalLM(LlamaPreTrainedModel):
 
         hidden_states = outputs[0]
         if self.config.pretraining_tp > 1:
-            lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
-            logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
-            logits = torch.cat(logits, dim=-1)
-        else:
-            logits = self.lm_head(hidden_states)
+            raise ValueError("Not supported")
+
+        # only transform the last hidden states
+        # (that wouldn't work when using speculative decoding to verify tokens as we would
+        # need all the tokens being verified)
+        hidden_states = hidden_states[:, None, -1, :]
+        logits = self.lm_head(hidden_states)
         logits = logits.float()
 
         loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
+            raise ValueError("Not supported")
 
         if not return_dict:
             output = (logits,) + outputs[1:]

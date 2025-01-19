@@ -423,21 +423,17 @@ class MuiParallelMistralForCausalLM(MistralPreTrainedModel):
         )
 
         hidden_states = outputs[0]
+
+        # only transform the last hidden states
+        # (that wouldn't work when using speculative decoding to verify tokens as we would
+        # need all the tokens being verified)
+        hidden_states = hidden_states[:, None, -1, :]
         logits = self.lm_head(hidden_states)
         logits = logits.float()
 
         loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Ensure tensors are on the same device
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss_fct = CrossEntropyLoss()
-            loss = loss_fct(shift_logits, shift_labels)
+            raise ValueError("Not supported")
 
         if not return_dict:
             output = (logits,) + outputs[1:]
