@@ -359,32 +359,6 @@ static void __muillm_gpu_copy(void* dst, const void* src, size_t count, hipStrea
 
 // TP2 kernels
 
-__global__ void __all_reduce_fp16_tp2_kernel(
-    const half* x1,
-    const half* x2,
-    half* y,
-    unsigned N
-) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    half res = __hadd(x1[i], x2[i]);
-    y[i] = res;
-  }
-}
-
-__global__ void __all_reduce_fp32_tp2_kernel(
-    const float* x1,
-    const float* x2,
-    float* y,
-    unsigned N
-) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    float res = x1[i] + x2[i];
-    y[i] = res;
-  }
-}
-
 __global__ void __all_reduce_fp16_tp2_multi_write_out_kernel(
     const half* x1,
     const half* x2,
@@ -416,36 +390,6 @@ __global__ void __all_reduce_fp32_tp2_multi_write_out_kernel(
 }
 
 // TP4 kernels
-
-__global__ void __all_reduce_fp16_tp4_kernel(
-    const half* x1,
-    const half* x2,
-    const half* x3,
-    const half* x4,
-    half* y,
-    unsigned N
-) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    half res = __hadd(__hadd(x1[i], x2[i]), __hadd(x3[i], x4[i]));
-    y[i] = res;
-  }
-}
-
-__global__ void __all_reduce_fp32_tp4_kernel(
-    const float* x1,
-    const float* x2,
-    const float* x3,
-    const float* x4,
-    float* y,
-    unsigned N
-) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    float res = x1[i] + x2[i] + x3[i] + x4[i];
-    y[i] = res;
-  }
-}
 
 __global__ void __all_reduce_fp16_tp4_multi_write_out_kernel(
     const half* x1,
@@ -643,6 +587,68 @@ On MI100:
   return MUILLM_COMM_SUCCESS;
 }
 
+
+// TP2 kernels
+
+__global__ void __all_reduce_fp16_tp2_kernel(
+    const half* x1,
+    const half* x2,
+    half* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    half res = __hadd(x1[i], x2[i]);
+    y[i] = res;
+  }
+}
+
+__global__ void __all_reduce_fp32_tp2_kernel(
+    const float* x1,
+    const float* x2,
+    float* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    float res = x1[i] + x2[i];
+    y[i] = res;
+  }
+}
+
+// TP4 kernels
+
+__global__ void __all_reduce_fp16_tp4_kernel(
+    const half* x1,
+    const half* x2,
+    const half* x3,
+    const half* x4,
+    half* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    half res = __hadd(__hadd(x1[i], x2[i]), __hadd(x3[i], x4[i]));
+    y[i] = res;
+  }
+}
+
+__global__ void __all_reduce_fp32_tp4_kernel(
+    const float* x1,
+    const float* x2,
+    const float* x3,
+    const float* x4,
+    float* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    float res = x1[i] + x2[i] + x3[i] + x4[i];
+    y[i] = res;
+  }
+}
+
+
 muillm_comm_error_t muillm_comm_all_reduce_sum(
   muillm_comm_t* comm,
   const void** src_ptrs,
@@ -688,8 +694,6 @@ muillm_comm_error_t muillm_comm_all_reduce_sum(
   }
 
   // do the reduction
-  const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
 
 /*
 On MI300x :
@@ -705,6 +709,8 @@ On MI100:
   // reduce on one GPU
   if (datatype == MUILLM_COMM_FP16) {
     if (local_size == 4) {
+      const int threads_per_blocks = THREADS_PER_BLOCK;
+      const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
       for (int r = 0; r < local_size; r++) {
         __all_reduce_fp16_tp4_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
           (const half*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
@@ -716,6 +722,8 @@ On MI100:
         );
       }
     } else if (local_size == 2) {
+      const int threads_per_blocks = THREADS_PER_BLOCK;
+      const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
       for (int r = 0; r < local_size; r++) {
         __all_reduce_fp16_tp2_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
           (const half*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
@@ -729,6 +737,8 @@ On MI100:
     }
   } else if (datatype == MUILLM_COMM_FP32) {
     if (local_size == 4) {
+      const int threads_per_blocks = THREADS_PER_BLOCK;
+      const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
       for (int r = 0; r < local_size; r++) {
         __all_reduce_fp32_tp4_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
           (const float*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
@@ -740,6 +750,8 @@ On MI100:
         );
       }
     } else if (local_size == 2) {
+      const int threads_per_blocks = THREADS_PER_BLOCK;
+      const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
 
       for (int r = 0; r < local_size; r++) {
         __all_reduce_fp32_tp2_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
