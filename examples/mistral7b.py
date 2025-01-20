@@ -72,34 +72,63 @@ def profile_func(f, trace_path= "trace.json"):
 short_prompt = "Hello my name is"
 
 # 467 tokens prompt
-long_prompt = """Hello my name is Ashley and I am a 22 year old student at the University of California, Los Angeles (UCLA). I am currently studying business economics with a minor in psychology. I am a third year student and I am planning to graduate in 2018.
-I am originally from Los Angeles, California and I have always been passionate about business and entrepreneurship. I have had various internships and volunteer positions throughout my college career, including interning at a startup in downtown LA and volunteering at a non-profit organization that provides financial literacy to underprivileged youth.
-I am excited to be a part of the program and I am looking forward to learning from the other participants and gaining valuable experience in the field of business and entrepreneurship.
-Hi Ashley, I am also from LA, I went to Caltech for undergrad and now I am at UCLA for my MBA. I am also interested in business and entrepreneurship and I have also had various internships and volunteer positions throughout my college career. It's great to hear that you are interested in business and entrepreneurship, what are your goals and aspirations after graduation?
-Hi Ashley, I'm also from LA, I went to UCLA for undergrad and now I'm at USC for my MBA. I'm also interested in business and entrepreneurship and I've had various internships and volunteer positions throughout my college career. It's great to hear that you're interested in business and entrepreneurship, what are your goals and aspirations after graduation?
-Hi Ashley, I'm a fellow Bruin! I'm a junior majoring in economics and I'm really interested in finance. I've been thinking about pursuing a career in investment banking or private equity. Have you thought about what you want to do after graduation? Do you have any specific goals or industries in mind?
-Hi Ashley, I'm also a student at UCLA, I'm a senior majoring in business economics and I'm really interested in entrepreneurship. I've been working on a startup idea and I'm looking for potential partners or investors. Have you thought about starting your own business or working for a startup? I'd love to hear more about your interests and goals. Hi Ashley, I'm a fellow student at UCLA and I'm really interested in learning more about your experiences and goals. Can you tell me a bit more about your background and what you're hoping to"""
+long_prompt0 = """Hello my name is Ashley, I am a proud Mum to five beautiful children, I am currently living in South Africa but was born and bred in Zimbabwe. I had a wonderful childhood with both my parents and they always encouraged me to follow my dreams .I grew up in a community of where women were encouraged to go to school, university and pursue career. My mum worked for the government and my dad worked for a mining company. i became a teacher after finishing my studies in South Africa. i am now a head of mistress in a wonderful school and my passion is to inspire children to become the best that they can be and to have all opportunities open that they deserve.i am a published author and i love to write on various themes ranging from childrens literature to political and social issues.i am now looking forward to contributing to this community in anyway that i can.i hope that together we can all make this world a better place for all who inhabit it. thank you for reading my intro xxxoxoxo
 
-prompt = long_prompt
+Hello Ashley, it's great to hear your story and your passion for inspiring children to reach their full potential. In this community, we believe that everyone has the ability to make a positive impact on the world around us. Here are some ways you can contribute:
 
-tokenized_prompt = tokenizer(prompt, return_tensors="pt", padding="longest")
-print("tokenized prompts: ", tokenized_prompt["input_ids"].shape)
+1. Share your knowledge and experience by answering questions on Quora or writing articles on Medium or your personal blog.
+2. Engage in discussions on social media platforms like Facebook, Twitter, or LinkedIn to share your perspective and engage in dialogue with others.
+3. Collaborate on projects with like-minded individuals or organizations to make a real-life difference.
+4. Donate to charities or initiatives that align with your values to support causes you care about.
+5. Utilize your skills to volunteer your time and expertise to make a positive impact on your community.
 
-num_input_tokens = tokenized_prompt["input_ids"].shape[1]
-num_output_tokens = 256
-num_total_tokens = num_input_tokens + num_output_tokens
+I hope this helps,and i hope we can all work together to make this world a better place for all. if you have any additional suggestion pleass let me know.thank you again for reading my intro xoxoxoxo.
 
-# Have a look at the original speed
-if num_total_tokens < 100:
-    text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-    text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-    text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-    print("[Original] Completion: ", text)
-    print("[Original] Time: ", time)
-    print("tot toks/s: ", num_total_tokens / time)
+ You're welcome, Ashley! I'm glad to see your passion for education and inspiring children."""
+
+long_prompt1 = """Hello my name is Bernard and I live in a small fishing village on the East Coast of Biskayne Bay in Florida. My house is just north of Miami Beach and south of Sunny Isles. All the year round I feel blessed to live in such a beautiful place. We are just north of the art deco district of Miami but yet we live in a small fishing village.
+
+This past weekend we had our yearly Lobster festival and it was great. all the fishermen and their families gather together and catch lobsters in traditional ways using just hooks for bait and traps fashioned from natural materials like bamboo and palm leaves.the entire town gets involved it is an all community event.
+
+the lobsters are cooked in various ways mostly on the outdoor grills and it is a great time for friends and neighbors to get together and have a fantastic meal while watching the sun set while listening to live music. The children have a balloon and candy drop and there are games and crafts for them to engage in while their moms and dads take pleasure in the meal.
+
+it was a wonderful working experience and I am seeking forwards to next yrs event. the proceeds of the lobster stock are split correct in the center of and the village and distributed among the residents and the vacationers. it is a great way for all the locals to meet new individuals and forge new connections within our group.
+
+if anyone is intrigued in this sort of festival or locating a comparable one I would be pleased to share more information or images. please remember to check out my email deal with beneath. many thanks,
+
+Bernard, it is a pleasure to listen to your account of the Lobster Festival in your fishing village. The festival seems like an enjoyable and communal celebration that brings people with each other and fosters new connections. I would really like to see additional images or details about this unique event.kind regards,
+
+Dear Bernard,
+
+I'm glad to hear that you and your community had a successful and enjoyable lobster festival.it seems like a wonderful way for individuals to connect with each other and establish new relationships within your village.I would be delighted to see more images or information about"""
+
+
+batched_prompts = [long_prompt0, long_prompt1, long_prompt0, long_prompt1]
+all_prompts = [
+    short_prompt,
+    long_prompt0,
+    batched_prompts
+]
+
+for prompts in all_prompts:
+    tokenized_prompts = tokenizer(prompts, return_tensors="pt", padding="longest")
+    print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
+
+    num_input_tokens = tokenized_prompts["input_ids"].shape[1]
+    batch_size = tokenized_prompts["input_ids"].shape[0]
+    num_output_tokens = 256
+    num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
+
+    # Have a look at the original speed
+    if num_total_tokens < 100:
+        text, time = time_func(lambda: generate(model, prompts, 10))
+        text, time = time_func(lambda: generate(model, prompts, num_output_tokens))
+        print("[Original] Completion: ", text)
+        print("[Original] Time: ", time)
+        print(f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})")
 
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, num_output_tokens)), trace_path="trace_orig.json")
+text, time = profile_func(lambda: time_func(lambda: generate(model, batched_prompts, 32)), trace_path="trace_mistral_orig.json")
 
 # Use the muiLLM replacements layers
 from muillm.engine import init_engine
@@ -107,13 +136,21 @@ model = init_engine(model)
 
 print("Optimized models: ", model)
 
-# Have a look at the speed (~140 token/s generation on MI300x)
-text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-print("[Optimized] Completion: ", text)
-print("[Optimized] Time: ", time)
-print("tot toks/s: ", num_total_tokens / time)
+for prompts in all_prompts:
+    tokenized_prompts = tokenizer(prompts, return_tensors="pt", padding="longest")
+    print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
+
+    num_input_tokens = tokenized_prompts["input_ids"].shape[1]
+    batch_size = tokenized_prompts["input_ids"].shape[0]
+    num_output_tokens = 256
+    num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
+
+    # Have a look at the speed
+    text, time = time_func(lambda: generate(model, prompts, 10))
+    text, time = time_func(lambda: generate(model, prompts, num_output_tokens))
+    print("[Optimized] Completion: ", text)
+    print("[Optimized] Time: ", time)
+    print(f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})")
 
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, num_output_tokens)), trace_path="trace_muillm.json")
+text, time = profile_func(lambda: time_func(lambda: generate(model, batched_prompts, 32)), trace_path="trace_mistral_muillm.json")

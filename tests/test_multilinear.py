@@ -3,7 +3,7 @@ from muillm.engineconfig import MuiEngineConfig
 import torch
 import torch.nn as nn
 
-from muillm.layers.multilinear import MuiMultiLinear
+from muillm.modules.multilinear import MuiMultiLinear
 
 def tensors_equal(t1, t2):
     assert t1.shape == t2.shape

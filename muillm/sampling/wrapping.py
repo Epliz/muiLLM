@@ -5,7 +5,7 @@ import torch.nn as nn
 from transformers.generation.utils import GenerationMixin
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.wrappedtransformers import _wrap_transformers_model
+from muillm.sampling.wrappedtransformers import _wrap_transformers_model
 
 def wrap_model(model: nn.Module, engine_config: MuiEngineConfig):
 

@@ -1,10 +1,10 @@
 from typing import List
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.parallelmultilinear import MuiParallelMultiLinear
+from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
 import torch
 import torch.nn as nn
 
-from muillm.layers.multilinear import MuiMultiLinear
+from muillm.modules.multilinear import MuiMultiLinear
 
 def tensors_equal(t1: torch.Tensor, t2: torch.Tensor):
     device = t1.device

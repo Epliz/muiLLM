@@ -10,10 +10,10 @@ from transformers.models.mistral.modeling_mistral import MistralSdpaAttention
 from transformers.models.llama.modeling_llama import LlamaSdpaAttention
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.attention.mistral.rotaryembedding import apply_rotary_pos_emb
-from muillm.layers.attention.mistral.causaltransformerdecoding import mui_causally_decode
-from muillm.layers.attention.mistral.kvcache import repeat_kv
-from muillm.layers.attention.mistral.baseattention import MuiMistralAttention
+from muillm.modules.attention.rotaryembedding import apply_rotary_pos_emb
+from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode
+from muillm.modules.attention.kvcache import repeat_kv
+from muillm.modules.attention.baseattention import MuiBaseAttention
 
 logger = logging.get_logger(__name__)
 
@@ -72,7 +72,7 @@ def _ignore_causal_mask_sdpa(
 
     return ignore_causal_mask
 
-class MuiMistralSdpaAttention(MuiMistralAttention):
+class MuiSdpaAttention(MuiBaseAttention):
     """
     Mistral attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
     `MistralAttention` as the weights of the module stays untouched. The only changes are on the forward pass to adapt to
@@ -80,16 +80,16 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
     """
 
     @staticmethod
-    def replace(prev_module: Union[LlamaSdpaAttention, MistralSdpaAttention], engine_config: MuiEngineConfig) -> "MuiMistralSdpaAttention":
+    def replace(prev_module: Union[LlamaSdpaAttention, MistralSdpaAttention], engine_config: MuiEngineConfig) -> "MuiSdpaAttention":
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
         layer_idx=prev_module.layer_idx
         config=prev_module.config
 
-        rotary_emb = MuiMistralAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
+        rotary_emb = MuiBaseAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
 
-        new_module = MuiMistralSdpaAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
+        new_module = MuiSdpaAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 
@@ -141,16 +141,11 @@ class MuiMistralSdpaAttention(MuiMistralAttention):
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-
         query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
             query_states,
             key_states,
             position_ids,
             position_embeddings,
-            kv_seq_len,
             value_states,
             past_key_value,
             cache_position

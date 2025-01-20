@@ -1,17 +1,17 @@
 from typing import List, Optional, Tuple, Union
 import warnings
-from muillm.layers.attention.mistral.parallelbaseattention import MuiParallelMistralAttention
-from muillm.layers.attention.mistral.parallelsdpaattention import MuiParallelMistralSdpaAttention
-from muillm.layers.module import MuiModule
-from muillm.layers.parallelgateupdownmlp import MuiParallelGateUpDownMLP
-from muillm.layers.parallellinear import MuiParallelLinear
-from muillm.layers.parallelmultilinear import MuiParallelMultiLinear
-from muillm.layers.transformer.decoder import MuiDecoderLayer
+from muillm.modules.attention.parallelbaseattention import MuiParallelBaseAttention
+from muillm.modules.attention.parallelsdpaattention import MuiParallelSdpaAttention
+from muillm.modules.module import MuiModule
+from muillm.modules.parallelgateupdownmlp import MuiParallelGateUpDownMLP
+from muillm.modules.parallellinear import MuiParallelLinear
+from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
+from muillm.modules.decoder.decoder import MuiDecoderLayer
 import torch
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
-from muillm.layers.multilinear import MuiMultiLinear
+from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
+from muillm.modules.multilinear import MuiMultiLinear
 
 from transformers.cache_utils import Cache
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaMLP
@@ -19,7 +19,7 @@ from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, Mi
 
 
 class MuiParallelDecoderLayer(MuiModule):
-    def __init__(self, engine_config: MuiEngineConfig, qkv_proj: MuiParallelMultiLinear, self_attn: MuiParallelMistralAttention, mlp: MuiParallelGateUpDownMLP):
+    def __init__(self, engine_config: MuiEngineConfig, qkv_proj: MuiParallelMultiLinear, self_attn: MuiParallelBaseAttention, mlp: MuiParallelGateUpDownMLP):
         super().__init__(engine_config=engine_config)
 
         self.tensor_parallelism = engine_config.tensor_parallelism
@@ -30,7 +30,7 @@ class MuiParallelDecoderLayer(MuiModule):
         self.mlp = mlp
 
     @staticmethod
-    def replace(prev_module: Union[MistralDecoderLayer, MuiDecoderLayer], engine_config: MuiEngineConfig) -> "MuiParallelDecoderLayer":
+    def replace(prev_module: Union[LlamaDecoderLayer, MistralDecoderLayer, MuiDecoderLayer], engine_config: MuiEngineConfig) -> "MuiParallelDecoderLayer":
         prev_attn = prev_module.self_attn
 
         qkv_proj = None
@@ -46,15 +46,15 @@ class MuiParallelDecoderLayer(MuiModule):
                 raise ValueError(f"Not supported {type(prev_module.qkv_proj)}")
 
             self_attn = prev_module.self_attn
-            if not isinstance(self_attn, MuiParallelMistralSdpaAttention):
+            if not isinstance(self_attn, MuiParallelSdpaAttention):
                 # replace the attention module itself if necessary
-                self_attn = MuiParallelMistralSdpaAttention.replace(self_attn, engine_config=engine_config)
+                self_attn = MuiParallelSdpaAttention.replace(self_attn, engine_config=engine_config)
 
         elif isinstance(prev_module, MistralDecoderLayer) or isinstance(prev_module, LlamaDecoderLayer):
             input_layernorm = prev_module.input_layernorm
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
             qkv_proj = MuiParallelMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm, sharding_dim=0)
-            self_attn = MuiParallelMistralSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config)
+            self_attn = MuiParallelSdpaAttention.replace(prev_attn, engine_config=engine_config)
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
 
@@ -111,6 +111,13 @@ class MuiParallelDecoderLayer(MuiModule):
         if (past_key_values is not None) and (not isinstance(past_key_values, list)):
             raise ValueError("must pass list of caches")
 
+        sharded_inputs = isinstance(hidden_states, list)
+        if not sharded_inputs:
+            hidden_states = MuiParallelLinear._broadcast(self.engine_config, hidden_states)
+        else:
+            # already sharded
+            pass
+
         # get the residual from GPU0
         residual = hidden_states[0]
 
@@ -120,16 +127,16 @@ class MuiParallelDecoderLayer(MuiModule):
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_values = self.self_attn.parallel_forward(
-            query_states=query_states,
-            key_states=key_states,
-            value_states=value_states,
+            query_statess=query_states,
+            key_statess=key_states,
+            value_statess=value_states,
             attention_masks=attention_masks,
-            position_ids=position_ids,
+            position_idss=position_ids,
             past_key_values=past_key_values,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_positions=cache_positions,
-            position_embeddings=position_embeddings,
+            position_embeddingss=position_embeddings,
             all_ones_mask=all_ones_mask,
             residual=residual,
         )

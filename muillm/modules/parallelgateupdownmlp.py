@@ -1,9 +1,9 @@
 from enum import Enum
 import math
 from typing import List, Optional, Union
-from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
-from muillm.layers.module import MuiModule
-from muillm.layers.parallellinear import MuiParallelLinear
+from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
+from muillm.modules.module import MuiModule
+from muillm.modules.parallellinear import MuiParallelLinear
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -13,7 +13,7 @@ from muillm.engineconfig import MuiEngineConfig
 from transformers.models.mistral.modeling_mistral import MistralMLP, MistralRMSNorm
 from transformers.models.llama.modeling_llama import LlamaMLP, LlamaRMSNorm
 
-from muillm.layers.rmsnorm import _MuiRMSNorm
+from muillm.modules.rmsnorm import _MuiRMSNorm
 import muillm_ext
 
 class _MuiParallelGateUpSiLUMethod(Enum):

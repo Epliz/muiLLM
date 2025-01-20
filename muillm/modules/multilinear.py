@@ -1,12 +1,12 @@
 
 from typing import Iterable, List, Tuple, Union
-from muillm.layers.module import MuiModule
+from muillm.modules.module import MuiModule
 import torch
 from  torch import Tensor
 import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.linear import MuiLinear
+from muillm.modules.linear import MuiLinear
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
@@ -87,7 +87,7 @@ class MuiMultiLinear(MuiModule):
 
         linears = [self._get_linear_back(slice_start, slice_end) for slice_start, slice_end in zip(self.slice_starts, self.slice_ends)]
 
-        return linears, norm_weights[0]
+        return linears, norm_weights
 
     def copy_modules(self, prev_modules: List[nn.Linear], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
         has_bias = self.linear.bias is not None

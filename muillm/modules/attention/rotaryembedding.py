@@ -1,6 +1,6 @@
 from typing import Any, Dict, Optional, Tuple, Union
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.module import MuiModule
+from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
 
@@ -125,7 +125,7 @@ class MuiMistralRotaryEmbedding(MuiModule):
 
         # Build here to make `torch.jit.trace` work.
         self._set_cos_sin_cache(
-            seq_len=max_position_embeddings, device=self.inv_freq.device, dtype=dtype
+            seq_len=max_position_embeddings, device=device, dtype=dtype
         )
 
         dispatchable_type = (dtype == torch.float16)
@@ -157,6 +157,7 @@ class MuiMistralRotaryEmbedding(MuiModule):
         return new_module
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
+
         self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
 
@@ -174,16 +175,11 @@ class MuiMistralRotaryEmbedding(MuiModule):
         self.register_buffer("cos_cached", cos.to(dtype), persistent=False)
         self.register_buffer("sin_cached", sin.to(dtype), persistent=False)
 
-    def forward(self, x, seq_len: int):
+    def forward(self, x, position_ids):
         # x: [bs, num_attention_heads, seq_len, head_size]
-        if seq_len > self.max_seq_len_cached:
-            # TODO: amortize resizing?
-            self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
-
-        return (
-            self.cos_cached[:seq_len].to(dtype=x.dtype),
-            self.sin_cached[:seq_len].to(dtype=x.dtype),
-        )
+        cos = self.cos_cached[position_ids].to(dtype=x.dtype)
+        sin = self.sin_cached[position_ids].to(dtype=x.dtype)
+        return cos, sin
     
     def apply_rotary_pos_emb_write_kv_cache(
             self,
@@ -191,18 +187,16 @@ class MuiMistralRotaryEmbedding(MuiModule):
             k: torch.Tensor,
             position_ids: torch.Tensor,
             position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]],
-            kv_seq_len: int,
             v: Optional[torch.Tensor] = None,
             cache: Optional[Cache] = None,
             cache_position: Optional[torch.LongTensor] = None
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if position_embeddings is None:
             # Shape [S, E]
-            cos, sin = self.forward(k, seq_len=kv_seq_len)
+            cos, sin = self.forward(k, position_ids)
         else:
             # shape [B, T, E]
             cos, sin = position_embeddings
-            #cos, sin = self.forward(k, seq_len=kv_seq_len)
 
         if self.dispatchable:
             if isinstance(cache, DynamicCache):

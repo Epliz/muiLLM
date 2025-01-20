@@ -1,28 +1,31 @@
 
-from muillm.layers.attention.mistral.rotaryembedding import MuiMistralRotaryEmbedding
-from muillm.layers.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
-from muillm.layers.models.llama.parallelmodel import MuiParallelLlamaForCausalLM, MuiParallelLlamaModel
-from muillm.layers.models.mistral.parallelmodel import MuiParallelMistralForCausalLM, MuiParallelMistralModel
-from muillm.layers.multilinear import MuiMultiLinear
-from muillm.layers.parallellinear import MuiParallelLinear
-from muillm.layers.parallelmultilinear import MuiParallelMultiLinear
-from muillm.layers.transformer.paralleldecoder import MuiParallelDecoderLayer
+from muillm.modules.attention.parallelbaseattention import MuiParallelBaseAttention
+from muillm.modules.attention.parallelsdpaattention import MuiParallelSdpaAttention
+from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
+from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
+from muillm.modules.models.llama.parallelmodel import MuiParallelLlamaForCausalLM, MuiParallelLlamaModel
+from muillm.modules.models.mistral.parallelmodel import MuiParallelMistralForCausalLM, MuiParallelMistralModel
+from muillm.modules.multilinear import MuiMultiLinear
+from muillm.modules.parallellinear import MuiParallelLinear
+from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
+from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
+from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
 import torch
 import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.linear import MuiLinear
-from muillm.layers.rmsnorm import MuiRMSNorm
-from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
-from muillm.layers.parallelgateupdownmlp import MuiParallelGateUpDownMLP
-from muillm.layers.attention.mistral.sdpaattention import MuiMistralSdpaAttention
-from muillm.layers.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
+from muillm.modules.linear import MuiLinear
+from muillm.modules.rmsnorm import MuiRMSNorm
+from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
+from muillm.modules.parallelgateupdownmlp import MuiParallelGateUpDownMLP
+from muillm.modules.attention.sdpaattention import MuiSdpaAttention
+from muillm.modules.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
 from muillm.memorymanagement.gc import trigger_gc
 
-from transformers.models.mistral.modeling_mistral import MistralRotaryEmbedding, MistralRMSNorm, MistralSdpaAttention, MistralMLP, MistralDecoderLayer, MistralModel, MistralForCausalLM
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaMLP, LlamaDecoderLayer, LlamaRMSNorm, LlamaModel, LlamaForCausalLM
+from transformers.models.mistral.modeling_mistral import MistralRotaryEmbedding, MistralRMSNorm, MistralAttention, MistralSdpaAttention, MistralMLP, MistralDecoderLayer, MistralModel, MistralForCausalLM
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaMLP, LlamaAttention, LlamaSdpaAttention, LlamaDecoderLayer, LlamaRMSNorm, LlamaModel, LlamaForCausalLM
 
-from muillm.layers.transformer.decoder import MuiDecoderLayer
+from muillm.modules.decoder.decoder import MuiDecoderLayer
 
 
 
@@ -64,13 +67,18 @@ _TP_LAYER_REPLACEMENTS = {
     LlamaMLP: MuiParallelGateUpDownMLP,
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
 
+    LlamaAttention: MuiParallelBaseAttention,
+    LlamaSdpaAttention: MuiParallelSdpaAttention,
+    MistralAttention: MuiParallelBaseAttention,
+    MistralSdpaAttention: MuiParallelSdpaAttention,
+
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. replacing the MLP then the decoder)
     MistralDecoderLayer : MuiParallelDecoderLayer,
     LlamaDecoderLayer : MuiParallelDecoderLayer,
     MuiDecoderLayer: MuiParallelDecoderLayer,
 
-    # replacements for full layers
+    # replacements for full models
     MistralModel : MuiParallelMistralModel,
     MistralForCausalLM : MuiParallelMistralForCausalLM,
     MuiMistralModel : MuiParallelMistralModel,

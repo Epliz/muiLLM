@@ -1,5 +1,5 @@
 from typing import Union
-from muillm.layers.module import MuiModule
+from muillm.modules.module import MuiModule
 import torch
 from torch import Tensor
 import torch.nn as nn

@@ -1,21 +1,21 @@
 from typing import Optional, Tuple, Union
 import warnings
-from muillm.layers.module import MuiModule
+from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.attention.mistral.baseattention import MuiMistralAttention
-from muillm.layers.attention.mistral.sdpaattention import MuiMistralSdpaAttention
-from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
-from muillm.layers.rmsnorm import MuiRMSNorm
-from muillm.layers.multilinear import MuiMultiLinear
+from muillm.modules.attention.baseattention import MuiBaseAttention
+from muillm.modules.attention.sdpaattention import MuiSdpaAttention
+from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
+from muillm.modules.rmsnorm import MuiRMSNorm
+from muillm.modules.multilinear import MuiMultiLinear
 
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralSdpaAttention
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaSdpaAttention
 
 class MuiDecoderLayer(MuiModule):
-    def __init__(self, engine_config: MuiEngineConfig, qkv_proj: MuiMultiLinear, self_attn: MuiMistralAttention, mlp: MuiGateUpDownMLP):
+    def __init__(self, engine_config: MuiEngineConfig, qkv_proj: MuiMultiLinear, self_attn: MuiBaseAttention, mlp: MuiGateUpDownMLP):
         super().__init__(engine_config=engine_config)
 
         self.qkv_proj = qkv_proj
@@ -33,7 +33,7 @@ class MuiDecoderLayer(MuiModule):
         if isinstance(prev_attn, MistralSdpaAttention) or isinstance(prev_attn, LlamaSdpaAttention):
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
             qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm)
-            self_attn = MuiMistralSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config)
+            self_attn = MuiSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config)
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
 

@@ -1,14 +1,14 @@
 
 from typing import Iterable, List, Optional, Tuple, Union
-from muillm.layers.module import MuiModule
-from muillm.layers.multilinear import MuiMultiLinear
-from muillm.layers.parallellinear import MuiParallelLinear
+from muillm.modules.module import MuiModule
+from muillm.modules.multilinear import MuiMultiLinear
+from muillm.modules.parallellinear import MuiParallelLinear
 import torch
 from  torch import Tensor
 import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.linear import MuiLinear
+from muillm.modules.linear import MuiLinear
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 

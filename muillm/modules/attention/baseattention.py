@@ -12,15 +12,15 @@ from transformers.models.llama.modeling_llama import LlamaAttention
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.module import MuiModule
-from muillm.layers.attention.mistral.rotaryembedding import MuiMistralRotaryEmbedding
-from muillm.layers.attention.mistral.causaltransformerdecoding import mui_causally_decode
-from muillm.layers.attention.mistral.kvcache import repeat_kv
-from muillm.layers.linear import MuiLinear
+from muillm.modules.module import MuiModule
+from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
+from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode
+from muillm.modules.attention.kvcache import repeat_kv
+from muillm.modules.linear import MuiLinear
 
 logger = logging.get_logger(__name__)
 
-class MuiMistralAttention(MuiModule):
+class MuiBaseAttention(MuiModule):
     """
     Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
     and "Generating Long Sequences with Sparse Transformers".
@@ -75,16 +75,16 @@ class MuiMistralAttention(MuiModule):
         return rotary_emb
 
     @staticmethod
-    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig) -> "MuiMistralAttention":
+    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig) -> "MuiBaseAttention":
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 
         layer_idx=prev_module.layer_idx
         config=prev_module.config
 
-        rotary_emb = MuiMistralAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
+        rotary_emb = MuiBaseAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
 
-        new_module = MuiMistralAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
+        new_module = MuiBaseAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
 
@@ -124,22 +124,11 @@ class MuiMistralAttention(MuiModule):
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None:
-            if self.layer_idx is None:
-                raise ValueError(
-                    f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
-                    "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
-                    "with a layer index."
-                )
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-
         query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
             query_states,
             key_states,
             position_ids,
             position_embeddings,
-            kv_seq_len,
             value_states,
             past_key_value,
             cache_position
@@ -159,12 +148,6 @@ class MuiMistralAttention(MuiModule):
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-                    f" {attn_weights.size()}"
-                )
 
             if attention_mask is not None:  # no matter the length, we just slice it
                 causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]

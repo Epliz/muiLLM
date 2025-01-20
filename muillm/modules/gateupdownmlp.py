@@ -1,7 +1,7 @@
 from enum import Enum
 import math
 from typing import Optional, Union
-from muillm.layers.module import MuiModule
+from muillm.modules.module import MuiModule
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -11,9 +11,9 @@ from muillm.engineconfig import MuiEngineConfig
 from transformers.models.llama.modeling_llama import LlamaMLP, LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralMLP, MistralRMSNorm
 
-from muillm.layers.linear import MuiLinear
+from muillm.modules.linear import MuiLinear
 
-from muillm.layers.rmsnorm import _MuiRMSNorm
+from muillm.modules.rmsnorm import _MuiRMSNorm
 import muillm_ext
 
 class _MuiGateUpSiLUMethod(Enum):

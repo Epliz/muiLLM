@@ -4,12 +4,12 @@ import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.memorymanagement.gc import trigger_gc
-from muillm.layers.quantized.int8linear import MuiInt8Linear
-from muillm.layers.quantized.int8gateupdownmlp import MuiInt8GateUpDownMLP
-from muillm.layers.gateupdownmlp import MuiGateUpDownMLP
+from muillm.modules.quantized.int8linear import MuiInt8Linear
+from muillm.modules.quantized.int8gateupdownmlp import MuiInt8GateUpDownMLP
+from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
 from muillm.quantization.quantizationmethod import Int8WeightOnlyQuantizationMethod, QuantizationMethod
 
-from muillm.layers.linear import MuiLinear
+from muillm.modules.linear import MuiLinear
 
 _INT8_LAYER_REPLACEMENTS = {
     nn.Linear: MuiInt8Linear,

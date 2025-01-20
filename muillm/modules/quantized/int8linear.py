@@ -1,13 +1,13 @@
 from typing import Optional, Union
-from muillm.layers.module import MuiModule
+from muillm.modules.module import MuiModule
 import torch
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.linear import MuiLinear
-from muillm.layers.rmsnorm import _MuiRMSNorm
+from muillm.modules.linear import MuiLinear
+from muillm.modules.rmsnorm import _MuiRMSNorm
 from muillm.quantization.quantizationmethod import Int8WeightOnlyQuantizationMethod
 from muillm.quantization.rtnquantizer import RTNQuantizer
 import muillm_ext

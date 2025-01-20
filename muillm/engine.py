@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.replacements import replace_layers
-from muillm.modules.wrapping import wrap_model
+from muillm.modules.replacements import replace_layers
+from muillm.sampling.wrapping import wrap_model
 from muillm.quantization.quantizationmethod import QuantizationMethod
 from muillm.quantization.quantizedreplacements import quantize_layers
 

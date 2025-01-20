@@ -1,6 +1,6 @@
 from typing import List, Optional, Union
-from muillm.layers.linear import MuiLinear
-from muillm.layers.module import MuiModule
+from muillm.modules.linear import MuiLinear
+from muillm.modules.module import MuiModule
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -10,7 +10,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.layers.rmsnorm import _MuiRMSNorm
+from muillm.modules.rmsnorm import _MuiRMSNorm
 import muillm_ext
 
 class _MuiParallelLinear(torch.autograd.Function):
