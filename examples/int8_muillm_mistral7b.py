@@ -99,6 +99,7 @@ if num_total_tokens < 100:
   text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
   print("[Original] Completion: ", text)
   print("[Original] Time: ", time)
+  print("tot toks/s: ", num_total_tokens / time)
 
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
 text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, num_output_tokens)), trace_path="trace_orig.json")

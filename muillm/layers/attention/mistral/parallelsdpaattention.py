@@ -167,7 +167,7 @@ class MuiParallelMistralSdpaAttention(MuiParallelMistralAttention):
 
                 causal_mask = None
                 if attention_masks is not None:  # no matter the length, we just slice it
-                    causal_mask = attention_masks[d][:, :, :, : key_states.shape[-2]]
+                    causal_mask = attention_masks[d][:, :, :, : key_state.shape[-2]]
 
                 # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
                 # Reference: https://github.com/pytorch/pytorch/issues/112577.

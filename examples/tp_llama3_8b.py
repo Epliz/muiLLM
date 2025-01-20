@@ -36,6 +36,9 @@ def generate(model, prompt:Union[str, List[str]], max_new_tokens=20) -> Union[st
 
     with torch.no_grad():
        inputs = tokenizer(prompts, return_tensors="pt", padding="longest").to(device="cuda")
+
+       print("inputs ", type(inputs["input_ids"]).__name__)
+
        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True)
 
        texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -76,25 +79,29 @@ Hi Ashley, I'm also a student at UCLA, I'm a senior majoring in business economi
 
 prompt = long_prompt
 
-tokenized_prompt = tokenizer(prompt, return_tensors="pt", padding="longest")
-print("tokenized prompts: ", tokenized_prompt["input_ids"].shape)
+prompts = [long_prompt] * 4
 
-num_input_tokens = tokenized_prompt["input_ids"].shape[1]
+
+tokenized_prompts = tokenizer(prompts, return_tensors="pt", padding="longest")
+print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
+
+num_input_tokens = tokenized_prompts["input_ids"].shape[1]
+batch_size = tokenized_prompts["input_ids"].shape[0]
 num_output_tokens = 256
-num_total_tokens = num_input_tokens + num_output_tokens
+num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
 
 
 # Have a look at the original speed
-if num_total_tokens < 100:
-    text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-    text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-    text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
+if True: #num_total_tokens < 100:
+    text, time = time_func(lambda: generate(model, prompts, num_output_tokens))
+    text, time = time_func(lambda: generate(model, prompts, num_output_tokens))
+    text, time = time_func(lambda: generate(model, prompts, num_output_tokens))
     print("[Original] Completion: ", text)
     print("[Original] Time: ", time)
     print("tot toks/s: ", num_total_tokens / time)
 
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, num_output_tokens)), trace_path="trace_orig.json")
+text, time = profile_func(lambda: time_func(lambda: generate(model, prompts, num_output_tokens)), trace_path="trace_orig.json")
 
 # Use the muiLLM replacements layers
 from muillm.engine import init_engine
@@ -104,12 +111,12 @@ model = init_engine(model, tensor_parallelism=None)
 print("Optimized models: ", model)
 
 # Have a look at the speed (~140 token/s generation on MI300x)
-text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
+text, time = time_func(lambda: generate(model, prompts, num_output_tokens))
+text, time = time_func(lambda: generate(model, prompts, num_output_tokens))
+text, time = time_func(lambda: generate(model, prompts, num_output_tokens))
 print("[Optimized] Completion: ", text)
 print("[Optimized] Time: ", time)
 print("tot toks/s: ", num_total_tokens / time)
 
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, num_output_tokens)), trace_path="tp_trace_muillm.json")
+text, time = profile_func(lambda: time_func(lambda: generate(model, prompts, num_output_tokens)), trace_path="tp_trace_muillm.json")
