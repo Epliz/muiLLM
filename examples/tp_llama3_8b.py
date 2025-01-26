@@ -64,7 +64,8 @@ def profile_func(f, trace_path= "trace.json"):
     return ret
 
 # 5 tokens prompt
-short_prompt = "Hello my name is Ashley"
+short_prompt0 = "Hello my name is Ashley"
+short_prompt1 = "Hello my name is Bernard"
 
 # 467 tokens prompt
 long_prompt0 = """Hello my name is Ashley.
@@ -103,9 +104,9 @@ Our cottage is cleaned and inspected after every stay, using only eco-friendly c
 **Check-in and check-out**
 Check-in is from 3 pm, and check-out is by"""
 
-batched_prompts = [long_prompt0, long_prompt1, long_prompt0, long_prompt1]
+batched_prompts = [short_prompt0, short_prompt1, long_prompt0, long_prompt1]
 all_prompts = [
-    short_prompt,
+    short_prompt0,
     long_prompt0,
     batched_prompts
 ]

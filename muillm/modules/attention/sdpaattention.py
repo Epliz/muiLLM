@@ -11,7 +11,7 @@ from transformers.models.llama.modeling_llama import LlamaSdpaAttention
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.attention.rotaryembedding import apply_rotary_pos_emb
-from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode
+from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode, mui_causally_decode_masked
 from muillm.modules.attention.kvcache import repeat_kv
 from muillm.modules.attention.baseattention import MuiBaseAttention
 
@@ -155,9 +155,17 @@ class MuiSdpaAttention(MuiBaseAttention):
         #  q: [B, num_q_heads, T, embed_dim]
         #  k: [B, num_k_heads, NEW_T, embed_dim]
         #  v: [B, num_v_heads, NEW_T, embed_dim]
-        if (bsz == 1) and (q_len == 1) and all_ones_mask and (query_states.dtype == torch.float16):
+        if (q_len == 1) and (query_states.dtype == torch.float16):
             #
-            attn_output = mui_causally_decode(query_states, key_states, value_states)
+            if all_ones_mask:
+                attn_output = mui_causally_decode(query_states, key_states, value_states)
+            else:
+                # The mask has shape:
+                # M: [B, 1, NEW_T, T]
+                # It contains 0 where OK, min_dtype where padded
+                # min_dtype obtained with torch.finfo(dtype).min
+                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+                attn_output = mui_causally_decode_masked(query_states, key_states, value_states, causal_mask)
         else:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -165,6 +173,10 @@ class MuiSdpaAttention(MuiBaseAttention):
 
             causal_mask = attention_mask
             if attention_mask is not None:
+                # The mask has shape:
+                # M: [B, 1, NEW_T, T]
+                # It contains 0 where OK, min_dtype where padded
+                # min_dtype obtained with torch.finfo(dtype).min
                 causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
 
             # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,

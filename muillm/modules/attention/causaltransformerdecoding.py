@@ -34,3 +34,25 @@ def mui_causally_decode(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> to
     #  k: [B, num_k_heads, NEW_T, embed_dim]
     #  v: [B, num_v_heads, NEW_T, embed_dim]
     return _MuiCausalDecoding.apply(q, k, v)
+
+class _MuiMaskedCausalDecoding(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, q, k, v, m):
+        output = muillm_ext.muillm_causal_transformer_decoding_masked(q, k, v, m)
+
+        ctx.save_for_backward(q, k, v, m)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("causal decoding backward not implemented")
+
+
+def mui_causally_decode_masked(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, m: torch.Tensor) -> torch.Tensor :
+    # Expected shapes:
+    #  q: [B, num_q_heads, T, embed_dim]
+    #  k: [B, num_k_heads, NEW_T, embed_dim]
+    #  v: [B, num_v_heads, NEW_T, embed_dim]
+    #  m: [B, 1, NEW_T, T]
+    return _MuiMaskedCausalDecoding.apply(q, k, v, m)

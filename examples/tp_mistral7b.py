@@ -64,7 +64,8 @@ def profile_func(f, trace_path= "trace.json"):
     return ret
 
 # 5 tokens prompt
-short_prompt = "Hello my name is Ashley"
+short_prompt0 = "Hello my name is Ashley"
+short_prompt1 = "Hello my name is a not so common one: Bendiga."
 
 # 467 tokens prompt
 long_prompt0 = """Hello my name is Ashley, I am a proud Mum to five beautiful children, I am currently living in South Africa but was born and bred in Zimbabwe. I had a wonderful childhood with both my parents and they always encouraged me to follow my dreams .I grew up in a community of where women were encouraged to go to school, university and pursue career. My mum worked for the government and my dad worked for a mining company. i became a teacher after finishing my studies in South Africa. i am now a head of mistress in a wonderful school and my passion is to inspire children to become the best that they can be and to have all opportunities open that they deserve.i am a published author and i love to write on various themes ranging from childrens literature to political and social issues.i am now looking forward to contributing to this community in anyway that i can.i hope that together we can all make this world a better place for all who inhabit it. thank you for reading my intro xxxoxoxo
@@ -98,9 +99,9 @@ Dear Bernard,
 I'm glad to hear that you and your community had a successful and enjoyable lobster festival.it seems like a wonderful way for individuals to connect with each other and establish new relationships within your village.I would be delighted to see more images or information about"""
 
 
-batched_prompts = [long_prompt0, long_prompt1, long_prompt0, long_prompt1]
+batched_prompts = [short_prompt0, short_prompt1, long_prompt0, long_prompt1]
 all_prompts = [
-    short_prompt,
+    short_prompt0,
     long_prompt0,
     batched_prompts
 ]

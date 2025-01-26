@@ -452,7 +452,7 @@ at::Tensor muillm_causal_transformer_compute_softmax_scores_no_mask(
   unsigned num_k_heads = k_sizes[1];
   unsigned embed_dim = q_sizes[3];
 
-
+  // output scores have size [B, num_q_heads, T, NEW_T]
   auto scores_sizes = q.sizes().vec();
   scores_sizes[3] = NEW_T;
 
@@ -622,6 +622,235 @@ at::Tensor muillm_causal_transformer_decoding_no_mask(
   auto attention_scores = muillm_causal_transformer_compute_softmax_scores_no_mask(
     q,
     k
+  );
+
+  return muillm_causal_transformer_apply_softmax_scores(
+    attention_scores,
+    v
+  );
+}
+
+
+// expected block dimensions: [x=T, y=num_q_heads, z=B]
+void __global__ causally_compute_transformer_softmax_scores_masked(
+  const half* __restrict__ q_in, // shape [B, num_q_heads, T, embed_dim]
+  const half* __restrict__ k_in, // shape [B, num_k_heads, NEW_T, embed_dim]
+  const half* __restrict__ m_in, // shape [B, 1, T, NEW_T]
+  float* __restrict__ temp_scores_f32, // [B, num_q_heads, T, NEW_T]
+  half* __restrict__ scores_out, // [B, num_q_heads, T, NEW_T]
+  // tensor dimension sizes
+  unsigned B, // batch size
+  unsigned T, // num tokens to decode
+  unsigned NEW_T, // number of total tokens
+  unsigned num_q_heads, // number of heads for q
+  unsigned num_k_heads, // number of heads for k
+  unsigned embed_dim,
+  unsigned q_to_k_heads,
+  float attention_inv_scale // factor to scale the attention scores, typically 1/sqrt(embed_dim)
+) {
+    // one block does one head of a new token
+    unsigned q_head_idx = blockIdx.y;
+    unsigned tok_idx = blockIdx.x;
+    unsigned batch_idx = blockIdx.z;
+
+    unsigned k_head_idx = q_head_idx / q_to_k_heads;
+
+    unsigned warps_per_block = THREADS_PER_BLOCK / warpSize;
+    unsigned warpId = uniform(threadIdx.x / warpSize);
+    unsigned laneId = threadIdx.x % warpSize;
+
+    // initialize shared memory
+    __shared__ float shared_attention_score_max;
+    __shared__ float shared_softmax_denom;
+
+    if (threadIdx.x == 0) {
+      shared_attention_score_max = 0.f;
+      shared_softmax_denom = 0.f;
+    }
+    __syncthreads();
+
+    // compute the attention scores and accumulate the v vectors into shared memory
+    // each warp processes a different token from the KV cache
+
+    // re-align q, k attention out
+    q_in = addr(q_in, (((batch_idx * num_q_heads) + q_head_idx) * T + tok_idx) * embed_dim);
+
+    // we don't need to initialize attention_out as prev_softmax_denom is set to 0 initially
+
+    unsigned kv_tok_idx = warpId;
+    k_in = addr(k_in, (((batch_idx * num_k_heads) + k_head_idx) * NEW_T + kv_tok_idx) * embed_dim);
+
+    m_in = addr(m_in, ((batch_idx * T) + tok_idx) * NEW_T + 0);
+
+    temp_scores_f32 = addr(temp_scores_f32, (((batch_idx * num_q_heads) + q_head_idx) * T + tok_idx) * NEW_T);
+    scores_out = addr(scores_out, (((batch_idx * num_q_heads) + q_head_idx) * T + tok_idx) * NEW_T);
+
+    unsigned kv_tok_stride = warps_per_block * embed_dim;
+
+    // reduce per thread and warp the max attention score
+    float max_attention_score = -INFINITY;
+
+    // I) computing attention scores
+
+    // TODO: 4 tokens per warp at once to reduce sync amount
+    for (; kv_tok_idx < NEW_T; kv_tok_idx += warps_per_block) {
+      // compute the attention score between this q vector and this k vector
+
+      // we start the read now, but compute anyway
+      // as that's faster
+      float mask_val = __half2float(*addr(m_in, kv_tok_idx));
+
+      float attention_score0 = 0.f;
+      float attention_score1 = 0.f;
+      // vectorized by 2
+      unsigned d = 2 * laneId;
+      for (; d + 1 < embed_dim; d += 2 * warpSize) {
+        half2 qs = *(const half2*)addr(q_in, d);
+        half2 ks = *(const half2*)addr(k_in, d);
+        attention_score0 += __half2float(qs.x) * __half2float(ks.x);
+        attention_score1 += __half2float(qs.y) * __half2float(ks.y);
+      }
+      if (d < embed_dim) {
+        // remainder
+        attention_score0 += __half2float(q_in[d]) * __half2float(k_in[d]);
+      }
+      float attention_score = warpReduce(attention_score0 + attention_score1);
+
+      // do the masking if necessary
+      attention_score = mask_val == 0.0f ? attention_score : -INFINITY;
+
+      // write out the score
+      if (laneId == 0) {
+        attention_score *= attention_inv_scale;
+        //scores_out[kv_tok_idx] = __float2half(attention_score);
+        *addr(temp_scores_f32, kv_tok_idx) = attention_score;
+        // update the max attention score
+        max_attention_score = std::max(attention_score, max_attention_score);
+      }
+
+      // move the pointers
+      k_in += kv_tok_stride;
+    }
+
+    // II) computing the max attention score across warps
+    if (laneId == 0) {
+      atomicMax(&shared_attention_score_max, max_attention_score);
+    }
+    __syncthreads();
+    // read back on all threads
+    max_attention_score = uniformf(shared_attention_score_max);
+
+    // III) computing the logits
+    // each thread can compute its own logit
+    float softmax_denom = 0.f;
+    for (unsigned t = threadIdx.x; t < NEW_T; t += THREADS_PER_BLOCK) {
+        float attention_score = *addr(temp_scores_f32, t);
+        float logit = __expf(attention_score - max_attention_score);
+        softmax_denom += logit;
+        *addr(temp_scores_f32, t) = logit;
+    }
+
+    // IV) computing the denominator of the softmax
+    softmax_denom = warpReduce(softmax_denom);
+    if (laneId == 0) {
+      atomicAdd(&shared_softmax_denom, softmax_denom);
+    }
+    __syncthreads();
+    // read back on all threads
+    softmax_denom = uniformf(shared_softmax_denom);
+    float softmax_inv_denom = 1.0f / softmax_denom;
+
+    // V) normalizing with the sum
+    for (unsigned t = threadIdx.x; t < NEW_T; t += THREADS_PER_BLOCK) {
+        float logit = *addr(temp_scores_f32, t) * softmax_inv_denom;
+        *addr(scores_out, t) = __float2half(logit);
+    }
+}
+
+at::Tensor muillm_causal_transformer_compute_softmax_scores_masked(
+    torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
+    torch::Tensor& k, // [B, num_k_heads, NEW_T, embed_dim]
+    torch::Tensor& m // [B, 1, NEW_T, T]
+) {
+  // q, k, m are expected to be contiguous
+  CHECK_INPUT(q);
+  CHECK_INPUT(k);
+  CHECK_INPUT(m);
+
+  auto device = q.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  auto output_options_f16 = at::TensorOptions()
+                            .dtype(torch::kFloat16)
+                            .layout(at::kStrided)
+                            .device(device) // same device as inputs
+                            .requires_grad(false);
+  
+
+  auto temp_options_f32 = at::TensorOptions()
+                            .dtype(torch::kFloat32)
+                            .layout(at::kStrided)
+                            .device(device) // same device as inputs
+                            .requires_grad(false);
+
+  auto q_sizes = q.sizes().vec();
+  auto k_sizes = k.sizes().vec();
+
+  unsigned B = q_sizes[0];
+  // TODO: kind of flipped the meaning of T and NEW_T in this file...
+  unsigned T = q_sizes[2]; // always 1 for now
+  unsigned NEW_T = k_sizes[2];
+  unsigned num_q_heads = q_sizes[1];
+  unsigned num_k_heads = k_sizes[1];
+  unsigned embed_dim = q_sizes[3];
+
+  // output scores have size [B, num_q_heads, T, NEW_T]
+  auto scores_sizes = q.sizes().vec();
+  scores_sizes[3] = NEW_T;
+
+  // to compute what k/v head to target for a given q head
+  unsigned q_to_k_heads = num_q_heads / num_k_heads;
+
+  float attention_inv_scale = 1.0f / sqrtf(embed_dim);
+
+  auto temp_scores_f32 = torch::empty(scores_sizes, temp_options_f32);
+  auto scores_out = torch::empty(scores_sizes, output_options_f16);
+
+  const dim3 threads_per_blocks = dim3(THREADS_PER_BLOCK);
+
+  // expected block dimensions: [x=T, y=num_q_heads, z=B]
+  const dim3 num_blocks = dim3(T, num_q_heads, B);
+
+  causally_compute_transformer_softmax_scores_masked<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    (const half*)q.data_ptr(),
+    (const half*)k.data_ptr(),
+    (const half*)m.data_ptr(),
+    (float*)temp_scores_f32.data_ptr(),
+    (half*)scores_out.data_ptr(),
+    // tensor dimension sizes
+    B,
+    T,
+    NEW_T,
+    num_q_heads,
+    num_k_heads,
+    embed_dim,
+    q_to_k_heads,
+    attention_inv_scale
+  );
+
+  return scores_out;
+}
+
+at::Tensor muillm_causal_transformer_decoding_masked(
+    torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
+    torch::Tensor& k, // [B, num_k_heads, NEW_T, embed_dim]
+    torch::Tensor& v,  // [B, num_v_heads, NEW_T, embed_dim]
+    torch::Tensor& m  // [B, 1, NEW_T, T]
+) {
+  auto attention_scores = muillm_causal_transformer_compute_softmax_scores_masked(
+    q,
+    k,
+    m
   );
 
   return muillm_causal_transformer_apply_softmax_scores(

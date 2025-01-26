@@ -14,7 +14,7 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.module import MuiModule
 from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
-from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode
+from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode, mui_causally_decode_masked
 from muillm.modules.attention.kvcache import repeat_kv
 from muillm.modules.linear import MuiLinear
 
@@ -139,9 +139,17 @@ class MuiBaseAttention(MuiModule):
         #  k: [B, num_k_heads, NEW_T, embed_dim]
         #  v: [B, num_v_heads, NEW_T, embed_dim]
 
-        if (bsz == 1) and (q_len == 1) and all_ones_mask and (query_states.dtype == torch.float16):
+        if (q_len == 1) and (query_states.dtype == torch.float16):
             #
-            attn_output = mui_causally_decode(query_states, key_states, value_states)
+            if all_ones_mask:
+                attn_output = mui_causally_decode(query_states, key_states, value_states)
+            else:
+                # The mask has shape:
+                # M: [B, 1, NEW_T, T]
+                # It contains 0 where OK, min_dtype where padded
+                # min_dtype obtained with torch.finfo(dtype).min
+                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+                attn_output = mui_causally_decode_masked(query_states, key_states, value_states, causal_mask)
         else:
             # repeat k/v heads if n_kv_heads < n_heads
             key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -150,6 +158,10 @@ class MuiBaseAttention(MuiModule):
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
             if attention_mask is not None:  # no matter the length, we just slice it
+                # The mask has shape:
+                # M: [B, 1, NEW_T, T]
+                # It contains 0 where OK, min_dtype where padded
+                # min_dtype obtained with torch.finfo(dtype).min
                 causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
                 attn_weights = attn_weights + causal_mask
 

@@ -112,6 +112,13 @@ std::vector<at::Tensor> muillm_parallel_causal_transformer_decoding_no_mask(
     std::vector<torch::Tensor>& vs  // [B, num_v_heads, NEW_T, embed_dim]
 );
 
+std::vector<at::Tensor> muillm_parallel_causal_transformer_decoding_masked(
+    std::vector<torch::Tensor>& qs, // [B, num_q_heads, T, embed_dim]
+    std::vector<torch::Tensor>& ks, // [B, num_k_heads, NEW_T, embed_dim]
+    std::vector<torch::Tensor>& vs,  // [B, num_v_heads, NEW_T, embed_dim]
+    std::vector<torch::Tensor>& ms  // [B, 1, NEW_T, T]
+);
+
 #include "sync.h"
 
 // needed because Pybind11 can't seem to be able to deal with opaque pointers
@@ -323,7 +330,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_causal_transformer_compute_softmax_scores_no_mask", &muillm_causal_transformer_compute_softmax_scores_no_mask, "muillm causal transformer compute softmax scores no mask");
   m.def("muillm_causal_transformer_apply_softmax_scores", &muillm_causal_transformer_apply_softmax_scores, "muillm causal transformer apply softmax scores");
   m.def("muillm_causal_transformer_decoding_no_mask", &muillm_causal_transformer_decoding_no_mask, "muillm causal transformer decoding no mask");
+  m.def("muillm_causal_transformer_decoding_masked", &muillm_causal_transformer_decoding_masked, "muillm causal transformer decoding masked");
   m.def("muillm_parallel_causal_transformer_decoding_no_mask", &muillm_parallel_causal_transformer_decoding_no_mask, "muillm parallel causal transformer decoding no mask");
+  m.def("muillm_parallel_causal_transformer_decoding_masked", &muillm_parallel_causal_transformer_decoding_masked, "muillm parallel causal transformer decoding masked");
 
   // synchronization
   pybind11::class_<muillm_synchronizer_ptr> cl_sync(m, "muillm_synchronizer_ptr");
