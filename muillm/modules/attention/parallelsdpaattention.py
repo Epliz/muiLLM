@@ -89,6 +89,7 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
 
         attn_outputs = []
         for d in range(num_head_groups):
+            # TODO: figure out where the aten index operations come from
             if (q_len == 1):
                 # the transposition doesn nothing, so we can just avoid it to avoid the CPU cost of the operation
                 query_states = query_statess[d].view(bsz, self.num_tp_heads, q_len, self.head_dim)
@@ -130,7 +131,7 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
             key_statess[d] = key_states
             value_statess[d] = value_states
 
-        if (q_len == 1) and (query_states[0].dtype == torch.float16):
+        if (q_len == 1) and (query_statess[0].dtype == torch.float16):
             if all_ones_mask:
                 attn_outputs = mui_parallel_causally_decode(query_statess, key_statess, value_statess)
             else:

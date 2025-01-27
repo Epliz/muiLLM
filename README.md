@@ -28,6 +28,7 @@ The following optimizations are already implemented:
 * basic semi-fused attention
 * reduced CPU/GPU synchronizations due to attention mask checks
 * reduced CPU/GPU synchronizations during sampling
+* static cache support
 
 * tensor parallelism support (still being improved):
     * single python process at the moment - easier to use as end-users
@@ -39,7 +40,6 @@ Future optimizations (by order of likely implementation):
 * further improvements to linear/fused MLP to reach higher memory bandwidth
 * use Python less to be less CPU limited
 * better attention implementation (flash decoding)
-* static cache support
 * layer interleaving
 
 ## Performance numbers

@@ -21,6 +21,7 @@ from typing import List, Optional, Tuple, Union
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.attention.sdpaattention import _ignore_causal_mask_sdpa
+from muillm.modules.kvcache.cache_utils import MuiStaticCache, create_static_cache, grow_static_cache_if_needed
 from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
 from muillm.modules.parallellinear import MuiParallelLinear
 import torch
@@ -123,19 +124,33 @@ class MuiParallelLlamaModel(LlamaPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        if use_cache:
-            no_previous_cache = (past_key_values is None )
-            use_legacy_cache = no_previous_cache or (not isinstance(past_key_values[0], Cache))
-
-            if no_previous_cache:
-                # one cache per GPU
-                past_key_values = [DynamicCache.from_legacy_cache(None) for d in self.engine_config.devices]
-            elif use_legacy_cache:
-                # one cache per GPU
-                past_key_values = [DynamicCache.from_legacy_cache(past_key_values[i]) for i, d in enumerate(self.engine_config.devices)]
+        batch_size = inputs_embeds.shape[0]
 
         past_seen_tokens = past_key_values[0].get_seq_length() if past_key_values is not None else 0
         tot_seq_len = past_seen_tokens + inputs_embeds.shape[1]
+
+        if use_cache:
+            no_cache = past_key_values is None
+            use_legacy_cache = (not no_cache) and (not isinstance(past_key_values[0], Cache))
+
+            if no_cache:
+                # create a cache from scratch
+                max_batch_size = batch_size
+                dtype = torch.float16
+    
+                # one cache per GPU
+                tensor_parallelism = self.engine_config.tensor_parallelism
+                past_key_values = [create_static_cache(self.config, max_batch_size, tot_seq_len, device, dtype, tensor_parallelism=tensor_parallelism) for device in self.engine_config.devices]
+            elif use_legacy_cache:
+                # one cache per GPU
+                past_key_values = [DynamicCache.from_legacy_cache(past_key_values[i]) for i, d in enumerate(self.engine_config.devices)]
+            else:
+                # we have a previous cache, just re-use it
+                if isinstance(past_key_values[0], MuiStaticCache):
+                    # grow cache if needed
+                    max_cache_length = self.config.max_position_embeddings
+                    for cache in past_key_values:
+                        grow_static_cache_if_needed(cache, tot_seq_len, max_cache_length)
 
         if cache_position is None:
             cache_position = torch.arange(
@@ -265,7 +280,9 @@ class MuiParallelLlamaModel(LlamaPreTrainedModel):
         dtype, device = input_tensor.dtype, input_tensor.device
         min_dtype = torch.finfo(dtype).min
         sequence_length = input_tensor.shape[1]
-        if using_static_cache:
+        if False: #using_static_cache:
+            # modification compared to normal HF transformers
+            # we use the same normal code as for dynamic cache
             target_length = past_key_values[0].get_max_length()
         else:
             target_length = (

@@ -195,7 +195,7 @@ class MuiParallelBaseAttention(MuiModule):
             key_statess[d] = key_states
             value_statess[d] = value_states
 
-        if (q_len == 1) and (query_states[0].dtype == torch.float16):
+        if (q_len == 1) and (query_statess[0].dtype == torch.float16):
             if all_ones_mask:
                 attn_outputs = mui_parallel_causally_decode(query_statess, key_statess, value_statess)
             else:

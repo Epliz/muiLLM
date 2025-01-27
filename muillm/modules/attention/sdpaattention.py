@@ -141,6 +141,7 @@ class MuiSdpaAttention(MuiBaseAttention):
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
+        # TODO: make sure it is restricted to seen tokens?
         query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
             query_states,
             key_states,

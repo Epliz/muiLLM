@@ -21,6 +21,7 @@ from typing import List, Optional, Tuple, Union
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.attention.sdpaattention import _ignore_causal_mask_sdpa
+from muillm.modules.kvcache.cache_utils import MuiStaticCache, create_static_cache, grow_static_cache_if_needed
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -119,18 +120,36 @@ class MuiLlamaModel(LlamaPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        if use_cache:
-            use_legacy_cache = not isinstance(past_key_values, Cache)
-            if use_legacy_cache:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+        batch_size = inputs_embeds.shape[0]
 
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         tot_seq_len = past_seen_tokens + inputs_embeds.shape[1]
+
+        if use_cache:
+            no_cache = past_key_values is None
+            use_legacy_cache = (not isinstance(past_key_values, Cache)) and (not no_cache)
+
+            if no_cache:
+                # create a cache from scratch
+                max_batch_size = batch_size
+                device = inputs_embeds.device
+                dtype = torch.float16
+                past_key_values = create_static_cache(self.config, max_batch_size, tot_seq_len, device, dtype)
+            elif use_legacy_cache:
+                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+            else:
+                # we have a previous cache, just re-use it
+                if isinstance(past_key_values, MuiStaticCache):
+                    # grow cache if needed
+                    max_cache_length = self.config.max_position_embeddings
+                    grow_static_cache_if_needed(past_key_values, tot_seq_len, max_cache_length)
+
 
         if cache_position is None:
             cache_position = torch.arange(
                 past_seen_tokens, tot_seq_len, device=inputs_embeds.device
             )
+
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
@@ -246,7 +265,9 @@ class MuiLlamaModel(LlamaPreTrainedModel):
         dtype, device = input_tensor.dtype, input_tensor.device
         min_dtype = torch.finfo(dtype).min
         sequence_length = input_tensor.shape[1]
-        if using_static_cache:
+        if False: #using_static_cache:
+            # modification compared to normal HF transformers
+            # we use the same normal code as for dynamic cache
             target_length = past_key_values.get_max_length()
         else:
             target_length = (
@@ -391,7 +412,7 @@ class MuiLlamaForCausalLM(LlamaPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
-            all_ones_mask=self.all_ones_mask
+            all_ones_mask=self.all_ones_mask,
         )
 
         hidden_states = outputs[0]
