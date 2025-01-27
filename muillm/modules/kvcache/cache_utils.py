@@ -27,9 +27,31 @@ class MuiStaticCache(StaticCache):
             max_batch_size: int,
             max_cache_len: int,
             device,
-            dtype=None
+            dtype=None,
+            tensor_parallelism: int = 1,
         ) -> None:
+
+        # hack to make the cache be the right size if we use tensor parallelism
+        if config.num_key_value_heads is not None:
+            config.num_key_value_heads = config.num_key_value_heads // tensor_parallelism
+        if config.num_attention_heads is not None:
+            config.num_attention_heads = config.num_attention_heads // tensor_parallelism
+        if not hasattr(config, "head_dim"):
+            # for some models, HF compute the head_dim as hidden_size / num_attention_heads
+            # but we lower num_attention_heads, so we need to compensate for that otherwise
+            # the head dim is wrong
+            config.hidden_size  = config.hidden_size // tensor_parallelism
+
         super().__init__(config=config, max_batch_size=max_batch_size, max_cache_len=max_cache_len, device=device, dtype=dtype)
+
+        # set back the right values in the config
+        if config.num_key_value_heads is not None:
+            config.num_key_value_heads = config.num_key_value_heads * tensor_parallelism
+        if config.num_attention_heads is not None:
+            config.num_attention_heads = config.num_attention_heads * tensor_parallelism
+        if not hasattr(config, "head_dim"):
+            config.hidden_size  = config.hidden_size * tensor_parallelism
+
         self._seen_tokens = 0
 
     def update(
@@ -71,10 +93,10 @@ def _next_pow2(x: int) -> int:
 
     return p
 
-def create_static_cache(config: PretrainedConfig, max_batch_size, seq_len, device, dtype) -> MuiStaticCache:
+def create_static_cache(config: PretrainedConfig, max_batch_size, seq_len, device, dtype, tensor_parallelism: int = 1) -> MuiStaticCache:
     # to avoid frequent re-allocations of the cache, we use a power of 2 schedule
     max_cache_len = _next_pow2(seq_len)
-    return MuiStaticCache(config, max_batch_size, max_cache_len, device, dtype)
+    return MuiStaticCache(config, max_batch_size, max_cache_len, device, dtype, tensor_parallelism)
 
 def grow_static_cache_if_needed(cache: MuiStaticCache, capacity: int, max_capacity: int) -> MuiStaticCache:
     required_capacity = _next_pow2(capacity)
