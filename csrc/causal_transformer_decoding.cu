@@ -91,14 +91,16 @@ void __global__ causally_compute_transformer_softmax_scores(
   float* __restrict__ temp_scores_f32, // [B, num_q_heads, T, NEW_T]
   half* __restrict__ scores_out, // [B, num_q_heads, T, NEW_T]
   // tensor dimension sizes
-  unsigned B, // batch size
   unsigned T, // num tokens to decode
   unsigned NEW_T, // number of total tokens
   unsigned num_q_heads, // number of heads for q
-  unsigned num_k_heads, // number of heads for k
   unsigned embed_dim,
   unsigned q_to_k_heads,
-  float attention_inv_scale // factor to scale the attention scores, typically 1/sqrt(embed_dim)
+  float attention_inv_scale, // factor to scale the attention scores, typically 1/sqrt(embed_dim)
+  // k strides
+  unsigned k_batch_stride,
+  unsigned k_head_stride,
+  unsigned k_tok_stride
 ) {
     // one block does one head of a new token
     unsigned q_head_idx = blockIdx.y;
@@ -130,7 +132,7 @@ void __global__ causally_compute_transformer_softmax_scores(
     // we don't need to initialize attention_out as prev_softmax_denom is set to 0 initially
 
     unsigned kv_tok_idx = warpId;
-    k_in = addr(k_in, (((batch_idx * num_k_heads) + k_head_idx) * NEW_T + kv_tok_idx) * embed_dim);
+    k_in = addr(k_in, batch_idx * k_batch_stride + k_head_idx * k_head_stride + kv_tok_idx * k_tok_stride);
 
     temp_scores_f32 = addr(temp_scores_f32, (((batch_idx * num_q_heads) + q_head_idx) * T + tok_idx) * NEW_T);
     scores_out = addr(scores_out, (((batch_idx * num_q_heads) + q_head_idx) * T + tok_idx) * NEW_T);
@@ -218,19 +220,21 @@ void __global__ causally_apply_transformer_softmax_scores(
   const half* __restrict__ v_in, // shape [B, num_v_heads, NEW_T, embed_dim]
   half* __restrict__ hidden_out, // [B, num_q_heads, T, embed_dim]
   // tensor dimension sizes
-  unsigned B, // batch size
-  unsigned T, // num tokens to decode
   unsigned NEW_T, // number of total tokens
   unsigned num_q_heads, // number of heads for q
-  unsigned num_v_heads, // number of heads for k
   unsigned embed_dim,
-  unsigned q_to_v_heads
+  unsigned q_to_v_heads,
+  // v strides
+  unsigned v_batch_stride,
+  unsigned v_head_stride,
+  unsigned v_tok_stride
 ) {
   // one block computes for one q head, one entry of the batch a few columns
   // of the result
   unsigned q_head_idx = blockIdx.y;
   unsigned batch_idx = blockIdx.z;
 
+  // TODO: avoid this division
   unsigned v_head_idx = q_head_idx / q_to_v_heads;
 
   unsigned ROWS_PER_BLOCK = THREADS_PER_BLOCK / COLS_PER_BLOCK;
@@ -239,7 +243,7 @@ void __global__ causally_apply_transformer_softmax_scores(
   unsigned colIdx = threadIdx.x % COLS_PER_BLOCK;
 
   unsigned v_in_stride = embed_dim * ROWS_PER_BLOCK;
-  v_in = &v_in[(((batch_idx * num_v_heads) + v_head_idx) * NEW_T + rowIdx) * embed_dim + blockColStartIdx];
+  v_in = addr(v_in, batch_idx * v_batch_stride + v_head_idx * v_head_stride + rowIdx * v_tok_stride + blockColStartIdx);
 
   // TODO: support T != 1
   attention_weights_in = &attention_weights_in[((batch_idx * num_q_heads) + q_head_idx) * NEW_T + 0];
@@ -422,9 +426,12 @@ at::Tensor muillm_causal_transformer_compute_softmax_scores_no_mask(
     torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
     torch::Tensor& k // [B, num_k_heads, NEW_T, embed_dim]
 ) {
-  // q, k are expected to be contiguous
+  // q is expected to be contiguous
   CHECK_INPUT(q);
-  CHECK_INPUT(k);
+  // but k might not be due to the static cache being
+  // allocated for longer sequences
+  // it is fine as long as the innermost stride is 1
+  CHECK_CUDA(k);
 
   auto device = q.device();
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
@@ -444,6 +451,9 @@ at::Tensor muillm_causal_transformer_compute_softmax_scores_no_mask(
 
   auto q_sizes = q.sizes().vec();
   auto k_sizes = k.sizes().vec();
+  auto k_strides = k.strides().vec();
+
+  TORCH_CHECK(k_strides[3] == 1, "k innermost stride must be 1");
 
   unsigned B = q_sizes[0];
   unsigned T = q_sizes[2];
@@ -451,6 +461,11 @@ at::Tensor muillm_causal_transformer_compute_softmax_scores_no_mask(
   unsigned num_q_heads = q_sizes[1];
   unsigned num_k_heads = k_sizes[1];
   unsigned embed_dim = q_sizes[3];
+
+  // k strides
+  unsigned k_batch_stride = k_strides[0];
+  unsigned k_head_stride = k_strides[1];
+  unsigned k_tok_stride = k_strides[2];
 
   // output scores have size [B, num_q_heads, T, NEW_T]
   auto scores_sizes = q.sizes().vec();
@@ -475,14 +490,15 @@ at::Tensor muillm_causal_transformer_compute_softmax_scores_no_mask(
     (float*)temp_scores_f32.data_ptr(),
     (half*)scores_out.data_ptr(),
     // tensor dimension sizes
-    B,
     T,
     NEW_T,
     num_q_heads,
-    num_k_heads,
     embed_dim,
     q_to_k_heads,
-    attention_inv_scale
+    attention_inv_scale,
+    k_batch_stride,
+    k_head_stride,
+    k_tok_stride
   );
 
   return scores_out;
@@ -493,9 +509,11 @@ at::Tensor muillm_causal_transformer_apply_softmax_scores(
     torch::Tensor& attention_weights, // [B, num_q_heads, T, NEW_T]
     torch::Tensor& v // [B, num_v_heads, NEW_T, embed_dim]
 ) {
-  // q, k are expected to be contiguous
+  // attention weights must be contiguous
   CHECK_INPUT(attention_weights);
-  CHECK_INPUT(v);
+  // but v might not be due to the static cache
+  // it is fine as long as the innermost stride is 1
+  CHECK_CUDA(v);
 
   auto device = v.device();
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
@@ -508,6 +526,9 @@ at::Tensor muillm_causal_transformer_apply_softmax_scores(
 
   auto attention_weights_sizes = attention_weights.sizes().vec();
   auto v_sizes = v.sizes().vec();
+  auto v_strides = v.strides().vec();
+
+  TORCH_CHECK(v_strides[3] == 1, "v innermost stride must be 1");
 
   unsigned B = attention_weights_sizes[0];
   unsigned T = attention_weights_sizes[2];
@@ -516,6 +537,10 @@ at::Tensor muillm_causal_transformer_apply_softmax_scores(
   unsigned num_v_heads = v_sizes[1];
   unsigned embed_dim = v_sizes[3];
 
+  // v strides
+  unsigned v_batch_stride = v_strides[0];
+  unsigned v_head_stride = v_strides[1];
+  unsigned v_tok_stride = v_strides[2];
 
   auto hidden_sizes = attention_weights.sizes().vec();
   hidden_sizes[3] = embed_dim;
@@ -535,13 +560,13 @@ at::Tensor muillm_causal_transformer_apply_softmax_scores(
     (const half*)v.data_ptr(),
     (half*)hidden_out.data_ptr(),
     // tensor dimension sizes
-    B,
-    T,
     NEW_T,
     num_q_heads,
-    num_v_heads,
     embed_dim,
-    q_to_v_heads
+    q_to_v_heads,
+    v_batch_stride,
+    v_head_stride,
+    v_tok_stride
   );
 
   return hidden_out;
@@ -639,20 +664,23 @@ void __global__ causally_compute_transformer_softmax_scores_masked(
   float* __restrict__ temp_scores_f32, // [B, num_q_heads, T, NEW_T]
   half* __restrict__ scores_out, // [B, num_q_heads, T, NEW_T]
   // tensor dimension sizes
-  unsigned B, // batch size
   unsigned T, // num tokens to decode
   unsigned NEW_T, // number of total tokens
   unsigned num_q_heads, // number of heads for q
-  unsigned num_k_heads, // number of heads for k
   unsigned embed_dim,
   unsigned q_to_k_heads,
-  float attention_inv_scale // factor to scale the attention scores, typically 1/sqrt(embed_dim)
+  float attention_inv_scale, // factor to scale the attention scores, typically 1/sqrt(embed_dim)
+  // k strides
+  unsigned k_batch_stride,
+  unsigned k_head_stride,
+  unsigned k_tok_stride
 ) {
     // one block does one head of a new token
     unsigned q_head_idx = blockIdx.y;
     unsigned tok_idx = blockIdx.x;
     unsigned batch_idx = blockIdx.z;
 
+    // TODO: avoid this division
     unsigned k_head_idx = q_head_idx / q_to_k_heads;
 
     unsigned warps_per_block = THREADS_PER_BLOCK / warpSize;
@@ -678,7 +706,7 @@ void __global__ causally_compute_transformer_softmax_scores_masked(
     // we don't need to initialize attention_out as prev_softmax_denom is set to 0 initially
 
     unsigned kv_tok_idx = warpId;
-    k_in = addr(k_in, (((batch_idx * num_k_heads) + k_head_idx) * NEW_T + kv_tok_idx) * embed_dim);
+    k_in = addr(k_in, batch_idx * k_batch_stride + k_head_idx * k_head_stride + kv_tok_idx * k_tok_stride);
 
     m_in = addr(m_in, ((batch_idx * T) + tok_idx) * NEW_T + 0);
 
@@ -772,9 +800,13 @@ at::Tensor muillm_causal_transformer_compute_softmax_scores_masked(
     torch::Tensor& k, // [B, num_k_heads, NEW_T, embed_dim]
     torch::Tensor& m // [B, 1, NEW_T, T]
 ) {
-  // q, k, m are expected to be contiguous
+  // q is expected to be contiguous
   CHECK_INPUT(q);
-  CHECK_INPUT(k);
+  // but k might not be due to the static cache being
+  // allocated for longer sequences
+  // it is fine as long as the innermost stride is 1
+  CHECK_CUDA(k);
+  // m must be contiguous
   CHECK_INPUT(m);
 
   auto device = q.device();
@@ -795,6 +827,9 @@ at::Tensor muillm_causal_transformer_compute_softmax_scores_masked(
 
   auto q_sizes = q.sizes().vec();
   auto k_sizes = k.sizes().vec();
+  auto k_strides = k.strides().vec();
+
+  TORCH_CHECK(k_strides[3] == 1, "k innermost stride must be 1");
 
   unsigned B = q_sizes[0];
   // TODO: kind of flipped the meaning of T and NEW_T in this file...
@@ -803,6 +838,11 @@ at::Tensor muillm_causal_transformer_compute_softmax_scores_masked(
   unsigned num_q_heads = q_sizes[1];
   unsigned num_k_heads = k_sizes[1];
   unsigned embed_dim = q_sizes[3];
+
+  // k strides
+  unsigned k_batch_stride = k_strides[0];
+  unsigned k_head_stride = k_strides[1];
+  unsigned k_tok_stride = k_strides[2];
 
   // output scores have size [B, num_q_heads, T, NEW_T]
   auto scores_sizes = q.sizes().vec();
@@ -828,14 +868,15 @@ at::Tensor muillm_causal_transformer_compute_softmax_scores_masked(
     (float*)temp_scores_f32.data_ptr(),
     (half*)scores_out.data_ptr(),
     // tensor dimension sizes
-    B,
     T,
     NEW_T,
     num_q_heads,
-    num_k_heads,
     embed_dim,
     q_to_k_heads,
-    attention_inv_scale
+    attention_inv_scale,
+    k_batch_stride,
+    k_head_stride,
+    k_tok_stride
   );
 
   return scores_out;

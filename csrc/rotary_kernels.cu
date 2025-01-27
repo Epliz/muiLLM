@@ -111,7 +111,6 @@ void __global__ apply_rope_kernel_no_cache(
 
         head_idx -= num_q_heads;
     }
-    // TODO: v cache case
 
     // index for where to read into the cos/sin caches
     // (try to trigger the read before the cache copy - need to check if done by the compiler)
@@ -174,14 +173,20 @@ void __global__ apply_rope_kernel_no_cache(
     }
 }
 
-
-static inline std::vector<at::Tensor> muillm_rope_forward_no_cache_cuda(
+std::vector<at::Tensor> muillm_rope_forward_no_cache(
     torch::Tensor& position_ids,
     torch::Tensor& cos_cached,
     torch::Tensor& sin_cached,
     torch::Tensor& q_in,
     torch::Tensor& k_in
 ) {
+  CHECK_INPUT(position_ids);
+  CHECK_INPUT(cos_cached);
+  CHECK_INPUT(sin_cached);
+  // q, k are expected to not be contiguous
+  // (due to the fact that we compute them packed as qkv and transposition afterwards)
+  CHECK_CUDA(q_in);
+  CHECK_CUDA(k_in);
 
   auto device = q_in.device();
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
@@ -263,8 +268,9 @@ static inline std::vector<at::Tensor> muillm_rope_forward_no_cache_cuda(
   return {q_out, k_out};
 }
 
+
 // expected block dimensions: [x=num_q_heads+num_k_heads+num_v_heads, y=max(PREV_T, T), z=B]
-void __global__ apply_rope_kernel_write_cache(
+void __global__ apply_rope_kernel_write_dynamic_cache(
   const uint64_t* __restrict__ position_ids, // shape [B, T]
   const half* __restrict__ cos_cached, // shape [S, embed_dim] or [B, T, embed_dim]
   const half* __restrict__ sin_cached, // shape [S, embed_dim] or [B, T, embed_dim]
@@ -481,7 +487,7 @@ void __global__ apply_rope_kernel_write_cache(
     }
 }
 
-static inline std::vector<at::Tensor> muillm_rope_forward_write_dynamic_cache_cuda(
+std::vector<at::Tensor> muillm_rope_forward_dynamic_cache(
     torch::Tensor& position_ids,
     torch::Tensor& cos_cached,
     torch::Tensor& sin_cached,
@@ -491,6 +497,17 @@ static inline std::vector<at::Tensor> muillm_rope_forward_write_dynamic_cache_cu
     torch::Tensor& prev_k_cache,
     torch::Tensor& prev_v_cache
 ) {
+  CHECK_INPUT(position_ids);
+  CHECK_INPUT(cos_cached);
+  CHECK_INPUT(sin_cached);
+  // q, k, v are expected to not be contiguous
+  // (due to the fact that we compute them packed as qkv and transposition afterwards)
+  CHECK_CUDA(q_in);
+  CHECK_CUDA(k_in);
+  CHECK_CUDA(v_in);
+  CHECK_INPUT(prev_k_cache);
+  CHECK_INPUT(prev_v_cache);
+
 
   auto device = q_in.device();
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
@@ -564,7 +581,7 @@ static inline std::vector<at::Tensor> muillm_rope_forward_write_dynamic_cache_cu
   // expected block dimensions: [x=num_q_heads+num_k_heads, y=max(PREV_T, T), z=B]
   const dim3 num_blocks = dim3(num_q_heads + num_k_heads + num_v_heads, std::max(PREV_T, T), B);
 
-  apply_rope_kernel_write_cache<<<num_blocks, threads_per_blocks, 0, stream>>>(
+  apply_rope_kernel_write_dynamic_cache<<<num_blocks, threads_per_blocks, 0, stream>>>(
     (const uint64_t*)position_ids.data_ptr(),
     (const half*)cos_cached.data_ptr(),
     (const half*)sin_cached.data_ptr(),
@@ -605,39 +622,203 @@ static inline std::vector<at::Tensor> muillm_rope_forward_write_dynamic_cache_cu
   return {q_out, k_out, k_cache_out, v_cache_out};
 }
 
-std::vector<at::Tensor> muillm_rope_forward_no_cache(
-    torch::Tensor& position_ids,
-    torch::Tensor& cos_cached,
-    torch::Tensor& sin_cached,
-    torch::Tensor& q_in,
-    torch::Tensor& k_in
-) {
-  CHECK_INPUT(position_ids);
-  CHECK_INPUT(cos_cached);
-  CHECK_INPUT(sin_cached);
-  // q, k are expected to not be contiguous
-  // (due to the fact that we compute them packed as qkv and transposition afterwards)
-  CHECK_CUDA(q_in);
-  CHECK_CUDA(k_in);
 
-  return muillm_rope_forward_no_cache_cuda(
-    position_ids,
-    cos_cached,
-    sin_cached,
-    q_in,
-    k_in
-  );
+// expected block dimensions: [x=num_q_heads+num_k_heads+num_v_heads, y=T, z=B]
+void __global__ apply_rope_kernel_write_static_cache(
+  const uint64_t* __restrict__ position_ids, // shape [B, T]
+  const half* __restrict__ cos_cached, // shape [S, embed_dim] or [B, T, embed_dim]
+  const half* __restrict__ sin_cached, // shape [S, embed_dim] or [B, T, embed_dim]
+  const half* __restrict__ q_in, // shape [B, num_q_heads, T, embed_dim]
+  const half* __restrict__ k_in, // shape [B, num_k_heads, T, embed_dim]
+  const half* __restrict__ v_in, // shape [B, num_v_heads, T, embed_dim]
+  half* __restrict__ q_out, // shape [B, num_q_heads, T, embed_dim]
+  half* __restrict__ k_out, // shape [B, num_k_heads, T, embed_dim]
+  // KV cache
+  half* __restrict__ k_cache_out, // [B, num_k_heads, MAX_T, embed_dim]
+  half* __restrict__ v_cache_out, // [B, num_v_heads, MAX_T, embed_dim]
+  const uint64_t* __restrict__ cache_position, // [T]
+  // tensor dimension sizes
+  unsigned B, // batch size
+  unsigned T, // num new tokens
+  unsigned MAX_T, // number of tokens in the KV cache
+  unsigned num_q_heads, // number of heads for q
+  unsigned num_k_heads, // number of heads for k
+  unsigned num_v_heads, // number of heads for v
+  unsigned embed_dim, // half of the size of embeddings in each head
+  // q strides
+  unsigned q_in_batch_stride,
+  unsigned q_in_head_stride,
+  unsigned q_in_tok_stride,
+  // k strides
+  unsigned k_in_batch_stride,
+  unsigned k_in_head_stride,
+  unsigned k_in_tok_stride,
+  // v strides
+  unsigned v_in_batch_stride,
+  unsigned v_in_head_stride,
+  unsigned v_in_tok_stride,
+  //
+  muillm_rotary_cache_layout_t cache_layout
+) {
+    // one block does one head of a new token
+    unsigned head_idx = blockIdx.x;
+    unsigned tok_idx = blockIdx.y; // should be launched with T
+    unsigned batch_idx = blockIdx.z;
+    unsigned pos_idx = batch_idx * T + tok_idx;
+
+    // determine if we are supposed to transform an embedding from q or k,
+    // and which head
+    const half* __restrict__ embeds_in;
+    half* __restrict__ embeds_out;
+    const half* __restrict__ prev_cache;
+    half* __restrict__ cache_out;
+    unsigned num_heads;
+
+    // strides
+    unsigned batch_stride;
+    unsigned head_stride;
+    unsigned tok_stride;
+
+    // determine if we are processing q, k or v
+    if (head_idx < num_q_heads) {
+        embeds_in = q_in;
+        embeds_out = q_out;
+        // no q cache
+        cache_out = nullptr;
+        num_heads = num_q_heads;
+  
+        batch_stride = q_in_batch_stride;
+        head_stride = q_in_head_stride;
+        tok_stride = q_in_tok_stride;
+    } else if (head_idx < num_q_heads + num_k_heads) {
+        // k
+        embeds_in = k_in;
+        embeds_out = k_out;
+        cache_out = k_cache_out;
+        num_heads = num_k_heads;
+
+        batch_stride = k_in_batch_stride;
+        head_stride = k_in_head_stride;
+        tok_stride = k_in_tok_stride;
+
+        head_idx -= num_q_heads;
+    } else {
+        // v
+        embeds_in = v_in;
+        embeds_out = nullptr;
+        cache_out = v_cache_out;
+        num_heads = num_v_heads;
+
+        batch_stride = v_in_batch_stride;
+        head_stride = v_in_head_stride;
+        tok_stride = v_in_tok_stride;
+
+        head_idx -= (num_q_heads + num_k_heads);
+    }
+
+    // index for where to read into the cos/sin caches, if we need to
+    // (try to trigger the read before the cache copy - need to check if done by the compiler)
+    uint64_t position_id;
+
+    // there are two possible layouts for the cache
+    if (cache_layout == ROTARY_CACHE_SE_LAYOUT) {
+      position_id = tok_idx < T ? position_ids[pos_idx] : 0;
+    } else {
+      // ROTARY_CACHE_BTE_LAYOUT
+      position_id = tok_idx < T ? pos_idx : 0;
+    }
+
+    // realign the pointer to where we are supposed to write out if needed
+
+    // realign the cos/sin caches to the position
+    cos_cached = &cos_cached[position_id * embed_dim];
+    sin_cached = &sin_cached[position_id * embed_dim];
+
+
+    // realign embeds_in and embeds_out
+    // q/k/v might be strided, but embedding dimension stride needs to be 1
+    unsigned embed_in_idx = batch_idx * batch_stride + head_idx * head_stride + tok_idx * tok_stride;
+    embeds_in = &embeds_in[embed_in_idx];
+
+    if (embeds_out != nullptr) {
+      unsigned embed_out_idx = ((batch_idx * num_heads + head_idx) * T + tok_idx) * embed_dim + 0;
+      embeds_out = &embeds_out[embed_out_idx];
+    }
+
+    // realign cache_out
+    half* __restrict__ cache_out_write = nullptr;
+    if (cache_out != nullptr) {
+      unsigned cache_tok_pos = cache_position[tok_idx];
+      cache_out_write = &cache_out[(((batch_idx * num_heads) + head_idx) * MAX_T + cache_tok_pos) * embed_dim + 0];
+    }
+
+    if (embeds_out != nullptr) {
+      // q or k
+      unsigned half_embed_dim = embed_dim / 2;
+
+      // TODO: vectorize
+      // first half
+      const half* __restrict__ rot_embeds_in;
+      rot_embeds_in = &embeds_in[half_embed_dim];
+
+      unsigned d = threadIdx.x;
+      for (; d < half_embed_dim; d += THREADS_PER_BLOCK) {
+        half cos_pos = *addr(cos_cached, d);
+        half sin_pos = *addr(sin_cached, d);
+
+        half embed = *addr(embeds_in, d);
+        half rot_embed = __hneg(*addr(rot_embeds_in, d));
+    
+        half r = __hfma(rot_embed, sin_pos,__hmul(embed, cos_pos));
+
+        *addr(embeds_out, d) = r;
+
+        // TODO: variants with and without cache write?
+        // write the new token in cache
+        if (cache_out_write != nullptr) {
+          *addr(cache_out_write, d) = r;
+        }
+      }
+
+      // second half
+      rot_embeds_in = &embeds_in[(int)-half_embed_dim];
+      for (; d < embed_dim; d += THREADS_PER_BLOCK) {
+        half cos_pos = *addr(cos_cached, d);
+        half sin_pos = *addr(sin_cached, d);
+
+        half embed = *addr(embeds_in, d);
+        half rot_embed = *addr(rot_embeds_in, d);
+
+        half r = __hfma(rot_embed, sin_pos,__hmul(embed, cos_pos));
+
+        *addr(embeds_out, d) = r;
+
+        // TODO: variants with and without cache write?
+        // write the new token in cache
+        if (cache_out_write != nullptr) {
+          *addr(cache_out_write, d) = r;
+        }
+      }
+    } else {
+      // v
+      unsigned d = threadIdx.x;
+      for (; d < embed_dim; d += THREADS_PER_BLOCK) {
+        half embed = *addr(embeds_in, d);
+        *addr(cache_out_write, d) = embed;
+      }
+    }
 }
 
-std::vector<at::Tensor> muillm_rope_forward_dynamic_cache(
+std::vector<at::Tensor> muillm_rope_forward_static_cache(
     torch::Tensor& position_ids,
     torch::Tensor& cos_cached,
     torch::Tensor& sin_cached,
     torch::Tensor& q_in,
     torch::Tensor& k_in,
     torch::Tensor& v_in,
-    torch::Tensor& prev_k_cache,
-    torch::Tensor& prev_v_cache
+    torch::Tensor& k_cache,
+    torch::Tensor& v_cache,
+    torch::Tensor& cache_position
 ) {
   CHECK_INPUT(position_ids);
   CHECK_INPUT(cos_cached);
@@ -647,17 +828,109 @@ std::vector<at::Tensor> muillm_rope_forward_dynamic_cache(
   CHECK_CUDA(q_in);
   CHECK_CUDA(k_in);
   CHECK_CUDA(v_in);
-  CHECK_INPUT(prev_k_cache);
-  CHECK_INPUT(prev_v_cache);
+  CHECK_INPUT(k_cache);
+  CHECK_INPUT(v_cache);
 
-  return muillm_rope_forward_write_dynamic_cache_cuda(
-    position_ids,
-    cos_cached,
-    sin_cached,
-    q_in,
-    k_in,
-    v_in,
-    prev_k_cache,
-    prev_v_cache
+  auto device = q_in.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  auto dtype = torch::kFloat16;
+  auto output_options = at::TensorOptions()
+                            .dtype(dtype)
+                            .layout(at::kStrided)
+                            .device(device) // same output device as inputs
+                            .requires_grad(false);
+
+  auto cache_sizes = cos_cached.sizes().vec();
+
+  auto q_sizes = q_in.sizes().vec();
+  auto q_strides = q_in.strides().vec();
+  auto q_out = torch::empty(q_sizes, output_options);
+
+  auto k_sizes = k_in.sizes().vec();
+  auto k_strides = k_in.strides().vec();
+  auto k_out = torch::empty(k_sizes, output_options);
+
+  auto v_sizes = v_in.sizes().vec();
+  auto v_strides = v_in.strides().vec();
+
+  auto k_cache_sizes = k_cache.sizes().vec();
+  auto v_cache_sizes = v_cache.sizes().vec();
+
+  unsigned B = q_sizes[0];
+  unsigned T = q_sizes[2];
+  unsigned MAX_T = k_cache_sizes[2];
+  unsigned num_q_heads = q_sizes[1];
+  unsigned num_k_heads = k_sizes[1];
+  unsigned num_v_heads = v_sizes[1];
+  unsigned embed_dim = q_sizes[3];
+
+  // q strides
+  unsigned q_in_batch_stride = q_strides[0];
+  unsigned q_in_head_stride = q_strides[1];
+  unsigned q_in_tok_stride = q_strides[2];
+  // k strides
+  unsigned k_in_batch_stride = k_strides[0];
+  unsigned k_in_head_stride = k_strides[1];
+  unsigned k_in_tok_stride = k_strides[2];
+  // v strides
+  unsigned v_in_batch_stride = v_strides[0];
+  unsigned v_in_head_stride = v_strides[1];
+  unsigned v_in_tok_stride = v_strides[2];
+
+  muillm_rotary_cache_layout_t cache_layout;
+
+  auto cache_dim = cache_sizes.size();
+  if (cache_dim == 2) {
+    cache_layout = ROTARY_CACHE_SE_LAYOUT;
+  } else if (cache_dim == 3) {
+    cache_layout = ROTARY_CACHE_BTE_LAYOUT;
+  } else {
+    TORCH_CHECK(false, "Unknown rotary cache layout");
+  }
+
+  const dim3 threads_per_blocks = dim3(THREADS_PER_BLOCK);
+
+
+  // expected block dimensions: [x=num_q_heads+num_k_heads, y=T, z=B]
+  const dim3 num_blocks = dim3(num_q_heads + num_k_heads + num_v_heads, T, B);
+
+  apply_rope_kernel_write_static_cache<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    (const uint64_t*)position_ids.data_ptr(),
+    (const half*)cos_cached.data_ptr(),
+    (const half*)sin_cached.data_ptr(),
+    (const half*)q_in.data_ptr(),
+    (const half*)k_in.data_ptr(),
+    (const half*)v_in.data_ptr(),
+    (half*)q_out.data_ptr(),
+    (half*)k_out.data_ptr(),
+    // KV cache
+    (half*)k_cache.data_ptr(),
+    (half*)v_cache.data_ptr(),
+    (const uint64_t*)cache_position.data_ptr(),
+    // tensor dimension sizes
+    B,
+    T,
+    MAX_T,
+    num_q_heads,
+    num_k_heads,
+    num_v_heads,
+    embed_dim,
+    // q strides
+    q_in_batch_stride,
+    q_in_head_stride,
+    q_in_tok_stride,
+    // k strides
+    k_in_batch_stride,
+    k_in_head_stride,
+    k_in_tok_stride,
+    // v strides
+    v_in_batch_stride,
+    v_in_head_stride,
+    v_in_tok_stride,
+    // cache layout
+    cache_layout
   );
+
+  return {q_out, k_out};
 }

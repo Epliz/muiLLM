@@ -112,7 +112,6 @@ def _less_sync_sample(
 
     model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
-
     # extract information about how many tokens we will generate max
     # so that we can sync GPU and CPU less but still every now and then
     # and respecting the max amount of tokens to generate 
@@ -124,7 +123,7 @@ def _less_sync_sample(
 
     last_sync = 0
     sync_frequency = 4
- 
+
     # help removes a GPU sync point when preparing masks
     checked_mask_content = False
     self.all_ones_mask = None

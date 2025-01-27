@@ -4,7 +4,7 @@ from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
 
-from transformers.cache_utils import Cache, DynamicCache
+from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.models.mistral.configuration_mistral import MistralConfig
 from transformers.models.llama.configuration_llama import LlamaConfig
@@ -85,6 +85,20 @@ class _MuiRotaryDynamicCache(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise NotImplementedError("rotary backward not implemented")
 
+
+class _MuiRotaryStaticCache(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, positions_ids, cos_cached, sin_cached, q, k, v, k_cache, v_cache, cache_position):
+        output = muillm_ext.muillm_rope_forward_static_cache(positions_ids, cos_cached, sin_cached, q, k, v, k_cache, v_cache, cache_position)
+
+        ctx.save_for_backward(positions_ids, cos_cached, sin_cached, q, k)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("rotary backward not implemented")
+    
 class MuiMistralRotaryEmbedding(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], rope_kwargs: Dict[str, Any] = None, layer_idx: int = 0, device=None, dtype=None):
         super().__init__(engine_config=engine_config)
@@ -199,7 +213,31 @@ class MuiMistralRotaryEmbedding(MuiModule):
             cos, sin = position_embeddings
 
         if self.dispatchable:
-            if isinstance(cache, DynamicCache):
+            if cache is None:
+                # No cache
+                query_states, key_states = _MuiRotaryNoCache.apply(position_ids, cos, sin, q, k)
+                # might need to return if if there is no cache
+                value_states = v
+            elif isinstance(cache, StaticCache):
+                layer_idx = self.layer_idx
+                if layer_idx == 0:
+                    cache._seen_tokens = cache._seen_tokens + k.shape[-2]
+
+                # Update the cache
+                k_cache = cache.key_cache[layer_idx]
+                v_cache = cache.value_cache[layer_idx]
+
+                if cache_position is None:
+                    raise ValueError("cache_position is needed")
+
+                query_states, key_states = _MuiRotaryStaticCache.apply(position_ids, cos, sin, q, k, v, k_cache, v_cache, cache_position)
+
+                # restrict to as many tokens as seen by the cache
+                key_states = k_cache[:, :, : cache._seen_tokens, :]
+                value_states = v_cache[:, :, : cache._seen_tokens, :]
+
+                return query_states, key_states, value_states
+            elif isinstance(cache, DynamicCache):
                 layer_idx = self.layer_idx
                 if layer_idx == 0:
                     cache._seen_tokens = cache._seen_tokens + k.shape[-2]
@@ -225,9 +263,7 @@ class MuiMistralRotaryEmbedding(MuiModule):
                 return query_states, key_states, value_states
             else:
                 # Not supporting this type of cache
-                query_states, key_states = _MuiRotaryNoCache.apply(position_ids, cos, sin, q, k)
-                # might need to return if if there is no cache
-                value_states = v
+                raise ValueError(f"Unsupported cache type: {type(cache).__name__}")
 
         else:
             query_states, key_states = apply_rotary_pos_emb(q, k, cos, sin, position_ids)

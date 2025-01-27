@@ -104,6 +104,18 @@ std::vector<at::Tensor> muillm_rope_forward_dynamic_cache(
     torch::Tensor& prev_v_cache
 );
 
+std::vector<at::Tensor> muillm_rope_forward_static_cache(
+    torch::Tensor& position_ids,
+    torch::Tensor& cos_cached,
+    torch::Tensor& sin_cached,
+    torch::Tensor& q_in,
+    torch::Tensor& k_in,
+    torch::Tensor& v_in,
+    torch::Tensor& k_cache,
+    torch::Tensor& v_cache,
+    torch::Tensor& cache_position
+);
+
 #include "causal_transformer_decoding.cuh"
 
 std::vector<at::Tensor> muillm_parallel_causal_transformer_decoding_no_mask(
@@ -326,6 +338,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // rotary
   m.def("muillm_rope_forward_no_cache", &muillm_rope_forward_no_cache, "muillm rotary forward no cache");
   m.def("muillm_rope_forward_dynamic_cache", &muillm_rope_forward_dynamic_cache, "muillm rotary forward dynamic cache");
+  m.def("muillm_rope_forward_static_cache", &muillm_rope_forward_static_cache, "muillm rotary forward static cache");
   // causal transformer decoding
   m.def("muillm_causal_transformer_compute_softmax_scores_no_mask", &muillm_causal_transformer_compute_softmax_scores_no_mask, "muillm causal transformer compute softmax scores no mask");
   m.def("muillm_causal_transformer_apply_softmax_scores", &muillm_causal_transformer_apply_softmax_scores, "muillm causal transformer apply softmax scores");
