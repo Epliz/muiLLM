@@ -25,7 +25,6 @@ def _less_sync_sample(
     generation_config: GenerationConfig,
     synced_gpus: bool,
     streamer: Optional["BaseStreamer"],
-    logits_warper: Optional[LogitsProcessorList],
     synchronizer: Synchronizer = None,
     **model_kwargs,
 ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
@@ -74,11 +73,6 @@ def _less_sync_sample(
     return_dict_in_generate = generation_config.return_dict_in_generate
     has_eos_stopping_criteria = any(hasattr(criteria, "eos_token_id") for criteria in stopping_criteria)
     do_sample = generation_config.do_sample
-    if do_sample is True and not isinstance(logits_warper, LogitsProcessorList):
-        raise ValueError(
-            "`do_sample` is set to `True`, `logits_warper` must be a `LogitsProcessorList` instance (it is "
-            f"{logits_warper})."
-        )
 
     # init attention / hidden states / scores tuples
     scores = () if (return_dict_in_generate and output_scores) else None
@@ -158,8 +152,6 @@ def _less_sync_sample(
 
         # pre-process distribution
         next_token_scores = logits_processor(input_ids, next_token_logits)
-        if do_sample:
-            next_token_scores = logits_warper(input_ids, next_token_scores)
 
         # Store scores, attentions and hidden_states when required
         if return_dict_in_generate:

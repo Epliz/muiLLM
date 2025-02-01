@@ -135,12 +135,11 @@ class MuiParallelLlamaModel(LlamaPreTrainedModel):
 
             if no_cache:
                 # create a cache from scratch
-                max_batch_size = batch_size
                 dtype = torch.float16
     
                 # one cache per GPU
                 tensor_parallelism = self.engine_config.tensor_parallelism
-                past_key_values = [create_static_cache(self.config, max_batch_size, tot_seq_len, device, dtype, tensor_parallelism=tensor_parallelism) for device in self.engine_config.devices]
+                past_key_values = [create_static_cache(self.config, batch_size, tot_seq_len, device, dtype, tensor_parallelism=tensor_parallelism) for device in self.engine_config.devices]
             elif use_legacy_cache:
                 # one cache per GPU
                 past_key_values = [DynamicCache.from_legacy_cache(past_key_values[i]) for i, d in enumerate(self.engine_config.devices)]

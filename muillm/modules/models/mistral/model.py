@@ -120,10 +120,9 @@ class MuiMistralModel(MistralPreTrainedModel):
 
             if no_cache:
                 # create a cache from scratch
-                max_batch_size = batch_size
                 device = inputs_embeds.device
                 dtype = torch.float16
-                past_key_values = create_static_cache(self.config, max_batch_size, tot_seq_len, device, dtype)
+                past_key_values = create_static_cache(self.config, batch_size, tot_seq_len, device, dtype)
             elif use_legacy_cache:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
             else:

@@ -24,11 +24,12 @@ class MuiStaticCache(StaticCache):
     def __init__(
             self,
             config: PretrainedConfig,
-            max_batch_size: int,
+            batch_size: int,
             max_cache_len: int,
             device,
             dtype=None,
             tensor_parallelism: int = 1,
+            max_batch_size: Optional[int] = None,
         ) -> None:
 
         # hack to make the cache be the right size if we use tensor parallelism
@@ -42,7 +43,7 @@ class MuiStaticCache(StaticCache):
             # the head dim is wrong
             config.hidden_size  = config.hidden_size // tensor_parallelism
 
-        super().__init__(config=config, max_batch_size=max_batch_size, max_cache_len=max_cache_len, device=device, dtype=dtype)
+        super().__init__(config=config, batch_size=batch_size, max_cache_len=max_cache_len, device=device, dtype=dtype, max_batch_size=max_batch_size)
 
         # set back the right values in the config
         if config.num_key_value_heads is not None:
