@@ -434,6 +434,86 @@ __global__ void __all_reduce_fp32_tp4_multi_write_out_kernel(
 }
 
 
+// TP8 kernels
+
+__global__ void __all_reduce_fp16_tp8_multi_write_out_kernel(
+    const half* x1,
+    const half* x2,
+    const half* x3,
+    const half* x4,
+    const half* x5,
+    const half* x6,
+    const half* x7,
+    const half* x8,
+    half* y1,
+    half* y2,
+    half* y3,
+    half* y4,
+    half* y5,
+    half* y6,
+    half* y7,
+    half* y8,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    half x1x2 = __hadd(x1[i], x2[i]);
+    half x3x4 = __hadd(x3[i], x4[i]);
+    half x1x4 = __hadd(x1x2, x3x4);
+    half x5x6 = __hadd(x5[i], x6[i]);
+    half x7x8 = __hadd(x7[i], x8[i]);
+    half x5x8 = __hadd(x5x6, x7x8);
+    half res = __hadd(x1x4, x5x8);
+    y1[i] = res;
+    y2[i] = res;
+    y3[i] = res;
+    y4[i] = res;
+    y5[i] = res;
+    y6[i] = res;
+    y7[i] = res;
+    y8[i] = res;
+  }
+}
+
+__global__ void __all_reduce_fp32_tp8_multi_write_out_kernel(
+    const float* x1,
+    const float* x2,
+    const float* x3,
+    const float* x4,
+    const float* x5,
+    const float* x6,
+    const float* x7,
+    const float* x8,
+    float* y1,
+    float* y2,
+    float* y3,
+    float* y4,
+    float* y5,
+    float* y6,
+    float* y7,
+    float* y8,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    float x1x2 = (x1[i] + x2[i]);
+    float x3x4 = (x3[i] + x4[i]);
+    float x1x4 = x1x2 + x3x4;
+    float x5x6 = (x5[i] + x6[i]);
+    float x7x8 = (x7[i] + x8[i]);
+    float x5x8 = x5x6 + x7x8;
+    float res = x1x4 + x5x8;
+    y1[i] = res;
+    y2[i] = res;
+    y3[i] = res;
+    y4[i] = res;
+    y5[i] = res;
+    y6[i] = res;
+    y7[i] = res;
+    y8[i] = res;
+  }
+}
+
 muillm_comm_error_t muillm_comm_all_reduce_sum_single_gpu(
   muillm_comm_t* comm,
   const void** src_ptrs,
@@ -502,7 +582,27 @@ On MI100:
 
   // reduce on one GPU
   if (datatype == MUILLM_COMM_FP16) {
-    if (local_size == 4) {
+    if (local_size == 8) {
+      __all_reduce_fp16_tp8_multi_write_out_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[0]>>>(
+        (const half*) src_ptrs[0],
+        (const half*) src_ptrs[1],
+        (const half*) src_ptrs[2],
+        (const half*) src_ptrs[3],
+        (const half*) src_ptrs[4],
+        (const half*) src_ptrs[5],
+        (const half*) src_ptrs[6],
+        (const half*) src_ptrs[7],
+        (half*) dst_ptrs[0],
+        (half*) dst_ptrs[1],
+        (half*) dst_ptrs[2],
+        (half*) dst_ptrs[3],
+        (half*) dst_ptrs[4],
+        (half*) dst_ptrs[5],
+        (half*) dst_ptrs[6],
+        (half*) dst_ptrs[7],
+        count
+      );
+    } else if (local_size == 4) {
       __all_reduce_fp16_tp4_multi_write_out_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[0]>>>(
         (const half*) src_ptrs[0],
         (const half*) src_ptrs[1],
@@ -526,7 +626,27 @@ On MI100:
       return MUILLM_COMM_UNKNOWN_ERROR;
     }
   } else if (datatype == MUILLM_COMM_FP32) {
-    if (local_size == 4) {
+    if (local_size == 8) {
+      __all_reduce_fp32_tp8_multi_write_out_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[0]>>>(
+        (const float*) src_ptrs[0],
+        (const float*) src_ptrs[1],
+        (const float*) src_ptrs[2],
+        (const float*) src_ptrs[3],
+        (const float*) src_ptrs[4],
+        (const float*) src_ptrs[5],
+        (const float*) src_ptrs[6],
+        (const float*) src_ptrs[7],
+        (float*) dst_ptrs[0],
+        (float*) dst_ptrs[1],
+        (float*) dst_ptrs[2],
+        (float*) dst_ptrs[3],
+        (float*) dst_ptrs[4],
+        (float*) dst_ptrs[5],
+        (float*) dst_ptrs[6],
+        (float*) dst_ptrs[7],
+        count
+      );
+    } else if (local_size == 4) {
       __all_reduce_fp32_tp4_multi_write_out_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[0]>>>(
         (const float*) src_ptrs[0],
         (const float*) src_ptrs[1],
@@ -648,6 +768,57 @@ __global__ void __all_reduce_fp32_tp4_kernel(
   }
 }
 
+// TP8 kernels
+
+__global__ void __all_reduce_fp16_tp8_kernel(
+    const half* x1,
+    const half* x2,
+    const half* x3,
+    const half* x4,
+    const half* x5,
+    const half* x6,
+    const half* x7,
+    const half* x8,
+    half* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    half x1x2 = __hadd(x1[i], x2[i]);
+    half x3x4 = __hadd(x3[i], x4[i]);
+    half x1x4 = __hadd(x1x2, x3x4);
+    half x5x6 = __hadd(x5[i], x6[i]);
+    half x7x8 = __hadd(x7[i], x8[i]);
+    half x5x8 = __hadd(x5x6, x7x8);
+    half res = __hadd(x1x4, x5x8);
+    y[i] = res;
+  }
+}
+
+__global__ void __all_reduce_fp32_tp8_kernel(
+    const float* x1,
+    const float* x2,
+    const float* x3,
+    const float* x4,
+    const float* x5,
+    const float* x6,
+    const float* x7,
+    const float* x8,
+    float* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    float x1x2 = (x1[i] + x2[i]);
+    float x3x4 = (x3[i] + x4[i]);
+    float x1x4 = x1x2 + x3x4;
+    float x5x6 = (x5[i] + x6[i]);
+    float x7x8 = (x7[i] + x8[i]);
+    float x5x8 = x5x6 + x7x8;
+    float res = x1x4 + x5x8;
+    y[i] = res;
+  }
+}
 
 muillm_comm_error_t muillm_comm_all_reduce_sum(
   muillm_comm_t* comm,
@@ -708,7 +879,24 @@ On MI100:
 
   // reduce on one GPU
   if (datatype == MUILLM_COMM_FP16) {
-    if (local_size == 4) {
+    if (local_size == 8) {
+      const int threads_per_blocks = THREADS_PER_BLOCK;
+      const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
+      for (int r = 0; r < local_size; r++) {
+        __all_reduce_fp16_tp8_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const half*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const half*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (const half*) (aliasing ? buffer_set->buffers[2] : src_ptrs[2]),
+          (const half*) (aliasing ? buffer_set->buffers[3] : src_ptrs[3]),
+          (const half*) (aliasing ? buffer_set->buffers[4] : src_ptrs[4]),
+          (const half*) (aliasing ? buffer_set->buffers[5] : src_ptrs[5]),
+          (const half*) (aliasing ? buffer_set->buffers[6] : src_ptrs[6]),
+          (const half*) (aliasing ? buffer_set->buffers[7] : src_ptrs[7]),
+          (half*) dst_ptrs[r],
+          count
+        );
+      }
+    } else if (local_size == 4) {
       const int threads_per_blocks = THREADS_PER_BLOCK;
       const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
       for (int r = 0; r < local_size; r++) {
@@ -736,7 +924,24 @@ On MI100:
       return MUILLM_COMM_UNKNOWN_ERROR;
     }
   } else if (datatype == MUILLM_COMM_FP32) {
-    if (local_size == 4) {
+    if (local_size == 8) {
+      const int threads_per_blocks = THREADS_PER_BLOCK;
+      const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
+      for (int r = 0; r < local_size; r++) {
+        __all_reduce_fp32_tp8_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const float*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const float*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (const float*) (aliasing ? buffer_set->buffers[2] : src_ptrs[2]),
+          (const float*) (aliasing ? buffer_set->buffers[3] : src_ptrs[3]),
+          (const float*) (aliasing ? buffer_set->buffers[4] : src_ptrs[4]),
+          (const float*) (aliasing ? buffer_set->buffers[5] : src_ptrs[5]),
+          (const float*) (aliasing ? buffer_set->buffers[6] : src_ptrs[6]),
+          (const float*) (aliasing ? buffer_set->buffers[7] : src_ptrs[7]),
+          (float*) dst_ptrs[r],
+          count
+        );
+      }
+    } else if (local_size == 4) {
       const int threads_per_blocks = THREADS_PER_BLOCK;
       const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
       for (int r = 0; r < local_size; r++) {
@@ -853,6 +1058,76 @@ __global__ void __all_gather_fp32_tp4_kernel(
   }
 }
 
+// TP8 kernels
+
+__global__ void __all_gather_fp16_tp8_kernel(
+    const half* x1,
+    const half* x2,
+    const half* x3,
+    const half* x4,
+    const half* x5,
+    const half* x6,
+    const half* x7,
+    const half* x8,
+    half* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    half* y0 = y;
+    half* y1 = y0 + N;
+    half* y2 = y1 + N;
+    half* y3 = y2 + N;
+    half* y4 = y3 + N;
+    half* y5 = y4 + N;
+    half* y6 = y5 + N;
+    half* y7 = y6 + N;
+
+    y0[i] = x1[i];
+    y1[i] = x2[i];
+    y2[i] = x3[i];
+    y3[i] = x4[i];
+    y4[i] = x5[i];
+    y5[i] = x6[i];
+    y6[i] = x7[i];
+    y7[i] = x8[i];
+  }
+}
+
+__global__ void __all_gather_fp32_tp8_kernel(
+    const float* x1,
+    const float* x2,
+    const float* x3,
+    const float* x4,
+    const float* x5,
+    const float* x6,
+    const float* x7,
+    const float* x8,
+    float* y,
+    unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    float* y0 = y;
+    float* y1 = y0 + N;
+    float* y2 = y1 + N;
+    float* y3 = y2 + N;
+    float* y4 = y3 + N;
+    float* y5 = y4 + N;
+    float* y6 = y5 + N;
+    float* y7 = y6 + N;
+
+    y0[i] = x1[i];
+    y1[i] = x2[i];
+    y2[i] = x3[i];
+    y3[i] = x4[i];
+    y4[i] = x5[i];
+    y5[i] = x6[i];
+    y6[i] = x7[i];
+    y7[i] = x8[i];
+  }
+}
+
 muillm_comm_error_t muillm_comm_all_gather(
   muillm_comm_t* comm,
   const void** src_ptrs,
@@ -908,7 +1183,22 @@ muillm_comm_error_t muillm_comm_all_gather(
 
   // gather
   if (datatype == MUILLM_COMM_FP16) {
-    if (local_size == 4) {
+    if (local_size == 8) {
+      for (int r = 0; r < local_size; r++) {
+        __all_gather_fp16_tp8_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const half*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const half*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (const half*) (aliasing ? buffer_set->buffers[2] : src_ptrs[2]),
+          (const half*) (aliasing ? buffer_set->buffers[3] : src_ptrs[3]),
+          (const half*) (aliasing ? buffer_set->buffers[4] : src_ptrs[4]),
+          (const half*) (aliasing ? buffer_set->buffers[5] : src_ptrs[5]),
+          (const half*) (aliasing ? buffer_set->buffers[6] : src_ptrs[6]),
+          (const half*) (aliasing ? buffer_set->buffers[7] : src_ptrs[7]),
+          (half*) dst_ptrs[r],
+          in_count
+        );
+      }
+    } else if (local_size == 4) {
       for (int r = 0; r < local_size; r++) {
         __all_gather_fp16_tp4_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
           (const half*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
@@ -932,7 +1222,22 @@ muillm_comm_error_t muillm_comm_all_gather(
       return MUILLM_COMM_UNKNOWN_ERROR;
     }
   } else if (datatype == MUILLM_COMM_FP32) {
-    if (local_size == 4) {
+    if (local_size == 8) {
+      for (int r = 0; r < local_size; r++) {
+        __all_gather_fp32_tp8_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
+          (const float*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
+          (const float*) (aliasing ? buffer_set->buffers[1] : src_ptrs[1]),
+          (const float*) (aliasing ? buffer_set->buffers[2] : src_ptrs[2]),
+          (const float*) (aliasing ? buffer_set->buffers[3] : src_ptrs[3]),
+          (const float*) (aliasing ? buffer_set->buffers[4] : src_ptrs[4]),
+          (const float*) (aliasing ? buffer_set->buffers[5] : src_ptrs[5]),
+          (const float*) (aliasing ? buffer_set->buffers[6] : src_ptrs[6]),
+          (const float*) (aliasing ? buffer_set->buffers[7] : src_ptrs[7]),
+          (float*) dst_ptrs[r],
+          in_count
+        );
+      }
+    } else if (local_size == 4) {
       for (int r = 0; r < local_size; r++) {
         __all_gather_fp32_tp4_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[r]>>>(
           (const float*) (aliasing ? buffer_set->buffers[0] : src_ptrs[0]),
