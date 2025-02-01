@@ -76,6 +76,10 @@ class MuiInt8Linear(MuiModule):
         self.scales_min_vals = nn.Parameter(prev_scales_min_vals.contiguous() if prev_scales_min_vals is not None else torch.zeros(size=(out_features * num_groups, 2), dtype=dtype, device=device))
         self.bias = nn.Parameter(prev_bias.contiguous() if prev_bias is not None else torch.zeros(size=(out_features,), dtype=dtype, device=device)) if bias else None
 
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+    def _check_dispatchable(self):
         dispatchable_type = (self.weight_dtype == torch.float16)
         dispatchable_device = self.weights_uint8.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
@@ -126,6 +130,9 @@ class MuiInt8Linear(MuiModule):
             self.norm_weights.requires_grad = norm_weights_requires_grad
 
             self.norm_weights = norm_weights
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
 
     def _dequantize_weights(self) -> torch.Tensor:
         if self.dispatchable:

@@ -51,6 +51,10 @@ class MuiLinear(MuiModule, nn.Linear):
         self.variance_epsilon = variance_epsilon
         self.norm_weights = nn.Parameter(torch.ones(in_features, dtype=dtype, device=device)) if normalize else None
 
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+    def _check_dispatchable(self):
         wdtype = self.weight.dtype
         dispatchable_type = (wdtype == torch.float16)
         dispatchable_device = self.weight.is_cuda
@@ -90,6 +94,9 @@ class MuiLinear(MuiModule, nn.Linear):
         if norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities
             self._set_norm_weights(norm_weights)
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.dispatchable and (input.numel() == input.shape[-1]):

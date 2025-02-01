@@ -89,6 +89,17 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
 
         attn_outputs = []
         for d in range(num_head_groups):
+
+            pos_embeds = None
+            if position_embeddingss is not None:
+                coses, sines = position_embeddingss
+                cos, sin = coses[d], sines[d]
+                pos_embeds = cos, sin
+
+
+            pos_ids = position_idss[d]
+            cache_pos = cache_positions[d]
+
             # TODO: figure out where the aten index operations come from
             if (q_len == 1):
                 # the transposition doesn nothing, so we can just avoid it to avoid the CPU cost of the operation
@@ -100,12 +111,6 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
                 key_states = key_statess[d].view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
                 value_states = value_statess[d].view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
 
-            pos_embeds = None
-            if position_embeddingss is not None:
-                coses, sines = position_embeddingss
-                cos, sin = coses[d], sines[d]
-                pos_embeds = cos, sin
-
             # Now the shapes are:
             # q: [B, num_q_heads, NEW_T, embed_dim]
             # k: [B, num_kv_heads, NEW_T, embed_dim]
@@ -115,11 +120,11 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
             query_states, key_states, value_states = self.rotary_embs[d].apply_rotary_pos_emb_write_kv_cache(
                 query_states,
                 key_states,
-                position_idss[d],
+                pos_ids,
                 pos_embeds,
                 value_states,
                 past_key_value,
-                cache_positions[d]
+                cache_pos
             )
 
             # Now the shapes are:

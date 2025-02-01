@@ -203,9 +203,7 @@ class MuiParallelBaseAttention(MuiModule):
                 # M: [B, 1, NEW_T, T]
                 # It contains 0 where OK, min_dtype where padded
                 # min_dtype obtained with torch.finfo(dtype).min
-                seq_len = key_statess[0].shape[-2]
-                causal_masks = [causal_mask[:, :, :, : seq_len] for causal_mask in attention_masks]
-                attn_outputs = mui_parallel_causally_decode_masked(query_statess, key_statess, value_statess, causal_masks)
+                attn_outputs = mui_parallel_causally_decode_masked(query_statess, key_statess, value_statess, attention_masks)
 
             # from shape [B, num_q_heads, NEW_T, embed_dim], go to [B, NEW_T, num_q_heads, embed_dim]
             # then from shape [B, NEW_T, num_q_heads, embed_dim] go to [B, NEW_T, hidden_size]

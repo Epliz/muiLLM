@@ -71,14 +71,18 @@ class MuiParallelGateUpDownMLP(MuiModule):
         self.down_proj = MuiParallelLinear(engine_config, self.intermediate_size, self.hidden_size, bias=False, sharding_dim=1, device=device, dtype=dtype)
         self.activation_function = activation_function
 
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+        # TODO: improve method selection
+        self.method = _MuiParallelGateUpSiLUMethod.GATEUPSILU_FUSED
+
+    def _check_dispatchable(self):
         wdtype = self.gate_proj.dtype
         dispatchable_activation = (isinstance(self.activation_function, nn.SiLU))
         dispatchable_type = (wdtype == torch.float16)
         dispatchable_device = self.gate_proj.is_cuda
         self.dispatchable = dispatchable_activation and dispatchable_device and dispatchable_type
-
-        # TODO: improve method selection
-        self.method = _MuiParallelGateUpSiLUMethod.GATEUPSILU_FUSED
 
     @staticmethod
     def replace(prev_module: Union[LlamaMLP, MistralMLP, MuiGateUpDownMLP], engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiGateUpDownMLP":
@@ -143,6 +147,9 @@ class MuiParallelGateUpDownMLP(MuiModule):
             MuiParallelLinear._set_requires_grads(self.norm_weights, norm_weights_requires_grad)
 
         self.down_proj.copy_module(prev_module.down_proj)
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
 
     def _parallel_forward_unfused(self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None) -> List[Tensor]:
         # else: # not dispatchable or not MuiLinear

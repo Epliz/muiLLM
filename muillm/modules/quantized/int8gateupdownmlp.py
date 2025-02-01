@@ -68,7 +68,7 @@ class MuiInt8GateUpDownMLP(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, quantization_method: Int8WeightOnlyQuantizationMethod, hidden_size: int, intermediate_size: int, activation_function: nn.Module, variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
         super().__init__(engine_config=engine_config)
         self.device = device
-        self.dtype = dtype
+        self.weight_dtype = dtype
         self.quantization_method = quantization_method
         self.quantizer = RTNQuantizer(n_bit=8, groupsize=quantization_method.group_size, f=quantization_method.f)
 
@@ -90,7 +90,11 @@ class MuiInt8GateUpDownMLP(MuiModule):
         self.down_proj = MuiInt8Linear(engine_config, quantization_method, self.intermediate_size, self.hidden_size, bias=False, device=device, dtype=dtype)
         self.activation_function = activation_function
 
-        wdtype = dtype
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+    def _check_dispatchable(self):
+        wdtype = self.weight_dtype
         dispatchable_activation = (isinstance(self.activation_function, nn.SiLU))
         dispatchable_type = (wdtype == torch.float16)
         dispatchable_device = self.gate_up_weights.is_cuda
@@ -151,8 +155,8 @@ class MuiInt8GateUpDownMLP(MuiModule):
         gate_weights, up_weights = self._unpack_gateup_weights(gate_up_weights)
         gate_scales_min_vals, up_scales_min_vals = self._unpack_gateup_scales_min_vals(gate_up_scales_min_vals)
 
-        dequant_gate_weights = self.quantizer.group_dequantize_tensor(gate_weights, gate_scales_min_vals, dtype=self.dtype)
-        dequant_up_weights = self.quantizer.group_dequantize_tensor(up_weights, up_scales_min_vals, dtype=self.dtype)
+        dequant_gate_weights = self.quantizer.group_dequantize_tensor(gate_weights, gate_scales_min_vals, dtype=self.weight_dtype)
+        dequant_up_weights = self.quantizer.group_dequantize_tensor(up_weights, up_scales_min_vals, dtype=self.weight_dtype)
 
         return dequant_gate_weights, dequant_up_weights
 
@@ -167,14 +171,17 @@ class MuiInt8GateUpDownMLP(MuiModule):
 
             self.norm_weights = prev_module.norm_weights
 
-        gate_proj = MuiInt8Linear(self.engine_config, self.quantization_method, self.hidden_size, self.intermediate_size, bias=False, device=self.device, dtype=self.dtype)
-        up_proj = MuiInt8Linear(self.engine_config, self.quantization_method, self.hidden_size, self.intermediate_size, bias=False, device=self.device, dtype=self.dtype)
+        gate_proj = MuiInt8Linear(self.engine_config, self.quantization_method, self.hidden_size, self.intermediate_size, bias=False, device=self.device, dtype=self.weight_dtype)
+        up_proj = MuiInt8Linear(self.engine_config, self.quantization_method, self.hidden_size, self.intermediate_size, bias=False, device=self.device, dtype=self.weight_dtype)
         gate_proj = self._qint8_linear(gate_proj, prev_module.gate_proj)
         up_proj = self._qint8_linear(up_proj, prev_module.up_proj)
 
         self.gate_up_weights, self.gate_up_scales_min_vals = self._pack_gateup_linears(gate_proj, up_proj)
 
         self.down_proj = self._qint8_linear(self.down_proj, prev_module.down_proj)
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.dispatchable and (input.numel() == input.shape[-1]):

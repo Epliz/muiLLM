@@ -32,6 +32,10 @@ class MuiRMSNorm(MuiModule):
         self.weight = nn.Parameter(torch.ones(hidden_size, device=device, dtype=dtype))
         self.variance_epsilon = eps
 
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+    
+    def _check_dispatchable(self):
         wdtype = self.weight.dtype
         dispatchable_type = (wdtype == torch.float16)
         dispatchable_device = self.weight.is_cuda
@@ -41,12 +45,18 @@ class MuiRMSNorm(MuiModule):
     def replace(prev_module: Union[LlamaRMSNorm, MistralRMSNorm], engine_config: MuiEngineConfig) -> "MuiRMSNorm":
         hidden_size = prev_module.weight.shape[0]
         eps = prev_module.variance_epsilon
-        new_module = MuiRMSNorm(engine_config=engine_config, hidden_size=hidden_size, eps=eps, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
 
-        new_module.weight = nn.Parameter(prev_module.weight.detach())
-        new_module.weight.requires_grad = prev_module.weight.requires_grad
+        new_module = MuiRMSNorm(engine_config=engine_config, hidden_size=hidden_size, eps=eps, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
+        new_module.copy_module(prev_module.weight)
 
         return new_module
+
+    def copy_module(self, prev_module: nn.Parameter):
+        self.weight = nn.Parameter(prev_module.detach())
+        self.weight.requires_grad = prev_module.requires_grad
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
 
     def forward(self, input: Tensor) -> Tensor:
         if self.dispatchable:

@@ -165,8 +165,7 @@ class MuiSdpaAttention(MuiBaseAttention):
                 # M: [B, 1, NEW_T, T]
                 # It contains 0 where OK, min_dtype where padded
                 # min_dtype obtained with torch.finfo(dtype).min
-                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-                attn_output = mui_causally_decode_masked(query_states, key_states, value_states, causal_mask)
+                attn_output = mui_causally_decode_masked(query_states, key_states, value_states, attention_mask)
         else:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)

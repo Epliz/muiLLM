@@ -62,14 +62,17 @@ class MuiParallelLinear(MuiModule):
         else:
             self.biases = None
 
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
 
         # Need to synchronize after copying the tensors to make sure the transfers
         # completed
         self.__sync_all()
 
-        wdtype = linear.weight.dtype
-        dispatchable_type = (wdtype == torch.float16)
-        self.is_cuda = linear.weight.is_cuda
+    def _check_dispatchable(self):
+        self.wdtype = self.weights[0].dtype
+        dispatchable_type = (self.wdtype == torch.float16)
+        self.is_cuda = self.weights[0].is_cuda
         dispatchable_device = self.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
 
@@ -134,6 +137,9 @@ class MuiParallelLinear(MuiModule):
         if norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities
             self._set_norm_weights(norm_weights)
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
 
         # Need to synchronize after copying the tensors to make sure the transfers
         # completed

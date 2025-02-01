@@ -162,8 +162,7 @@ class MuiBaseAttention(MuiModule):
                 # M: [B, 1, NEW_T, T]
                 # It contains 0 where OK, min_dtype where padded
                 # min_dtype obtained with torch.finfo(dtype).min
-                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-                attn_weights = attn_weights + causal_mask
+                attn_weights = attn_weights + attention_mask
 
             # upcast attention to fp32
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
