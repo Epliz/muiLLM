@@ -2,6 +2,7 @@
 # and modified to remove some GPU synchronization points
 
 from typing import List, Optional, Tuple, Union
+from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
 from muillm.modules.kvcache.cache_utils import MuiStaticCache, create_static_cache, grow_static_cache_if_needed
 from muillm.modules.models.mistral.model import MuiMistralForCausalLM, MuiMistralModel, _ignore_causal_mask_sdpa
 from muillm.modules.parallellinear import MuiParallelLinear
@@ -52,6 +53,7 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
         self.vocab_size = prev_model.vocab_size
 
         self.embed_tokens = prev_model.embed_tokens
+    
         self.layers = prev_model.layers
         self._attn_implementation = prev_model._attn_implementation
         self.norm = prev_model.norm
@@ -159,6 +161,15 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
 
         position_ids = position_ids.contiguous()
 
+        # get the rotary embedding module of the first layer
+        rotary_emb = self.layers[0].self_attn.rotary_embs[0]
+
+        # create position embeddings to be shared across the decoder layers
+        cos, sin = rotary_emb(hidden_states, position_ids)
+        cos = MuiParallelLinear._broadcast(self.engine_config, cos)
+        sin = MuiParallelLinear._broadcast(self.engine_config, sin)
+        position_embeddings = cos, sin
+
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -182,6 +193,7 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
                     output_attentions,
                     use_cache,
                     cache_positions,
+                    position_embeddings,
                     all_ones_mask,
                 )
             else:
@@ -193,6 +205,7 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_positions=cache_positions,
+                    position_embeddings=position_embeddings,
                     all_ones_mask=all_ones_mask,
                 )
 

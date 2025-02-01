@@ -151,6 +151,13 @@ class MuiMistralModel(MistralPreTrainedModel):
 
         position_ids = position_ids.contiguous()
 
+        # get the rotary embedding module of the first layer
+        rotary_emb = self.layers[0].self_attn.rotary_emb
+
+        # create position embeddings to be shared across the decoder layers
+        cos, sin = rotary_emb(hidden_states, position_ids)
+        position_embeddings = cos, sin
+
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -170,8 +177,7 @@ class MuiMistralModel(MistralPreTrainedModel):
                     output_attentions,
                     use_cache,
                     cache_position,
-                    # TODO: add position embeddings
-                    None,
+                    position_embeddings,
                     all_ones_mask,
                 )
             else:
@@ -183,7 +189,7 @@ class MuiMistralModel(MistralPreTrainedModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
-                    # TODO: add position embeddings
+                    position_embeddings=position_embeddings,
                     all_ones_mask=all_ones_mask,
                 )
 

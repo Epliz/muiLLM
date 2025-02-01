@@ -206,6 +206,7 @@ class MuiMistralRotaryEmbedding(MuiModule):
             cache_position: Optional[torch.LongTensor] = None
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if position_embeddings is None:
+            raise ValueError("should be provided")
             # Shape [S, E]
             cos, sin = self.forward(k, position_ids)
         else:

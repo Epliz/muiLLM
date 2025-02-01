@@ -125,6 +125,9 @@ class MuiParallelDecoderLayer(MuiModule):
         # input layer norm is fused
         query_states, key_states, value_states = self.qkv_proj.parallel_forward(hidden_states, collect_outputs=False)
 
+        if position_embeddings is None:
+            raise ValueError("None in the decoder")
+
         # Self Attention
         hidden_states, self_attn_weights, present_key_values = self.self_attn.parallel_forward(
             query_statess=query_states,
