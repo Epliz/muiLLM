@@ -233,8 +233,8 @@ class MuiMistralRotaryEmbedding(MuiModule):
                 query_states, key_states = _MuiRotaryStaticCache.apply(position_ids, cos, sin, q, k, v, k_cache, v_cache, cache_position)
 
                 # restrict to as many tokens as seen by the cache
-                key_states = k_cache[:, :, : cache._seen_tokens, :]
-                value_states = v_cache[:, :, : cache._seen_tokens, :]
+                key_states = torch.narrow(k_cache, dim=2, start=0, length=cache._seen_tokens)
+                value_states = torch.narrow(v_cache, dim=2, start=0, length=cache._seen_tokens)
 
                 return query_states, key_states, value_states
             elif isinstance(cache, DynamicCache):
