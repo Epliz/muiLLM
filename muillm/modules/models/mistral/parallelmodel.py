@@ -154,6 +154,9 @@ class MuiParallelMistralModel(MistralPreTrainedModel):
 
         hidden_states = inputs_embeds
 
+        if causal_mask is not None:
+            causal_mask = causal_mask[:, :, :, : tot_seq_len]
+
         position_ids = position_ids.contiguous()
 
         # decoder layers

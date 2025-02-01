@@ -232,7 +232,7 @@ class MuiParallelBaseAttention(MuiModule):
                     # M: [B, 1, NEW_T, T]
                     # It contains 0 where OK, min_dtype where padded
                     # min_dtype obtained with torch.finfo(dtype).min
-                    causal_mask = attention_masks[d][:, :, :, : key_states.shape[-2]]
+                    causal_mask = attention_masks[d]
                     attn_weights = attn_weights + causal_mask
 
                 # upcast attention to fp32
