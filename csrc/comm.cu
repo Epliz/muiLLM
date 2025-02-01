@@ -131,6 +131,27 @@ muillm_comm_error_t __init_buffer_set(int local_size, muillm_comm_buffer_set_t**
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t __allocate_signal_set(int local_size, uint64_t** signals) {
+  hipError_t error;
+  // need to allocate 8 bytes
+  for (int r = 0; r < local_size; r++) {
+    if (hipSetDevice(r) != hipSuccess) {
+      std::cout<<"(rank "<<r<<") Error setting the device"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+    if ((error = hipExtMallocWithFlags((void**) &signals[r], sizeof(uint64_t), hipMallocSignalMemory)) == hipSuccess) {
+      // the returned pointer is a device pointer, so set it with hipMemset
+      if (hipMemset(signals[r], 0, sizeof(uint64_t)) != hipSuccess) {
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+    } else {
+      delete[] signals;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  }
+  return MUILLM_COMM_SUCCESS;
+}
+
 muillm_comm_error_t muillm_comm_init(
   int local_size,
   bool allocate_streams,
@@ -217,22 +238,14 @@ muillm_comm_error_t muillm_comm_init(
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
-  if (signals_supported) {
+  if (signals_supported) { // signal memory doesn't seem to work on some MI300x machines
     std::cout<<"wait stream value supported"<<std::endl;
+    
+    if ((muillm_error =__allocate_signal_set(local_size, comm->signals)) != MUILLM_COMM_SUCCESS) {
+      delete[] comm->signals;
+      comm->signals = nullptr;
 
-    // need to allocate 8 bytes
-    for (int r = 0; r < local_size; r++) {
-      if (hipSetDevice(r) != hipSuccess) {
-        std::cout<<"(rank "<<r<<") Error setting the device"<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-      if ((error = hipExtMallocWithFlags((void**) &comm->signals[r], sizeof(uint64_t), hipMallocSignalMemory)) == hipSuccess) {
-        *comm->signals[r] = 0;
-      } else {
-        delete[] comm->signals;
-        comm->signals = nullptr;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
+      return muillm_error;
     }
   } else {
     delete[] comm->signals;
@@ -257,51 +270,85 @@ muillm_comm_error_t muillm_comm_init(
   return MUILLM_COMM_SUCCESS;
 }
 
+__global__ void __muillm_inc_value_kernel(
+    uint64_t* signal
+) {
+  if (threadIdx.x == 0) {
+    atomicAdd_system(signal, 1);
+    __threadfence_system();
+  }
+}
+
+muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint64_t* signal) {
+  __muillm_inc_value_kernel<<<1, 1, 0, stream>>>(signal);
+  return MUILLM_COMM_SUCCESS;
+}
+
 static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_t* comm) {
   int local_size = comm->local_size;
   hipError_t hip_error;
+  muillm_comm_error_t muillm_error;
+
   if (comm->signals != nullptr) {
-    comm->signal_seq_no++;
+    comm->signal_seq_no+= local_size;
     uint64_t seq_no = comm->signal_seq_no;
 
     // GPU barrier: all GPUs wait on each other
     for (int r = 0; r < local_size; r++) {
-      if ((hip_error = hipStreamWriteValue32(comm->streams[r], (uint32_t*)comm->signals[r], seq_no, 0)) != hipSuccess) {
-        std::cout<<"Failed to write value "<<r<<std::endl;
-        std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-
-      // wait for the other ranks
-      for (int other_rank = 0; other_rank < local_size; other_rank++) {
-        if (other_rank == r) continue;
-        if ((hip_error = hipStreamWaitValue32(comm->streams[r], (uint32_t*)comm->signals[other_rank], seq_no, hipStreamWaitValueEq, -1)) != hipSuccess) {
-          std::cout<<"Failed to wait for value"<<std::endl;
-          std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
-          return MUILLM_COMM_UNKNOWN_ERROR;
-        }
-      }
-    }
-  } else {
-    // GPU barrier: all GPUs wait on each other
-    for (int r = 0; r < local_size; r++) {
+      // record an event to flush caches
       if (hipEventRecord(comm->acquire_events[r], comm->streams[r]) != hipSuccess) {
         std::cout<<"Failed to record event "<<r<<std::endl;
         return MUILLM_COMM_UNKNOWN_ERROR;
       }
+      // write the values
+      if ((muillm_error = __mui_stream_inc_value(comm->streams[r], comm->signals[0])) != MUILLM_COMM_SUCCESS) {
+        return muillm_error;
+      }
+    }
+  
+    for (int r = 0; r < local_size; r++) {
+      // wait for the other ranks
+      if ((hip_error = hipStreamWaitValue64(comm->streams[r], comm->signals[0], seq_no, hipStreamWaitValueGte, -1)) != hipSuccess) {
+        std::cout<<"Failed to wait for value"<<std::endl;
+        std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+    }
+  } else {
+    // GPU barrier: all GPUs wait on each other
+    if (local_size % 2 != 0) {
+          return MUILLM_COMM_UNKNOWN_ERROR;
     }
 
-    // wait for the other ranks
-    for (int r = 0; r < local_size; r++) {
-      for (int other_rank = 0; other_rank < local_size; other_rank++) {
-        if (other_rank == r) continue;
-
+    // do the wait tree
+    for (int offset = local_size / 2; offset != 0; offset /= 2) {
+      for (int r = 0; r < offset; r++) {
         hipError_t error;
-        if ((error = hipStreamWaitEvent(comm->streams[r], comm->acquire_events[other_rank], 0)) != hipSuccess) {
+        if (hipEventRecord(comm->acquire_events[r + offset], comm->streams[r + offset]) != hipSuccess) {
+          std::cout<<"Failed to record event "<<r<<std::endl;
+          return MUILLM_COMM_UNKNOWN_ERROR;
+        }
+        if ((error = hipStreamWaitEvent(comm->streams[r], comm->acquire_events[r + offset], 0)) != hipSuccess) {
           std::cout<<"Failed to wait for event"<<std::endl;
           std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
           return MUILLM_COMM_UNKNOWN_ERROR;
         }
+      }
+    }
+
+    // signal the completion of the wait tree
+    if (hipEventRecord(comm->acquire_events[0], comm->streams[0]) != hipSuccess) {
+      std::cout<<"Failed to record final event"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+
+    // make all the other ranks wait
+    for (int r = 1; r < local_size; r++) {
+      hipError_t error;
+      if ((error = hipStreamWaitEvent(comm->streams[r], comm->acquire_events[0], 0)) != hipSuccess) {
+        std::cout<<"Failed to wait for event"<<std::endl;
+        std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
       }
     }
   }
@@ -355,356 +402,6 @@ static void __muillm_gpu_copy(void* dst, const void* src, size_t count, hipStrea
     (uint8_t*) dst,
     count
   );
-}
-
-// TP2 kernels
-
-__global__ void __all_reduce_fp16_tp2_multi_write_out_kernel(
-    const half* x1,
-    const half* x2,
-    half* y1,
-    half* y2,
-    unsigned N
-) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    half res = __hadd(x1[i], x2[i]);
-    y1[i] = res;
-    y2[i] = res;
-  }
-}
-
-__global__ void __all_reduce_fp32_tp2_multi_write_out_kernel(
-    const float* x1,
-    const float* x2,
-    float* y1,
-    float* y2,
-    unsigned N
-) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    float res = x1[i] + x2[i];
-    y1[i] = res;
-    y2[i] = res;
-  }
-}
-
-// TP4 kernels
-
-__global__ void __all_reduce_fp16_tp4_multi_write_out_kernel(
-    const half* x1,
-    const half* x2,
-    const half* x3,
-    const half* x4,
-    half* y1,
-    half* y2,
-    half* y3,
-    half* y4,
-    unsigned N
-) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    half res = __hadd(__hadd(x1[i], x2[i]), __hadd(x3[i], x4[i]));
-    y1[i] = res;
-    y2[i] = res;
-    y3[i] = res;
-    y4[i] = res;
-  }
-}
-
-__global__ void __all_reduce_fp32_tp4_multi_write_out_kernel(
-    const float* x1,
-    const float* x2,
-    const float* x3,
-    const float* x4,
-    float* y1,
-    float* y2,
-    float* y3,
-    float* y4,
-    unsigned N
-) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    float res = x1[i] + x2[i] + x3[i] + x4[i];
-    y1[i] = res;
-    y2[i] = res;
-    y3[i] = res;
-    y4[i] = res;
-  }
-}
-
-
-// TP8 kernels
-
-__global__ void __all_reduce_fp16_tp8_multi_write_out_kernel(
-    const half* x1,
-    const half* x2,
-    const half* x3,
-    const half* x4,
-    const half* x5,
-    const half* x6,
-    const half* x7,
-    const half* x8,
-    half* y1,
-    half* y2,
-    half* y3,
-    half* y4,
-    half* y5,
-    half* y6,
-    half* y7,
-    half* y8,
-    unsigned N
-) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    half x1x2 = __hadd(x1[i], x2[i]);
-    half x3x4 = __hadd(x3[i], x4[i]);
-    half x1x4 = __hadd(x1x2, x3x4);
-    half x5x6 = __hadd(x5[i], x6[i]);
-    half x7x8 = __hadd(x7[i], x8[i]);
-    half x5x8 = __hadd(x5x6, x7x8);
-    half res = __hadd(x1x4, x5x8);
-    y1[i] = res;
-    y2[i] = res;
-    y3[i] = res;
-    y4[i] = res;
-    y5[i] = res;
-    y6[i] = res;
-    y7[i] = res;
-    y8[i] = res;
-  }
-}
-
-__global__ void __all_reduce_fp32_tp8_multi_write_out_kernel(
-    const float* x1,
-    const float* x2,
-    const float* x3,
-    const float* x4,
-    const float* x5,
-    const float* x6,
-    const float* x7,
-    const float* x8,
-    float* y1,
-    float* y2,
-    float* y3,
-    float* y4,
-    float* y5,
-    float* y6,
-    float* y7,
-    float* y8,
-    unsigned N
-) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    float x1x2 = (x1[i] + x2[i]);
-    float x3x4 = (x3[i] + x4[i]);
-    float x1x4 = x1x2 + x3x4;
-    float x5x6 = (x5[i] + x6[i]);
-    float x7x8 = (x7[i] + x8[i]);
-    float x5x8 = x5x6 + x7x8;
-    float res = x1x4 + x5x8;
-    y1[i] = res;
-    y2[i] = res;
-    y3[i] = res;
-    y4[i] = res;
-    y5[i] = res;
-    y6[i] = res;
-    y7[i] = res;
-    y8[i] = res;
-  }
-}
-
-muillm_comm_error_t muillm_comm_all_reduce_sum_single_gpu(
-  muillm_comm_t* comm,
-  const void** src_ptrs,
-  void** dst_ptrs,
-  size_t count,
-  muillm_comm_datatype_t datatype
-) {
-  hipError_t hip_error;
-
-  // an approach doing
-  // 1) barrier
-  // 2) reduce on GPU0
-  // 3) barrier
-  int local_size = comm->local_size;
-
-  if (comm->signals != nullptr) {
-    comm->signal_seq_no++;
-    uint64_t seq_no = comm->signal_seq_no;
-
-    // GPU barrier: GPU0 will wait on the others
-    for (int r = 1; r < local_size; r++) {
-      if ((hip_error = hipStreamWriteValue32(comm->streams[r], (uint32_t*)comm->signals[r], seq_no, 0)) != hipSuccess) {
-        std::cout<<"Failed to write value "<<r<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-    }
-
-    // wait for the other ranks
-    for (int other_rank = 1; other_rank < local_size; other_rank++) {
-      if ((hip_error = hipStreamWaitValue32(comm->streams[0], (uint32_t*)comm->signals[other_rank], seq_no, hipStreamWaitValueEq, -1)) != hipSuccess) {
-        std::cout<<"Failed to wait for value"<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-    }
-  } else {
-    // GPU barrier: GPU0 will wait on the others
-    for (int r = 1; r < local_size; r++) {
-      if (hipEventRecord(comm->acquire_events[r], comm->streams[r]) != hipSuccess) {
-        std::cout<<"Failed to record event "<<r<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-    }
-
-    // wait for the other ranks
-    for (int other_rank = 1; other_rank < local_size; other_rank++) {
-      if ((hip_error = hipStreamWaitEvent(comm->streams[0], comm->acquire_events[other_rank], 0)) != hipSuccess) {
-        std::cout<<"Failed to wait for event"<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-    }
-  }
-
-  const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
-
-/*
-On MI300x :
-  4 GPUs:
-
-  2 GPUs:
-
-On MI100:
-  2 GPUs:
-  426843us -> 26us/reduce
-*/
-
-  // reduce on one GPU
-  if (datatype == MUILLM_COMM_FP16) {
-    if (local_size == 8) {
-      __all_reduce_fp16_tp8_multi_write_out_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[0]>>>(
-        (const half*) src_ptrs[0],
-        (const half*) src_ptrs[1],
-        (const half*) src_ptrs[2],
-        (const half*) src_ptrs[3],
-        (const half*) src_ptrs[4],
-        (const half*) src_ptrs[5],
-        (const half*) src_ptrs[6],
-        (const half*) src_ptrs[7],
-        (half*) dst_ptrs[0],
-        (half*) dst_ptrs[1],
-        (half*) dst_ptrs[2],
-        (half*) dst_ptrs[3],
-        (half*) dst_ptrs[4],
-        (half*) dst_ptrs[5],
-        (half*) dst_ptrs[6],
-        (half*) dst_ptrs[7],
-        count
-      );
-    } else if (local_size == 4) {
-      __all_reduce_fp16_tp4_multi_write_out_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[0]>>>(
-        (const half*) src_ptrs[0],
-        (const half*) src_ptrs[1],
-        (const half*) src_ptrs[2],
-        (const half*) src_ptrs[3],
-        (half*) dst_ptrs[0],
-        (half*) dst_ptrs[1],
-        (half*) dst_ptrs[2],
-        (half*) dst_ptrs[3],
-        count
-      );
-    } else if (local_size == 2) {
-      __all_reduce_fp16_tp2_multi_write_out_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[0]>>>(
-        (const half*) src_ptrs[0],
-        (const half*) src_ptrs[1],
-        (half*) dst_ptrs[0],
-        (half*) dst_ptrs[1],
-        count
-      );
-    } else {
-      return MUILLM_COMM_UNKNOWN_ERROR;
-    }
-  } else if (datatype == MUILLM_COMM_FP32) {
-    if (local_size == 8) {
-      __all_reduce_fp32_tp8_multi_write_out_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[0]>>>(
-        (const float*) src_ptrs[0],
-        (const float*) src_ptrs[1],
-        (const float*) src_ptrs[2],
-        (const float*) src_ptrs[3],
-        (const float*) src_ptrs[4],
-        (const float*) src_ptrs[5],
-        (const float*) src_ptrs[6],
-        (const float*) src_ptrs[7],
-        (float*) dst_ptrs[0],
-        (float*) dst_ptrs[1],
-        (float*) dst_ptrs[2],
-        (float*) dst_ptrs[3],
-        (float*) dst_ptrs[4],
-        (float*) dst_ptrs[5],
-        (float*) dst_ptrs[6],
-        (float*) dst_ptrs[7],
-        count
-      );
-    } else if (local_size == 4) {
-      __all_reduce_fp32_tp4_multi_write_out_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[0]>>>(
-        (const float*) src_ptrs[0],
-        (const float*) src_ptrs[1],
-        (const float*) src_ptrs[2],
-        (const float*) src_ptrs[3],
-        (float*) dst_ptrs[0],
-        (float*) dst_ptrs[1],
-        (float*) dst_ptrs[2],
-        (float*) dst_ptrs[3],
-        count
-      );
-    } else if (local_size == 2) {
-      __all_reduce_fp32_tp2_multi_write_out_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, comm->streams[0]>>>(
-        (const float*) src_ptrs[0],
-        (const float*) src_ptrs[1],
-        (float*) dst_ptrs[0],
-        (float*) dst_ptrs[1],
-        count
-      );
-    } else {
-      return MUILLM_COMM_UNKNOWN_ERROR;
-    }
-  } else {
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
-
-  // make other GPUs wait for the reduction to be done on GPU0
-  if (comm->signals != nullptr) {
-    comm->signal_seq_no++;
-    uint64_t seq_no = comm->signal_seq_no;
-
-    if (hipStreamWriteValue32(comm->streams[0], (uint32_t*)comm->signals[0], seq_no, 0) != hipSuccess) {
-      std::cout<<"Failed to write value 0"<<std::endl;
-      return MUILLM_COMM_UNKNOWN_ERROR;
-    }
-
-    // wait for the other ranks
-    for (int other_rank = 1; other_rank < local_size; other_rank++) {
-      if ((hip_error = hipStreamWaitValue32(comm->streams[other_rank], (uint32_t*)comm->signals[0], seq_no, hipStreamWaitValueEq, -1)) != hipSuccess) {
-        std::cout<<"Failed to wait for value"<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-    }
-  } else {
-    if (hipEventRecord(comm->release_events[0], comm->streams[0]) != hipSuccess) {
-      std::cout<<"Failed to record event for 0"<<std::endl;
-      return MUILLM_COMM_UNKNOWN_ERROR;
-    }
-
-    for (int other_rank = 1; other_rank < local_size; other_rank++) {
-      if ((hip_error = hipStreamWaitEvent(comm->streams[other_rank], comm->release_events[0], 0)) != hipSuccess) {
-        std::cout<<"Failed to wait for event"<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-    }
-  }
-
-  return MUILLM_COMM_SUCCESS;
 }
 
 
