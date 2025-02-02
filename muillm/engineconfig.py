@@ -24,14 +24,3 @@ class MuiEngineConfig:
             raise ValueError(f"tensor_parallelism {tensor_parallelism} is bigger than number of available devices: {device_count}")
 
         self.tensor_parallelism = tensor_parallelism
-
-        self.devices = [torch.device(f"cuda:{d}") for d in range(self.tensor_parallelism)]
-        self.streams = [torch.cuda.Stream(self.devices[i]) for i in range(self.tensor_parallelism)]
-
-        self.comms = Communicator(tensor_parallelism=tensor_parallelism, devices=self.devices)
-
-        # set default device correctly (comm init might have changed it)
-        for s in self.streams:
-            torch.cuda.set_stream(s)
-
-        torch.cuda.set_device(self.devices[0])

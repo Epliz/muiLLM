@@ -1,15 +1,7 @@
 
-from muillm.modules.attention.parallelbaseattention import MuiParallelBaseAttention
-from muillm.modules.attention.parallelsdpaattention import MuiParallelSdpaAttention
 from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
 from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
-from muillm.modules.models.llama.parallelmodel import MuiParallelLlamaForCausalLM, MuiParallelLlamaModel
-from muillm.modules.models.mistral.parallelmodel import MuiParallelMistralForCausalLM, MuiParallelMistralModel
 from muillm.modules.multilinear import MuiMultiLinear
-from muillm.modules.parallellinear import MuiParallelLinear
-from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
-from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
-from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
 import torch
 import torch.nn as nn
 
@@ -17,7 +9,6 @@ from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.linear import MuiLinear
 from muillm.modules.rmsnorm import MuiRMSNorm
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
-from muillm.modules.parallelgateupdownmlp import MuiParallelGateUpDownMLP
 from muillm.modules.attention.sdpaattention import MuiSdpaAttention
 from muillm.modules.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
 from muillm.memorymanagement.gc import trigger_gc
@@ -52,8 +43,7 @@ _LAYER_REPLACEMENTS = {
 }
 
 _TP_LAYER_REPLACEMENTS = {
-    nn.Linear: MuiParallelLinear,
-    MuiLinear: MuiParallelLinear,
+    nn.Linear: MuiLinear,
 
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
@@ -61,33 +51,16 @@ _TP_LAYER_REPLACEMENTS = {
     MistralRotaryEmbedding: MuiMistralRotaryEmbedding,
     LlamaRotaryEmbedding: MuiMistralRotaryEmbedding,
 
-    MuiMultiLinear: MuiParallelMultiLinear,
-
-    MistralMLP: MuiParallelGateUpDownMLP,
-    LlamaMLP: MuiParallelGateUpDownMLP,
-    MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
-
-    LlamaAttention: MuiParallelBaseAttention,
-    LlamaSdpaAttention: MuiParallelSdpaAttention,
-    MistralAttention: MuiParallelBaseAttention,
-    MistralSdpaAttention: MuiParallelSdpaAttention,
-
     # We replace the full decoder all at once to avoid issues due to replacement order
-    # (e.g. replacing the MLP then the decoder)
-    MistralDecoderLayer : MuiParallelDecoderLayer,
-    LlamaDecoderLayer : MuiParallelDecoderLayer,
-    MuiDecoderLayer: MuiParallelDecoderLayer,
+    # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
+    MistralDecoderLayer : MuiDecoderLayer,
+    LlamaDecoderLayer : MuiDecoderLayer,
 
     # replacements for full models
-    MistralModel : MuiParallelMistralModel,
-    MistralForCausalLM : MuiParallelMistralForCausalLM,
-    MuiMistralModel : MuiParallelMistralModel,
-    MuiMistralForCausalLM : MuiParallelMistralForCausalLM,
-
-    LlamaModel : MuiParallelLlamaModel,
-    LlamaForCausalLM : MuiParallelLlamaForCausalLM,
-    MuiLlamaModel : MuiParallelLlamaModel,
-    MuiLlamaForCausalLM : MuiParallelLlamaForCausalLM,
+    MistralModel : MuiMistralModel,
+    MistralForCausalLM : MuiMistralForCausalLM,
+    LlamaModel : MuiLlamaModel,
+    LlamaForCausalLM : MuiLlamaForCausalLM,
 }
 
 def _recursive_setattr(model: nn.Module, module_name: str, new_module: nn.Module):
