@@ -13,8 +13,14 @@ typedef enum muillm_comm_error {
 } muillm_comm_error_t;
 
 typedef enum muillm_comm_datatype {
-  MUILLM_COMM_FP16 = 0,
-  MUILLM_COMM_FP32
+  MUILLM_COMM_BOOL = 0,
+  MUILLM_COMM_INT8,
+  MUILLM_COMM_INT16,
+  MUILLM_COMM_INT32,
+  MUILLM_COMM_INT64,
+  MUILLM_COMM_FP16,
+  MUILLM_COMM_FP32,
+  MUILLM_COMM_FP64
 } muillm_comm_datatype_t;
 
 #define MUILLM_COMM_MAX_GPUS 8
@@ -47,6 +53,14 @@ muillm_comm_error_t muillm_comm_init(
 muillm_comm_error_t muillm_comm_all_reduce_sum(
   muillm_comm_t* comm,
   const void** src_ptrs,
+  void** dst_ptrs,
+  size_t count,
+  muillm_comm_datatype_t datatype
+);
+
+muillm_comm_error_t muillm_comm_broadcast(
+  muillm_comm_t* comm,
+  const void* src_ptr,
   void** dst_ptrs,
   size_t count,
   muillm_comm_datatype_t datatype

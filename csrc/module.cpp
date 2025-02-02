@@ -224,6 +224,13 @@ void muillm_all_reduce_sum_trampoline(
   muillm_all_reduce_sum(comm.comm_ptr, tensors);
 }
 
+std::vector<torch::Tensor> muillm_broadcast_trampoline(
+    muillm_comm_ptr comm,
+    torch::Tensor& tensor
+) {
+  return muillm_broadcast(comm.comm_ptr, tensor);
+}
+
 #include "parallel_linear_kernels.cuh"
 
 std::vector<at::Tensor> muillm_parallel_linear_forward_trampoline(
@@ -363,4 +370,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("muillm_comm_init", &muillm_comm_init_trampoline, "muillm comm init", py::arg("local_size"), py::arg("allocate_streams"));
   m.def("muillm_all_reduce_sum", &muillm_all_reduce_sum_trampoline, "muillm all reduce sum");
+  m.def("muillm_broadcast", &muillm_broadcast_trampoline, "muillm broadcast");
 }
