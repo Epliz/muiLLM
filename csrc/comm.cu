@@ -20,11 +20,29 @@ static inline size_t __comm_size(
     size_t count
 ) {
   switch (datatype) {
+    case MUILLM_COMM_BOOL: {
+      return 1 * count;
+    }
+    case MUILLM_COMM_INT8: {
+      return 1 * count;
+    }
+    case MUILLM_COMM_INT16: {
+      return 2 * count;
+    }
+    case MUILLM_COMM_INT32: {
+      return 4 * count;
+    }
+    case MUILLM_COMM_INT64: {
+      return 8 * count;
+    }
     case MUILLM_COMM_FP16: {
       return 2 * count;
     }
     case MUILLM_COMM_FP32: {
       return 4 * count;
+    }
+    case MUILLM_COMM_FP64: {
+      return 8 * count;
     }
     default: {
       return 0;
@@ -302,6 +320,7 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_t* comm) {
       }
       // write the values
       if ((muillm_error = __mui_stream_inc_value(comm->streams[r], comm->signals[0])) != MUILLM_COMM_SUCCESS) {
+        std::cout<<"inc value failed"<<std::endl;
         return muillm_error;
       }
     }
@@ -317,7 +336,8 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_t* comm) {
   } else {
     // GPU barrier: all GPUs wait on each other
     if (local_size % 2 != 0) {
-          return MUILLM_COMM_UNKNOWN_ERROR;
+      std::cout<<"unsupported local_size"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
     }
 
     // do the wait tree
@@ -558,6 +578,7 @@ muillm_comm_error_t muillm_comm_all_reduce_sum(
 
   // ensure all GPUs have copied into the reduction buffers
   if ((muillm_error = __mui_gpu_barrier(comm)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"reduction barrier failed"<<std::endl;
     return muillm_error;
   }
 
@@ -618,6 +639,7 @@ On MI100:
         );
       }
     } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
       return MUILLM_COMM_UNKNOWN_ERROR;
     }
   } else if (datatype == MUILLM_COMM_FP32) {
@@ -664,16 +686,63 @@ On MI100:
         );
       }
     } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
       return MUILLM_COMM_UNKNOWN_ERROR;
     }
   } else {
+    std::cout<<"reduction unsupported dtype"<<std::endl;
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t muillm_comm_broadcast(
+  muillm_comm_t* comm,
+  const void* src_ptr,
+  void** dst_ptrs,
+  size_t count,
+  muillm_comm_datatype_t datatype
+) {
 
+  // we assume GPU 0 is always the one broadcasting
+  hipError_t hip_error;
+  muillm_comm_error_t muillm_error;
+
+  int local_size = comm->local_size;
+
+  // we only do the copy in the reduction buffers only if there is aliasing
+  bool aliasing = (src_ptr == dst_ptrs[0]);
+
+  // get reduction buffer set
+  muillm_comm_buffer_set_t* buffer_set = nullptr;
+
+  if ((muillm_error = muillm_comm_get_buffer_set(comm, count, datatype, &buffer_set)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"Reduction failed when ensuring capacity"<<std::endl;
+    return muillm_error;
+  }
+
+  size_t byte_count = __comm_size(datatype, count);
+
+  // copy into reduction buffer if needed
+  if (aliasing) {
+    // copy from GPU0 to buffer
+    __muillm_gpu_copy(buffer_set->buffers[0], src_ptr, byte_count, comm->streams[0]);
+  }
+
+  // ensure all GPUs have arrived
+  if ((muillm_error = __mui_gpu_barrier(comm)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+
+  // do the broadcast
+  const void* copy_src_ptr = (const void*) (aliasing ? buffer_set->buffers[0] : src_ptr);
+  for (int r = 0; r < local_size; r++) {
+    __muillm_gpu_copy(dst_ptrs[r], copy_src_ptr, byte_count, comm->streams[r]);
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
 
 // TP2 kernels
 

@@ -15,7 +15,21 @@ class _MuiAllReduce(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         raise ValueError("Not implemented")
-    
+
+
+class _MuiBroadcast(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, comm, tensor):
+        ret_tensors = muillm_ext.muillm_broadcast(comm, tensor)
+
+        ctx.save_for_backward(tensor)
+
+        return ret_tensors
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
+
 class Communicator:
     """
     Provides functionalities to multi-GPU communications (but single-process)
@@ -44,6 +58,7 @@ class Communicator:
             return None
         
         devices = self.devices
+        # TODO: kernel for this?
         moved_tensors = [t.to(device=devices[i], dtype=t.dtype) if t is not None else None for i, t in enumerate(tensors)] 
 
         # make all streams of the other devices wait on the GPU0
@@ -56,10 +71,7 @@ class Communicator:
         if tensor is None:
             return None
 
-        devices = self.devices
-        moved_tensors = [tensor.to(device=d) for d in devices] 
-
-        return moved_tensors
+        return _MuiBroadcast.apply(self.comm, tensor)
 
     def all_reduce(self, tensors: List[torch.Tensor]) -> List[torch.Tensor]:
         _MuiAllReduce.apply(self.comm, tensors)
