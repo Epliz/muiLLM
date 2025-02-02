@@ -52,6 +52,15 @@ class Communicator:
 
         return moved_tensors
     
+    def broadcast(self, tensor: torch.Tensor) -> Optional[List[torch.Tensor]]:
+        if tensor is None:
+            return None
+
+        devices = self.devices
+        moved_tensors = [tensor.to(device=d) for d in devices] 
+
+        return moved_tensors
+
     def all_reduce(self, tensors: List[torch.Tensor]) -> List[torch.Tensor]:
         _MuiAllReduce.apply(self.comm, tensors)
         return tensors

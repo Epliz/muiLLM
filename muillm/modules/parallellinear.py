@@ -156,13 +156,7 @@ class MuiParallelLinear(MuiModule):
 
     @staticmethod
     def _broadcast(engine_config: MuiEngineConfig, tensor: Tensor) -> Optional[List[Tensor]]:
-        if tensor is None:
-            return None
-
-        devices = engine_config.devices
-        moved_tensors = [tensor.to(device=d) for d in devices] 
-
-        return moved_tensors
+        return engine_config.comms.broadcast(tensor)
 
     def __shard_weigths(self, tensor: Tensor) -> List[Tensor]:
         return MuiParallelLinear._shard_weigths(self.engine_config, tensor, self.tensor_parallelism, self.sharding_dim)
