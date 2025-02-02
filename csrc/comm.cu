@@ -288,17 +288,22 @@ muillm_comm_error_t muillm_comm_init(
   return MUILLM_COMM_SUCCESS;
 }
 
-__global__ void __muillm_inc_value_kernel(
-    uint64_t* signal
+__global__ void __mui_stream_barrier_kernel(
+    volatile uint64_t* signal,
+    uint64_t seq_no
 ) {
   if (threadIdx.x == 0) {
-    atomicAdd_system(signal, 1);
+    // increment
+    atomicAdd_system((uint64_t*)signal, 1);
     __threadfence_system();
+
+    // wait for every GPU to be arrived
+    while (*signal < seq_no) __threadfence_system();
   }
 }
 
-muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint64_t* signal) {
-  __muillm_inc_value_kernel<<<1, 1, 0, stream>>>(signal);
+muillm_comm_error_t __mui_stream_barrier(hipStream_t stream, uint64_t* signal, uint64_t seq_no) {
+  __mui_stream_barrier_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -319,18 +324,9 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_t* comm) {
         return MUILLM_COMM_UNKNOWN_ERROR;
       }
       // write the values
-      if ((muillm_error = __mui_stream_inc_value(comm->streams[r], comm->signals[0])) != MUILLM_COMM_SUCCESS) {
-        std::cout<<"inc value failed"<<std::endl;
+      if ((muillm_error = __mui_stream_barrier(comm->streams[r], comm->signals[0], seq_no)) != MUILLM_COMM_SUCCESS) {
+        std::cout<<"stream barrier failed "<<r<<std::endl;
         return muillm_error;
-      }
-    }
-  
-    for (int r = 0; r < local_size; r++) {
-      // wait for the other ranks
-      if ((hip_error = hipStreamWaitValue64(comm->streams[r], comm->signals[0], seq_no, hipStreamWaitValueGte, -1)) != hipSuccess) {
-        std::cout<<"Failed to wait for value"<<std::endl;
-        std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
       }
     }
   } else {
