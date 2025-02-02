@@ -1,4 +1,5 @@
 from typing import Any, Dict, Optional, Tuple
+from muillm.engineconfig import MuiEngineConfig
 from transformers.cache_utils import StaticCache
 from transformers.configuration_utils import PretrainedConfig
 
@@ -94,9 +95,10 @@ def _next_pow2(x: int) -> int:
 
     return p
 
-def create_static_cache(config: PretrainedConfig, max_batch_size, seq_len, device, dtype, tensor_parallelism: int = 1) -> MuiStaticCache:
+def create_static_cache(engine_config: MuiEngineConfig, config: PretrainedConfig, max_batch_size, seq_len, device, dtype) -> MuiStaticCache:
     # to avoid frequent re-allocations of the cache, we use a power of 2 schedule
     max_cache_len = _next_pow2(seq_len)
+    tensor_parallelism = engine_config.tensor_parallelism
     return MuiStaticCache(config, max_batch_size, max_cache_len, device, dtype, tensor_parallelism)
 
 def grow_static_cache_if_needed(cache: MuiStaticCache, capacity: int, max_capacity: int) -> MuiStaticCache:

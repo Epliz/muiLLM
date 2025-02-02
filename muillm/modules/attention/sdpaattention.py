@@ -137,6 +137,7 @@ class MuiSdpaAttention(MuiBaseAttention):
 
         bsz, q_len, _ = query_states.size()
 
+        # TODO: optimization avoiding transpose for q_len==1
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -158,7 +159,7 @@ class MuiSdpaAttention(MuiBaseAttention):
         #  v: [B, num_v_heads, NEW_T, embed_dim]
         if (q_len == 1) and (query_states.dtype == torch.float16):
             #
-            if all_ones_mask:
+            if all_ones_mask or (attention_mask is None):
                 attn_output = mui_causally_decode(query_states, key_states, value_states)
             else:
                 # The mask has shape:
@@ -166,18 +167,15 @@ class MuiSdpaAttention(MuiBaseAttention):
                 # It contains 0 where OK, min_dtype where padded
                 # min_dtype obtained with torch.finfo(dtype).min
                 attn_output = mui_causally_decode_masked(query_states, key_states, value_states, attention_mask)
+            
+            # q_len is 1 so we can remove the transposition
+            attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
         else:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
 
             causal_mask = attention_mask
-            if attention_mask is not None:
-                # The mask has shape:
-                # M: [B, 1, NEW_T, T]
-                # It contains 0 where OK, min_dtype where padded
-                # min_dtype obtained with torch.finfo(dtype).min
-                causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
 
             # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
             # Reference: https://github.com/pytorch/pytorch/issues/112577.

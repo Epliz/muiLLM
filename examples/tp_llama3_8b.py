@@ -1,33 +1,21 @@
-# Example showing how to use muiLLM's tensor parallelism and fp16 support on the Meta LLama 3.1 8b model
+"""run.py:"""
+#!/usr/bin/env python
+
+# Example showing how to use muiLLM's tensor parallelism support on the Llama 3.1 8b model
 
 import os
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase, PreTrainedModel
 import torch
 import torch.nn as nn
 
-# this example requires the LLama 3.1 8B Instruct model
-# Provided that you have a HF token to access the Mistral models, you can download it with 
-# huggingface-cli download --token <your_token> meta-llama/Llama-3.1-8B-Instruct --local-dir Llama-3.1-8B-Instruct
-
-# either set this environment variable before running the example, or adapt the path
-model_id = os.getenv("LLAMA3_8B_PATH", "/storage/models/Llama-3.1-8B-Instruct/")
-
-## Load the original model & tokenizer
-tokenizer = AutoTokenizer.from_pretrained(model_id,padding_side="left")
-
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-# we load the original model in fp16 precision
-model: nn.Module = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16).to(device="cuda", dtype=torch.float16)
-
-print("Model : ", model)
-
 from typing import List, Union
 
-
-def generate(model, prompt:Union[str, List[str]], max_new_tokens=20) -> Union[str, List[str]]:
+def generate(model, tokenizer, prompt:Union[str, List[str]], max_new_tokens=20) -> Union[str, List[str]]:
     single_prompt = isinstance(prompt, str)
     if single_prompt:
         prompts = [prompt]
@@ -35,18 +23,17 @@ def generate(model, prompt:Union[str, List[str]], max_new_tokens=20) -> Union[st
         prompts = prompt
 
     with torch.no_grad():
-       inputs = tokenizer(prompts, return_tensors="pt", padding="longest").to(device="cuda")
+        inputs = tokenizer(prompts, return_tensors="pt", padding="longest").to(device="cuda")
 
-       outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True)
+    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True)
 
-       texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
     texts = [text[len(prompts[i]):] for i, text in enumerate(texts)]
     if single_prompt:
         return texts[0]
     else:
         return texts
-  
 
 def time_func(f):
     import time
@@ -62,50 +49,98 @@ def profile_func(f, trace_path= "trace.json"):
         ret = f()
     prof.export_chrome_trace(trace_path)
     return ret
+  
+def run(rank, size):
 
-# 5 tokens prompt
-prompt = "Hello my name is"
+    # this example requires the LLama 3.1 8B Instruct model
+    # Provided that you have a HF token to access the Mistral models, you can download it with 
+    # huggingface-cli download --token <your_token> meta-llama/Llama-3.1-8B-Instruct --local-dir Llama-3.1-8B-Instruct
 
-tokenized_prompts = tokenizer(prompt, return_tensors="pt", padding="longest")
-print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
+    # either set this environment variable before running the example, or adapt the path
+    model_id = os.getenv("LLAMA3_8B_PATH", "/storage/models/Llama-3.1-8B-Instruct/")
 
-num_input_tokens = tokenized_prompts["input_ids"].shape[1]
-batch_size = tokenized_prompts["input_ids"].shape[0]
-num_output_tokens = 256
-num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
+    ## Load the original model & tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_id,padding_side="left")
 
-# Have a look at the original speed
-if num_total_tokens < 100:
-    text, time = time_func(lambda: generate(model, prompt, 10))
-    text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-    print("[Original] Completion: ", text)
-    print("[Original] Time: ", time)
-    print(f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-# Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, 50)), trace_path="trace_llama_orig_unbatched.json")
+    # we load the original model in fp16 precision
+    model: nn.Module = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16).to(device="cuda", dtype=torch.float16)
 
-# Use the muiLLM replacements layers
-from muillm.engine import init_engine
-# tensor_parallelism=None indicates to use all GPUs
-model = init_engine(model, tensor_parallelism=None)
+    print("Model : ", model)
 
-print("Optimized models: ", model)
+    # 5 tokens prompt
+    prompt = "Hello my name is"
 
-tokenized_prompts = tokenizer(prompt, return_tensors="pt", padding="longest")
-print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
+    tokenized_prompts = tokenizer(prompt, return_tensors="pt", padding="longest")
+    print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
 
-num_input_tokens = tokenized_prompts["input_ids"].shape[1]
-batch_size = tokenized_prompts["input_ids"].shape[0]
-num_output_tokens = 256
-num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
+    num_input_tokens = tokenized_prompts["input_ids"].shape[1]
+    batch_size = tokenized_prompts["input_ids"].shape[0]
+    num_output_tokens = 256
+    num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
 
-# Have a look at the speed
-text, time = time_func(lambda: generate(model, prompt, 10))
-text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
-print("[Optimized] Completion: ", text)
-print("[Optimized] Time: ", time)
-print(f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})")
+    # Use the muiLLM replacements layers
+    from muillm.engine import init_engine
+    # tensor_parallelism=None indicates to use all GPUs
+    model = init_engine(model, tensor_parallelism=None)
 
-# Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, 50)), trace_path="trace_llama_muillm_tp_unbatched.json")
+    print("Optimized models: ", model)
+
+    tokenized_prompts = tokenizer(prompt, return_tensors="pt", padding="longest")
+    print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
+
+    num_input_tokens = tokenized_prompts["input_ids"].shape[1]
+    batch_size = tokenized_prompts["input_ids"].shape[0]
+    num_output_tokens = 256
+    num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
+
+    # Have a look at the speed
+    text, time = time_func(lambda: generate(model, tokenizer, prompt, 10))
+    text, time = time_func(lambda: generate(model, tokenizer, prompt, num_output_tokens))
+
+    if rank == 0:
+        print("[Optimized] Completion: ", text)
+        print("[Optimized] Time: ", time)
+        print(f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})")
+
+    # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
+    text, time = profile_func(lambda: time_func(lambda: generate(model, tokenizer, prompt, 50)), trace_path=f"trace_llama_muillm_tp_unbatched_rank{rank}.json")
+
+def init_process(rank, size, fn, backend='nccl'):
+    """ Initialize the distributed environment. """
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    os.environ['MASTER_PORT'] = '29500'
+    os.environ['WORLD_SIZE'] = str(size)
+    os.environ['LOCAL_SIZE'] = str(size)
+    os.environ['RANK'] = str(rank)
+    os.environ['LOCAL_RANK'] = str(rank)
+
+    local_size = torch.cuda.device_count()
+    print(f"(rank {rank}) local_size = {local_size}")
+
+    # set the current device to the GPU we need
+    torch.cuda.set_device(rank)
+
+    dist.init_process_group(backend, rank=rank, world_size=size)
+
+    fn(rank, size)
+
+
+if __name__ == "__main__":
+    # get the number of GPUs
+    size = torch.cuda.device_count()
+
+    print(f"{size} GPUs available.")
+
+    # Spawn one subprocess per GPU
+    processes = []
+    mp.set_start_method("spawn")
+    for rank in range(size):
+        p = mp.Process(target=init_process, args=(rank, size, run))
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()

@@ -1,7 +1,12 @@
 
+from muillm.modules.attention.parallelbaseattention import MuiParallelBaseAttention
 from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
+from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
 from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
 from muillm.modules.multilinear import MuiMultiLinear
+from muillm.modules.parallelgateupdownmlp import MuiParallelGateUpDownMLP
+from muillm.modules.parallellinear import MuiParallelLinear
+from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
 import torch
 import torch.nn as nn
 
@@ -43,7 +48,14 @@ _LAYER_REPLACEMENTS = {
 }
 
 _TP_LAYER_REPLACEMENTS = {
-    nn.Linear: MuiLinear,
+    MuiMultiLinear: MuiParallelMultiLinear,
+
+    nn.Linear: MuiParallelLinear,
+    MuiLinear: MuiParallelLinear,
+
+    MistralMLP: MuiParallelGateUpDownMLP,
+    LlamaMLP: MuiParallelGateUpDownMLP,
+    MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
 
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
@@ -53,8 +65,8 @@ _TP_LAYER_REPLACEMENTS = {
 
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
-    MistralDecoderLayer : MuiDecoderLayer,
-    LlamaDecoderLayer : MuiDecoderLayer,
+    MistralDecoderLayer : MuiParallelDecoderLayer,
+    LlamaDecoderLayer : MuiParallelDecoderLayer,
 
     # replacements for full models
     MistralModel : MuiMistralModel,

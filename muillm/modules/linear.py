@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import List, Optional, Union
 from muillm.modules.module import MuiModule
 import torch
 from torch import Tensor
@@ -61,6 +61,11 @@ class MuiLinear(MuiModule, nn.Linear):
         self.dispatchable = dispatchable_device and dispatchable_type
 
     @staticmethod
+    def _set_requires_grads(param: nn.Parameter, requires_grads: bool) -> None:
+        if param is not None:
+            param.requires_grad = requires_grads
+
+    @staticmethod
     def replace(prev_module: nn.Linear, engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiLinear":
         has_bias = prev_module.bias is not None
         in_features = prev_module.in_features
@@ -74,22 +79,32 @@ class MuiLinear(MuiModule, nn.Linear):
         new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights)
 
         return new_module
-
+    
     def _set_norm_weights(self, norm_weights: torch.Tensor) -> None:
         norm_weights_requires_grad = norm_weights.requires_grad
         self.norm_weights = nn.Parameter(norm_weights.detach())
-        self.norm_weights.requires_grad = norm_weights_requires_grad
+        MuiLinear._set_requires_grads(self.norm_weights, norm_weights_requires_grad)
 
     def copy_module(self, prev_module: nn.Linear, norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
         has_bias = prev_module.bias is not None
 
-        self.weight = nn.Parameter(prev_module.weight.detach())
-        self.weight.requires_grad = prev_module.weight.requires_grad
+        self.weight = nn.Parameter(prev_module.weight)
+        MuiLinear._set_requires_grads(self.weight, prev_module.weight.requires_grad)
 
         if has_bias:
-            self.bias = nn.Parameter(prev_module.bias.detach())
-            self.bias.requires_grad = prev_module.bias.requires_grad
+            self.bias = nn.Parameter(prev_module.bias) if prev_module.bias is not None else None
+            MuiLinear._set_requires_grads(self.bias, prev_module.bias.requires_grad)
 
+        if isinstance(prev_module, MuiLinear):
+            # MuiLinear inherits nn.Linear, so need to check first
+            if norm_weights is not None:
+                raise ValueError("norm_weights should be None")
+            norm_weights = prev_module.norm_weights
+        elif isinstance(prev_module, nn.Linear):
+            # norm_weights need to be set in calling args if needed
+            pass
+        else:
+            raise ValueError(f"Unsupported replacement: {prev_module.__class__.__name__}")
 
         if norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities
@@ -99,6 +114,7 @@ class MuiLinear(MuiModule, nn.Linear):
         self._check_dispatchable()
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
+
         if self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
             return _MuiLinear.apply(input, self.weight, self.norm_weights, self.variance_epsilon, self.bias, residual)

@@ -25,7 +25,7 @@ def _less_sync_sample(
     generation_config: GenerationConfig,
     synced_gpus: bool,
     streamer: Optional["BaseStreamer"],
-    synchronizer: Synchronizer = None,
+    engine_config: MuiEngineConfig = None,
     **model_kwargs,
 ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
     r"""
@@ -64,6 +64,10 @@ def _less_sync_sample(
         `return_dict_in_generate=True` or a [`~generation.GenerateEncoderDecoderOutput`] if
         `model.config.is_encoder_decoder=True`.
     """
+    synchronizer = engine_config.synchronizer
+    comms = engine_config.comms
+    tensor_parallelism = engine_config.tensor_parallelism
+
     # init values
     pad_token_id = generation_config._pad_token_tensor
     output_attentions = generation_config.output_attentions
@@ -122,6 +126,8 @@ def _less_sync_sample(
     checked_mask_content = False
     self.all_ones_mask = None
 
+    # All peers are syncrhonized by broadcasting the tokens, so they all finish at the same
+    # time
     while (not this_peer_finished):
 
         # prepare model inputs
@@ -180,6 +186,10 @@ def _less_sync_sample(
             next_tokens = muillm_multinomial_sample_one_no_sync(probs).squeeze(1)
         else:
             next_tokens = torch.argmax(next_token_scores, dim=-1)
+
+        # broadcast the next_tokens from the rank 0 if we are using tensor parallelism
+        if tensor_parallelism > 1:
+            next_tokens = comms.broadcast(next_tokens, src=0)
 
         # finished sentences should have their next token be a padding token
         if has_eos_stopping_criteria:
@@ -254,7 +264,7 @@ def _wrap_transformers_model(model: GenerationMixin, engine_config: MuiEngineCon
     def _less_sync_sample_binder(*args, **kwargs):
         return _less_sync_sample(
             model,
-            synchronizer = engine_config.synchronizer,
+            engine_config = engine_config,
             *args,
             **kwargs
         )

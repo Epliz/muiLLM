@@ -66,6 +66,48 @@ at::Tensor muillm_int8_linear_forward_trampoline(
 
 #include "gateup_kernels.cuh"
 
+at::Tensor muillm_gateupsilu_forward_trampoline(
+    std::optional<torch::Tensor> norm_weights_,
+    float epsilon,
+    torch::Tensor gate_weights,
+    torch::Tensor up_weights,
+    torch::Tensor down_weights,
+    std::optional<torch::Tensor> residual_,
+    torch::Tensor x) {
+    torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
+    torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
+    return muillm_gateupsilu_forward(
+        norm_weights,
+        epsilon,
+        gate_weights,
+        up_weights,
+        down_weights,
+        residual,
+        x
+    );
+}
+
+at::Tensor muillm_gateupsilu_split_forward_trampoline(
+    std::optional<torch::Tensor> norm_weights_,
+    float epsilon,
+    torch::Tensor gate_weights,
+    torch::Tensor up_weights,
+    torch::Tensor down_weights,
+    std::optional<torch::Tensor> residual_,
+    torch::Tensor x) {
+    torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
+    torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
+    return muillm_gateupsilu_split_forward(
+        norm_weights,
+        epsilon,
+        gate_weights,
+        up_weights,
+        down_weights,
+        residual,
+        x
+    );
+}
+
 std::tuple<at::Tensor, at::Tensor> muillm_int8_gateupsilu_dequantize_forward(
     torch::Tensor gate_up_weights,
     torch::Tensor gate_up_scales_min_vals,
@@ -117,19 +159,6 @@ std::vector<at::Tensor> muillm_rope_forward_static_cache(
 );
 
 #include "causal_transformer_decoding.cuh"
-
-std::vector<at::Tensor> muillm_parallel_causal_transformer_decoding_no_mask(
-    std::vector<torch::Tensor>& qs, // [B, num_q_heads, T, embed_dim]
-    std::vector<torch::Tensor>& ks, // [B, num_k_heads, NEW_T, embed_dim]
-    std::vector<torch::Tensor>& vs  // [B, num_v_heads, NEW_T, embed_dim]
-);
-
-std::vector<at::Tensor> muillm_parallel_causal_transformer_decoding_masked(
-    std::vector<torch::Tensor>& qs, // [B, num_q_heads, T, embed_dim]
-    std::vector<torch::Tensor>& ks, // [B, num_k_heads, NEW_T, embed_dim]
-    std::vector<torch::Tensor>& vs,  // [B, num_v_heads, NEW_T, embed_dim]
-    std::vector<torch::Tensor>& ms  // [B, 1, NEW_T, T]
-);
 
 #include "sync.h"
 
@@ -199,8 +228,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none());
   m.def("muillm_int8_dequantize_forward", &muillm_int8_dequantize_forward, "muillm int8 dequantize forward");
   m.def("muillm_int8_linear_forward", &muillm_int8_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("scales_min_vals"), py::arg("group_size_shift"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
-  m.def("muillm_gateupsilu_forward", &muillm_gateupsilu_forward, "muillm gate up silu forward");
-  m.def("muillm_gateupsilu_split_forward", &muillm_gateupsilu_split_forward, "muillm gate up silu split K forward");
+  m.def("muillm_gateupsilu_forward", &muillm_gateupsilu_forward_trampoline, "muillm gate up silu forward");
+  m.def("muillm_gateupsilu_split_forward", &muillm_gateupsilu_split_forward_trampoline, "muillm gate up silu split K forward");
   m.def("muillm_int8_gateupsilu_dequantize_forward", &muillm_int8_gateupsilu_dequantize_forward, "muillm int8 gate up dequantize");
   m.def("muillm_int8_gateupsilu_forward", &muillm_int8_gateupsilu_forward, "muillm int8 gate up silu forward");
   m.def("muillm_rmsnorm_forward", &muillm_rmsnorm_forward, "muillm rmsnorm forward");

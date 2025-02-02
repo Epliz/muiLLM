@@ -61,8 +61,10 @@ class MuiLlamaModel(LlamaPreTrainedModel):
         config: LlamaConfig
     """
 
-    def __init__(self, prev_model: Union["MuiLlamaModel", LlamaModel]):
+    def __init__(self, engine_config: MuiEngineConfig, prev_model: Union["MuiLlamaModel", LlamaModel]):
         super().__init__(prev_model.config)
+        self.engine_config = engine_config
+
         self.padding_idx = prev_model.padding_idx
         self.vocab_size = prev_model.vocab_size
 
@@ -76,7 +78,7 @@ class MuiLlamaModel(LlamaPreTrainedModel):
         self.post_init()
 
     def replace(prev_model: Union["MuiLlamaModel", LlamaModel], engine_config: MuiEngineConfig) -> "MuiLlamaModel":
-        return MuiLlamaModel(prev_model=prev_model)
+        return MuiLlamaModel(engine_config=engine_config, prev_model=prev_model)
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -133,7 +135,7 @@ class MuiLlamaModel(LlamaPreTrainedModel):
                 # create a cache from scratch
                 device = inputs_embeds.device
                 dtype = torch.float16
-                past_key_values = create_static_cache(self.config, batch_size, tot_seq_len, device, dtype)
+                past_key_values = create_static_cache(self.engine_config, self.config, batch_size, tot_seq_len, device, dtype)
             elif use_legacy_cache:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
             else:
