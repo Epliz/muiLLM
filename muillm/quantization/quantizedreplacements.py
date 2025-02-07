@@ -46,7 +46,9 @@ def quantize_layers(model: nn.Module, engine_config: MuiEngineConfig):
                 if not _module_name_matches(module_name, quantization_method.modules):
                     continue
     
-            print(f"Quantizing {module_name}...")
+            if engine_config.is_rank0():
+                print(f"Quantizing {module_name}...")
+
             new_module_type = replacements[module_type]
 
             new_module = new_module_type.replace(module, engine_config=engine_config)

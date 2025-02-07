@@ -66,7 +66,8 @@ def run(rank, size):
     # we load the original model in fp16 precision
     model: nn.Module = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16).to(device="cuda", dtype=torch.float16)
 
-    print("Model : ", model)
+    if rank == 0:
+        print("Model : ", model)
 
     from typing import List, Union
 
@@ -118,11 +119,13 @@ def run(rank, size):
     # tensor_parallelism=None indicates to use all GPUs
     model = init_engine(model, tensor_parallelism=None)
 
-    print("Optimized models: ", model)
+    if rank == 0:
+        print("Optimized models: ", model)
 
     for prompts in all_prompts:
         tokenized_prompts = tokenizer(prompts, return_tensors="pt", padding="longest")
-        print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
+        if rank == 0:
+            print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
 
         num_input_tokens = tokenized_prompts["input_ids"].shape[1]
         batch_size = tokenized_prompts["input_ids"].shape[0]
@@ -132,6 +135,10 @@ def run(rank, size):
         # Have a look at the speed
         text, time = time_func(lambda: generate(model, tokenizer, prompts, 10))
         text, time = time_func(lambda: generate(model, tokenizer, prompts, num_output_tokens))
+
+        # check how many tokens were actually generated
+        tokenized_outputs = tokenizer(text, return_tensors="pt", padding="longest")
+        num_total_tokens = (num_input_tokens + tokenized_outputs["input_ids"].shape[1]) * batch_size
 
         if rank == 0:
             print("[Optimized] Completion: ", text)

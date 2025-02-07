@@ -36,7 +36,6 @@ The following optimizations are already implemented:
 * static cache support
 
 * tensor parallelism support (still being improved):
-    * single python process at the moment - easier to use as end-users
     * sharded linear, mlp, attention layers
     * custom low-latency fused GEMV-all-reduce: ~18us latency for 2 MI100 GPUs
 
@@ -106,3 +105,11 @@ Some examples are available in the [examples](examples/) folder
 * [examples/tp_mistral7b_batched.py](examples/tp_mistral7b_batched.py) an example of how to use tensor parallelism with muiLLM on the HuggingFace Transformers Mistral 7b model, in batched inference scenario.
 
 There are other examples in that folder, among which for LLama 3.
+
+## Troubleshooting
+
+The tensor parallelism support either uses peer-to-peer memory transfers, or staged-CPU-buffers to do the collective operations.
+
+For peer-to-peer to work, you will need to make sure that ACS is disabled. You can use the script in the [AMD documentation](https://dcgpu.docs.amd.com/projects/gpu-cluster-networking/en/develop/how-to/single-node-config.html#configuration-scripts).
+
+For staged-CPU-buffers to work, you will need to make sure that your limit for locked memory (`ulimit -l`) is high enough.

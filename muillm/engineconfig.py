@@ -1,5 +1,5 @@
 from typing import Optional
-from muillm.comms.communicator import Communicator, TorchCommunicator
+from muillm.comms.communicator import Communicator, MuiCommunicator, TorchCommunicator
 from muillm.quantization.quantizationmethod import QuantizationMethod
 from muillm.synchronization.synchronizer import Synchronizer
 
@@ -28,7 +28,25 @@ class MuiEngineConfig:
         # only creates comms if necessary because we want to use tensor parallelism
         self.comms = None
         if self.tensor_parallelism > 1:
-            self.comms = TorchCommunicator()
+            self.comms = MuiCommunicator()
 
             if self.tensor_parallelism != self.comms.world_size:
                 raise ValueError(f"tensor_parallelism should match world_size but got {self.tensor_parallelism} and {self.comms.world_size}")
+            
+
+            self.devices = [torch.device(f"cuda:{d}") for d in range(self.tensor_parallelism)]
+            self.streams = [torch.cuda.Stream(self.devices[i]) for i in range(self.tensor_parallelism)]
+
+            # set default device correctly (comm init might have changed it)
+            for s in self.streams:
+                torch.cuda.set_stream(s)
+
+            torch.cuda.set_device(self.devices[self.comms.local_rank])
+
+    def rank(self) -> int:
+        if self.comms is None:
+            return 0
+        return self.comms.rank
+    
+    def is_rank0(self) -> bool:
+        return self.rank() == 0

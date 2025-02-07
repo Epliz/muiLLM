@@ -93,11 +93,14 @@ def replace_layers(module: nn.Module, engine_config: MuiEngineConfig, name_prefi
         # use the correct replacements
         replacements = _TP_LAYER_REPLACEMENTS
 
-    print(f"Replace {name_prefix} ({module_type})?")
+    if engine_config.is_rank0():
+        print(f"Replace {name_prefix} ({module_type})?")
 
     if module_type in replacements:
         new_module_type = replacements[module_type]
-        print(f"Replacing {name_prefix} ({module_type} to {new_module_type}) ...")
+
+        if engine_config.is_rank0():
+            print(f"Replacing {name_prefix} ({module_type} to {new_module_type}) ...")
 
         new_module = new_module_type.replace(module, engine_config=engine_config)
 

@@ -82,6 +82,11 @@ num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
 if num_total_tokens < 100:
     text, time = time_func(lambda: generate(model, prompt, 10))
     text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
+
+    # check how many tokens were actually generated
+    tokenized_outputs = tokenizer(text, return_tensors="pt", padding="longest")
+    num_total_tokens = (num_input_tokens + tokenized_outputs["input_ids"].shape[1]) * batch_size
+
     print("[Original] Completion: ", text)
     print("[Original] Time: ", time)
     print(f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})")
@@ -107,6 +112,12 @@ num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
 # Have a look at the speed
 text, time = time_func(lambda: generate(model, prompt, 10))
 text, time = time_func(lambda: generate(model, prompt, num_output_tokens))
+
+
+# check how many tokens were actually generated
+tokenized_outputs = tokenizer(text, return_tensors="pt", padding="longest")
+num_total_tokens = (num_input_tokens + tokenized_outputs["input_ids"].shape[1]) * batch_size
+
 print("[Optimized] Completion: ", text)
 print("[Optimized] Time: ", time)
 print(f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})")

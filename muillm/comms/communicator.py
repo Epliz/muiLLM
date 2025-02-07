@@ -78,3 +78,56 @@ class TorchCommunicator(Communicator):
         output_tensors = [torch.empty_like(tensor) for i in range(self.world_size)]
         dist.all_gather(output_tensors, tensor)
         return output_tensors
+
+class _MuiCommAllReduceSum(torch.autograd.Function):
+    # Primarily so that in the pytorch trace, we see the operation with a name and not just HIP kernel launches
+
+    @staticmethod
+    def forward(ctx, comm, tensor: torch.Tensor):
+        muillm_ext.muillm_all_reduce_sum(comm, tensor)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("not implemented")
+
+class _MuiCommBroadcast(torch.autograd.Function):
+    # Primarily so that in the pytorch trace, we see the operation with a name and not just HIP kernel launches
+
+    @staticmethod
+    def forward(ctx, comm, tensor: torch.Tensor, src: int):
+        muillm_ext.muillm_broadcast(comm, tensor, src)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("not implemented")
+
+class MuiCommunicator(TorchCommunicator):
+    def __init__(
+            self,
+            world_size: Optional[int] = None,
+            local_size: Optional[int] = None,
+            rank: Optional[int] = None,
+            local_rank: Optional[int] = None):
+        # We use torch dist for our un-implemented operations
+        super().__init__(world_size=world_size, local_size=local_size, rank=rank, local_rank=local_rank)
+
+        if (self.is_multi_node()):
+            raise ValueError(f"Multi-node setups are not supported with MuiCommunicator, use TorchCommunicator instead. Specified WORLD_SIZE {self.world_size} and LOCAL_SIZE {self.local_size}")
+
+        self.comm = muillm_ext.muillm_comm_init(self.world_size, self.local_size, self.rank, self.local_rank)
+
+        # set the current device to the GPU we need
+        torch.cuda.set_device(self.local_rank)
+
+        # synchronize all GPUs
+        torch.cuda.synchronize()
+
+    # Override
+    def all_reduce_sum(self, tensor:torch.Tensor) -> torch.Tensor:
+        _MuiCommAllReduceSum.apply(self.comm, tensor)
+        return tensor
+    
+    # Override
+    def broadcast(self, tensor:torch.Tensor, src: int) -> torch.Tensor:
+        _MuiCommBroadcast.apply(self.comm, tensor, src)
+        return tensor

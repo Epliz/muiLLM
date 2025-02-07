@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 
 #include <vector>
 #include <tuple>
@@ -223,6 +224,58 @@ at::Tensor muillm_to_cpu_trampoline(
   return muillm_to_cpu(sync.sync_ptr, tensor);
 }
 
+#include "comm.h"
+
+muillm_comm_error_t muillm_all_reduce_sum(
+    muillm_comm_t* comm,
+    torch::Tensor& tensor
+);
+
+muillm_comm_error_t muillm_broadcast(
+    muillm_comm_t* comm,
+    torch::Tensor& tensor,
+    int src
+);
+
+// needed because Pybind11 can't seem to be able to deal with opaque pointers
+struct muillm_comm_ptr {
+  muillm_comm_t* comm_ptr;
+};
+
+muillm_comm_ptr muillm_comm_init_trampoline(
+    int world_size,
+    int local_size,
+    int rank,
+    int local_rank
+) {
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  muillm_comm_t* ptr = nullptr;
+  muillm_comm_error_t error = muillm_comm_init(world_size, local_size, rank, local_rank, &ptr, stream);
+
+  TORCH_CHECK(error == MUILLM_COMM_SUCCESS, "an error happened when initializing mui comm");
+
+  muillm_comm_ptr ret;
+  ret.comm_ptr = ptr;
+  return ret;
+}
+
+void muillm_all_reduce_sum_trampoline(
+    muillm_comm_ptr comm,
+    torch::Tensor& tensor
+) {
+  muillm_comm_error_t error = muillm_all_reduce_sum(comm.comm_ptr, tensor);
+  TORCH_CHECK(error == MUILLM_COMM_SUCCESS, "an error happened during all_reduce");
+}
+
+void muillm_broadcast_trampoline(
+    muillm_comm_ptr comm,
+    torch::Tensor& tensor,
+    int src
+) {
+  muillm_comm_error_t error = muillm_broadcast(comm.comm_ptr, tensor, src);
+  TORCH_CHECK(error == MUILLM_COMM_SUCCESS, "an error happened during broadcast");
+}
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none());
@@ -253,4 +306,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_item_f32", &muillm_item_f32_trampoline, "muillm item f32");
   m.def("muillm_to_cpu", &muillm_to_cpu_trampoline, "muillm to cpu");
 
+
+  // communication
+  pybind11::class_<muillm_comm_ptr> cl(m, "muillm_comm_ptr");
+  cl.def(pybind11::init<>());
+
+  m.def("muillm_comm_init", &muillm_comm_init_trampoline, "muillm comm init");
+  m.def("muillm_all_reduce_sum", &muillm_all_reduce_sum_trampoline, "muillm all_reduce sum");
+  m.def("muillm_broadcast", &muillm_broadcast_trampoline, "muillm broadcast");
 }

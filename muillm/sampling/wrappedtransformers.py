@@ -126,6 +126,9 @@ def _less_sync_sample(
     checked_mask_content = False
     self.all_ones_mask = None
 
+    # Force a CPU GPU sync
+    torch.cuda.synchronize()
+
     # All peers are syncrhonized by broadcasting the tokens, so they all finish at the same
     # time
     while (not this_peer_finished):
@@ -228,6 +231,9 @@ def _less_sync_sample(
         # This is needed to properly delete outputs.logits which may be very large for first iteration
         # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
         del outputs
+
+    # Force a CPU GPU sync
+    torch.cuda.synchronize()
 
     if streamer is not None:
         streamer.end()

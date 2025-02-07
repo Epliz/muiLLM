@@ -55,7 +55,18 @@ setup(
             'csrc/causal_transformer_decoding.cu',
             'csrc/sync.cu',
             'csrc/sync_torch.cpp',
-        ])
+            # comms
+            'csrc/comm_base.cpp',
+            'csrc/comm.cpp',
+            'csrc/comm_torch.cpp',
+            'csrc/comm_p2p.cu',
+            'csrc/comm_staged.cu',
+        ],
+        extra_compile_args={
+            'cxx': ['-g'],  # Add debug symbols for C++ code
+            'hipcc': ['-g']  # Add debug symbols for HIP code
+        }
+    )
     ],
     cmdclass={
         'build_ext': NinjaBuildExtension
