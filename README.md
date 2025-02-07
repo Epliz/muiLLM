@@ -13,7 +13,12 @@ The library being experimental means that there is probably quite some bugs lurk
 
 ## Supported models
 
-Currently, only the [Mistral 7b instruct v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2) model is supported.
+Currently, the supported models (i.e. with most/all of their layers optimized) are:
+* [Mistral 7b instruct v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2)
+* [Meta Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)
+* [Meta Llama-3.3-70B-Instruct](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct)
+
+More to come!
 
 ## Optimizations
 
@@ -23,7 +28,7 @@ The following optimizations are already implemented:
 * fused MLP (Gate/Up + SiLU)
 * fused residuals in linear layers
 * fused RMSNorm in linear layers
-* fused RMSNorm with write out in dynamic cache
+* fused ROPE with write out in static/dynamic cache
 * experimental support for int8 RTN
 * basic semi-fused attention
 * reduced CPU/GPU synchronizations due to attention mask checks
@@ -93,4 +98,11 @@ Then you can run one of the examples
 
 ## Examples
 
-Please find at [examples/mistral7b.py](examples/mistral7b.py) an example of how to use muiLLM on the HuggingFace Transformers Mistral 7b model.
+Some examples are available in the [examples](examples/) folder
+
+* [examples/mistral7b.py](examples/mistral7b.py) an example of how to use muiLLM on the HuggingFace Transformers Mistral 7b model, in batch size 1 scenario.
+* [examples/mistral7b_batched.py](examples/mistral7b_batched.py) an example of how to use muiLLM on the HuggingFace Transformers Mistral 7b model, in batched inference scenario.
+* [examples/tp_mistral7b.py](examples/tp_mistral7b.py) an example of how to use tensor parallelism with muiLLM on the HuggingFace Transformers Mistral 7b model, in batch size 1 scenario.
+* [examples/tp_mistral7b_batched.py](examples/tp_mistral7b_batched.py) an example of how to use tensor parallelism with muiLLM on the HuggingFace Transformers Mistral 7b model, in batched inference scenario.
+
+There are other examples in that folder, among which for LLama 3.
