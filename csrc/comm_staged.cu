@@ -122,6 +122,31 @@ muillm_comm_error_t muillm_comm_staged_get_buffer_set(
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t muillm_comm_staged_get_buffers(
+  muillm_comm_staged_t* comm,
+  size_t count,
+  muillm_comm_datatype_t datatype,
+  void*** buffers,
+  hipStream_t stream
+) {
+
+  muillm_comm_staged_buffer_set_t* buffer_set;
+  muillm_comm_error_t error = muillm_comm_staged_get_buffer_set(
+    comm,
+    count,
+    datatype,
+    &buffer_set,
+    stream
+  );
+
+  if (error != MUILLM_COMM_SUCCESS) {
+    return error;
+  }
+
+  *buffers = (void**) buffer_set->buffers;
+
+  return MUILLM_COMM_SUCCESS;
+}
 
 static muillm_comm_error_t __init_buffer_set(
   muillm_comm_staged_t* comm,
@@ -499,6 +524,111 @@ if (i < N) {
   float res = x1x4 + x5x8;
   y[i] = res;
 }
+}
+
+muillm_comm_error_t muillm_comm_staged_placed_all_reduce_sum(
+  muillm_comm_staged_t* comm,
+  const void** src_ptrs,
+  void* dst_ptr,
+  size_t count,
+  muillm_comm_datatype_t datatype,
+  hipStream_t stream
+) {
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  hipError_t hip_error;
+  muillm_comm_error_t muillm_error;
+
+  // ensure all GPUs have copied into the reduction buffers
+  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"staged reduction barrier failed"<<std::endl;
+    return muillm_error;
+  }
+
+  // do the reduction
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
+
+  if (datatype == MUILLM_COMM_FP16) {
+    if (local_size == 8) {
+      __all_reduce_fp16_tp8_staged_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+        (const half*) src_ptrs[0],
+        (const half*) src_ptrs[1],
+        (const half*) src_ptrs[2],
+        (const half*) src_ptrs[3],
+        (const half*) src_ptrs[4],
+        (const half*) src_ptrs[5],
+        (const half*) src_ptrs[6],
+        (const half*) src_ptrs[7],
+        (half*) dst_ptr,
+        count
+      );
+    } else if (local_size == 4) {
+      __all_reduce_fp16_tp4_staged_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+        (const half*) src_ptrs[0],
+        (const half*) src_ptrs[1],
+        (const half*) src_ptrs[2],
+        (const half*) src_ptrs[3],
+        (half*) dst_ptr,
+        count
+      );
+    } else if (local_size == 2) {
+      __all_reduce_fp16_tp2_staged_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+        (const half*) src_ptrs[0],
+        (const half*) src_ptrs[1],
+        (half*) dst_ptr,
+        count
+      );
+    } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else if (datatype == MUILLM_COMM_FP32) {
+    if (local_size == 8) {
+      __all_reduce_fp32_tp8_staged_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+        (const float*) src_ptrs[0],
+        (const float*) src_ptrs[1],
+        (const float*) src_ptrs[2],
+        (const float*) src_ptrs[3],
+        (const float*) src_ptrs[4],
+        (const float*) src_ptrs[5],
+        (const float*) src_ptrs[6],
+        (const float*) src_ptrs[7],
+        (float*) dst_ptr,
+        count
+      );
+    } else if (local_size == 4) {
+      __all_reduce_fp32_tp4_staged_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+        (const float*) src_ptrs[0],
+        (const float*) src_ptrs[1],
+        (const float*) src_ptrs[2],
+        (const float*) src_ptrs[3],
+        (float*) dst_ptr,
+        count
+      );
+    } else if (local_size == 2) {
+      __all_reduce_fp32_tp2_staged_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+        (const float*) src_ptrs[0],
+        (const float*) src_ptrs[1],
+        (float*) dst_ptr,
+        count
+      );
+    } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else {
+    std::cout<<"reduction unsupported dtype"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  if (hipPeekAtLastError() != hipSuccess) {
+    printf("staged reduce failed\n");
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  return MUILLM_COMM_SUCCESS;
 }
 
 muillm_comm_error_t muillm_comm_staged_all_reduce_sum(

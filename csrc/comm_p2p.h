@@ -38,6 +38,15 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
     hipStream_t stream
 );
 
+muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum(
+  muillm_comm_p2p_t* comm,
+  const void** src_ptrs,
+  void* dst_ptr,
+  size_t count,
+  muillm_comm_datatype_t datatype,
+  hipStream_t stream
+);
+
 muillm_comm_error_t muillm_comm_p2p_all_reduce_sum(
     muillm_comm_p2p_t* comm,
     const void* src_ptr,
@@ -57,11 +66,11 @@ muillm_comm_error_t muillm_comm_p2p_broadcast(
   hipStream_t stream
 );
 
-muillm_comm_error_t muillm_comm_p2p_get_buffer_set(
+muillm_comm_error_t muillm_comm_p2p_get_buffers(
   muillm_comm_p2p_t* comm,
   size_t count,
   muillm_comm_datatype_t datatype,
-  muillm_comm_p2p_buffer_set_t** buffer_set,
+  void*** buffers,
   hipStream_t stream
 );
 

@@ -277,12 +277,115 @@ void muillm_broadcast_trampoline(
   TORCH_CHECK(error == MUILLM_COMM_SUCCESS, "an error happened during broadcast");
 }
 
+
+#include "parallel_linear_kernels.cuh"
+
+at::Tensor muillm_parallel_linear_forward_trampoline(
+    muillm_comm_ptr comm,
+    torch::Tensor x,
+    torch::Tensor weights,
+    std::optional<torch::Tensor> norm_weights_,
+    float epsilon,
+    std::optional<torch::Tensor> mul_bias_,
+    std::optional<torch::Tensor> add_bias_,
+    std::optional<torch::Tensor> residual_,
+    int sharding_dim,
+    bool reduce) {
+
+    auto undef_tensor = torch::Tensor();
+    torch::Tensor empty_tensor_list;
+
+    torch::Tensor& norm_weights = norm_weights_.has_value() ? norm_weights_.value() : empty_tensor_list;
+    torch::Tensor& mul_biases = mul_bias_.has_value() ? mul_bias_.value() : empty_tensor_list;
+    torch::Tensor& add_biases = add_bias_.has_value() ? add_bias_.value() : empty_tensor_list;
+    torch::Tensor residual = residual_.has_value() ? residual_.value() : undef_tensor;
+
+    return muillm_parallel_linear_activ_forward(
+        comm.comm_ptr,
+        norm_weights,
+        epsilon,
+        weights,
+        mui_activation::Identity,
+        mul_biases,
+        add_biases,
+        residual,
+        sharding_dim,
+        reduce,
+        x
+    );
+}
+
+at::Tensor muillm_parallel_gateupsilu_forward(
+    muillm_comm_t* comm,
+    torch::Tensor& norm_weights,
+    float epsilon,
+    torch::Tensor& gate_weights,
+    torch::Tensor& up_weights,
+    torch::Tensor& down_weights,
+    torch::Tensor& residual,
+    torch::Tensor& x);
+
+at::Tensor muillm_parallel_gateupsilu_split_forward(
+    muillm_comm_t* comm,
+    torch::Tensor& norm_weights,
+    float epsilon,
+    torch::Tensor& gate_weights,
+    torch::Tensor& up_weights,
+    torch::Tensor& down_weights,
+    torch::Tensor& residual,
+    torch::Tensor& x);
+
+at::Tensor muillm_parallel_gateupsilu_forward_trampoline(
+    muillm_comm_ptr comm,
+    torch::Tensor norm_weights,
+    float epsilon,
+    torch::Tensor gate_weights,
+    torch::Tensor up_weights,
+    torch::Tensor down_weights,
+    torch::Tensor residual,
+    torch::Tensor x) {
+  return muillm_parallel_gateupsilu_forward(
+    comm.comm_ptr,
+    norm_weights,
+    epsilon,
+    gate_weights,
+    up_weights,
+    down_weights,
+    residual,
+    x
+  );
+}
+
+at::Tensor muillm_parallel_gateupsilu_split_forward_trampoline(
+    muillm_comm_ptr comm,
+    torch::Tensor norm_weights,
+    float epsilon,
+    torch::Tensor gate_weights,
+    torch::Tensor up_weights,
+    torch::Tensor down_weights,
+    torch::Tensor residual,
+    torch::Tensor x) {
+  return muillm_parallel_gateupsilu_split_forward(
+    comm.comm_ptr,
+    norm_weights,
+    epsilon,
+    gate_weights,
+    up_weights,
+    down_weights,
+    residual,
+    x
+  );
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none());
+  m.def("muillm_parallel_linear_forward", &muillm_parallel_linear_forward_trampoline, "muillm parallel linear forward", py::arg("comm"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none(), py::arg("sharding_dim") = 1, py::arg("reduce") = false);
   m.def("muillm_int8_dequantize_forward", &muillm_int8_dequantize_forward, "muillm int8 dequantize forward");
   m.def("muillm_int8_linear_forward", &muillm_int8_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("scales_min_vals"), py::arg("group_size_shift"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_gateupsilu_forward", &muillm_gateupsilu_forward_trampoline, "muillm gate up silu forward");
+  m.def("muillm_parallel_gateupsilu_forward", &muillm_parallel_gateupsilu_forward_trampoline, "muillm parallel gate up silu forward");
   m.def("muillm_gateupsilu_split_forward", &muillm_gateupsilu_split_forward_trampoline, "muillm gate up silu split K forward");
+  m.def("muillm_parallel_gateupsilu_split_forward", &muillm_parallel_gateupsilu_split_forward_trampoline, "muillm parallel gate up silu split K forward");
   m.def("muillm_int8_gateupsilu_dequantize_forward", &muillm_int8_gateupsilu_dequantize_forward, "muillm int8 gate up dequantize");
   m.def("muillm_int8_gateupsilu_forward", &muillm_int8_gateupsilu_forward, "muillm int8 gate up silu forward");
   m.def("muillm_rmsnorm_forward", &muillm_rmsnorm_forward, "muillm rmsnorm forward");

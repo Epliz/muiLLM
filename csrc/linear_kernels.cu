@@ -562,7 +562,8 @@ at::Tensor muillm_linear_activ_forward(
     add_bias,
     residual,
     x,
-    output_ptr);
+    output_ptr
+  );
 
   return y;
 }

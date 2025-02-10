@@ -39,6 +39,15 @@ muillm_comm_error_t muillm_comm_staged_init_comm(
     hipStream_t stream
 );
 
+muillm_comm_error_t muillm_comm_staged_placed_all_reduce_sum(
+  muillm_comm_staged_t* comm,
+  const void** src_ptrs,
+  void* dst_ptr,
+  size_t count,
+  muillm_comm_datatype_t datatype,
+  hipStream_t stream
+);
+
 muillm_comm_error_t muillm_comm_staged_all_reduce_sum(
     muillm_comm_staged_t* comm,
     const void* src_ptr,
@@ -48,14 +57,6 @@ muillm_comm_error_t muillm_comm_staged_all_reduce_sum(
     hipStream_t stream
 );
 
-muillm_comm_error_t muillm_comm_staged_get_buffer_set(
-  muillm_comm_staged_t* comm,
-  size_t count,
-  muillm_comm_datatype_t datatype,
-  muillm_comm_staged_buffer_set_t** buffer_set,
-  hipStream_t stream
-);
-
 muillm_comm_error_t muillm_comm_staged_broadcast(
   muillm_comm_staged_t* comm,
   int src,
@@ -63,6 +64,14 @@ muillm_comm_error_t muillm_comm_staged_broadcast(
   void* dst_ptr,
   size_t count,
   muillm_comm_datatype_t datatype,
+  hipStream_t stream
+);
+
+muillm_comm_error_t muillm_comm_staged_get_buffers(
+  muillm_comm_staged_t* comm,
+  size_t count,
+  muillm_comm_datatype_t datatype,
+  void*** buffers,
   hipStream_t stream
 );
 

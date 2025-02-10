@@ -61,6 +61,10 @@ setup(
             'csrc/comm_torch.cpp',
             'csrc/comm_p2p.cu',
             'csrc/comm_staged.cu',
+            # parallel
+            'csrc/parallel_linear_kernels.cu',
+            'csrc/parallel_gateup_kernels.cu',
+
         ],
         extra_compile_args={
             'cxx': ['-g'],  # Add debug symbols for C++ code
