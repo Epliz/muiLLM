@@ -77,9 +77,41 @@ muillm_comm_error_t muillm_comm_init(
 
 }
 
+
+muillm_comm_error_t muillm_comm_placed_all_reduce_sum(
+  muillm_comm_t* comm,
+  const void** src_ptrs,
+  void* dst_ptr,
+  size_t count,
+  muillm_comm_datatype_t datatype,
+  hipStream_t stream
+) {
+if (comm->transfer_method == MUILLM_COMM_METHOD_P2P_TRANSFER) {
+  return muillm_comm_p2p_placed_all_reduce_sum(
+    (muillm_comm_p2p_t*) comm,
+    src_ptrs,
+    dst_ptr,
+    count,
+    datatype,
+    stream
+  );
+} else if (comm->transfer_method == MUILLM_COMM_METHOD_STAGED_TRANSFER) {
+  return muillm_comm_staged_placed_all_reduce_sum(
+    (muillm_comm_staged_t*) comm,
+    src_ptrs,
+    dst_ptr,
+    count,
+    datatype,
+    stream
+  );
+} else {
+  return MUILLM_COMM_UNKNOWN_ERROR;
+}
+}
+
 muillm_comm_error_t muillm_comm_all_reduce_sum(
     muillm_comm_t* comm,
-    void* src_ptr,
+    const void* src_ptr,
     void* dst_ptr,
     size_t count,
     muillm_comm_datatype_t datatype,
@@ -135,6 +167,34 @@ muillm_comm_error_t muillm_comm_broadcast(
       dst_ptr,
       count,
       datatype,
+      stream
+    );
+  } else {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+}
+
+muillm_comm_error_t muillm_comm_get_buffers(
+  muillm_comm_t* comm,
+  size_t count,
+  muillm_comm_datatype_t datatype,
+  void*** buffers,
+  hipStream_t stream
+) {
+  if (comm->transfer_method == MUILLM_COMM_METHOD_P2P_TRANSFER) {
+    return muillm_comm_p2p_get_buffers(
+      (muillm_comm_p2p_t*) comm,
+      count,
+      datatype,
+      buffers,
+      stream
+    );
+  } else if (comm->transfer_method == MUILLM_COMM_METHOD_STAGED_TRANSFER) {
+    return muillm_comm_staged_get_buffers(
+      (muillm_comm_staged_t*) comm,
+      count,
+      datatype,
+      buffers,
       stream
     );
   } else {

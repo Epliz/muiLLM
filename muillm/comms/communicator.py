@@ -114,7 +114,7 @@ class MuiCommunicator(TorchCommunicator):
         if (self.is_multi_node()):
             raise ValueError(f"Multi-node setups are not supported with MuiCommunicator, use TorchCommunicator instead. Specified WORLD_SIZE {self.world_size} and LOCAL_SIZE {self.local_size}")
 
-        self.comm = muillm_ext.muillm_comm_init(self.world_size, self.local_size, self.rank, self.local_rank)
+        self.comms = muillm_ext.muillm_comm_init(self.world_size, self.local_size, self.rank, self.local_rank)
 
         # set the current device to the GPU we need
         torch.cuda.set_device(self.local_rank)
@@ -124,10 +124,10 @@ class MuiCommunicator(TorchCommunicator):
 
     # Override
     def all_reduce_sum(self, tensor:torch.Tensor) -> torch.Tensor:
-        _MuiCommAllReduceSum.apply(self.comm, tensor)
+        _MuiCommAllReduceSum.apply(self.comms, tensor)
         return tensor
     
     # Override
     def broadcast(self, tensor:torch.Tensor, src: int) -> torch.Tensor:
-        _MuiCommBroadcast.apply(self.comm, tensor, src)
+        _MuiCommBroadcast.apply(self.comms, tensor, src)
         return tensor

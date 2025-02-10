@@ -13,16 +13,11 @@ from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.rmsnorm import _MuiRMSNorm
 import muillm_ext
 
-class _MuiLinear(torch.autograd.Function):
+class _MuiParallelLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weights, norm_weights, variance_epsilon, add_bias, residual):
-        if (add_bias is not None) and (residual is not None):
-            raise ValueError("bias and residual at the same time is not supported")
+    def forward(ctx, comm, x, weights, norm_weights, variance_epsilon, add_bias, residual, sharding_dim, reduce):
 
-        if residual is not None:
-            add_bias = residual
-
-        output = muillm_ext.muillm_linear_forward(x, weights, norm_weights, variance_epsilon, mul_bias=None, add_bias=add_bias)
+        output = muillm_ext.muillm_parallel_linear_forward(comm.comms, x, weights, norm_weights, variance_epsilon, mul_bias=None, add_bias=add_bias, residual=residual, sharding_dim=sharding_dim, reduce=reduce)
 
         ctx.save_for_backward(x, weights, norm_weights, variance_epsilon, add_bias)
 
@@ -218,18 +213,14 @@ class MuiParallelLinear(MuiModule):
     def parallel_forward(self, input: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None, collect_outputs: bool = True) -> Tensor:
         input = self._shard_inputs_if_needed(input)
 
-        rank = self.comms.rank
-        if rank != 0:
-            # only apply the residual on rank 0
-            residual = None
-
         norm_weights = self.norm_weights[0] if self.norm_weights is not None else None
         bias = self.biases[0] if self.biases is not None else None
 
         if self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
-            # TODO: push reduction
-            output = _MuiLinear.apply(input, self.weights[0], norm_weights, self.variance_epsilon, bias, residual)
+            # the kernel handles residual or not
+            # the kernel does the all-reduce
+            output = _MuiParallelLinear.apply(self.comms, input, self.weights[0], norm_weights, self.variance_epsilon, bias, residual, self.sharding_dim, collect_outputs)
         else:
             if self.normalize:
                 if self.sharding_dim == 1:
@@ -239,11 +230,16 @@ class MuiParallelLinear(MuiModule):
 
             output = F.linear(input, self.weights[0], bias)
 
+            rank = self.comms.rank
+            if rank != 0:
+                # only apply the residual on rank 0
+                residual = None
+
             if residual is not None:
                 output = output + residual
 
-        if collect_outputs:
-            output = self.__collect_outputs(output)
+            if collect_outputs:
+                output = self.__collect_outputs(output)
 
         # wrap in a list to indicate that it is the output of parallel_forward
         return [output]

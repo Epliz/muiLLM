@@ -20,9 +20,18 @@ muillm_comm_error_t muillm_comm_init(
     hipStream_t stream
 );
 
+muillm_comm_error_t muillm_comm_placed_all_reduce_sum(
+    muillm_comm_t* comm,
+    const void** src_ptrs,
+    void* dst_ptr,
+    size_t count,
+    muillm_comm_datatype_t datatype,
+    hipStream_t stream
+);
+
 muillm_comm_error_t muillm_comm_all_reduce_sum(
     muillm_comm_t* comm,
-    void* src_ptr,
+    const void* src_ptr,
     void* dst_ptr,
     size_t count,
     muillm_comm_datatype_t datatype,
@@ -36,6 +45,14 @@ muillm_comm_error_t muillm_comm_broadcast(
     void* dst_ptr,
     size_t count,
     muillm_comm_datatype_t datatype,
+    hipStream_t stream
+);
+
+muillm_comm_error_t muillm_comm_get_buffers(
+    muillm_comm_t* comm,
+    size_t count,
+    muillm_comm_datatype_t datatype,
+    void*** buffers,
     hipStream_t stream
 );
 
