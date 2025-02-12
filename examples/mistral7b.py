@@ -22,11 +22,12 @@ model_id = os.getenv("MISTRAL_7B_PATH", "/storage/models/Mistral-7B-Instruct-v0.
 ## Load the original model & tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_id,padding_side="left")
 
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
 # we load the original model in fp16 precision
 model: nn.Module = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16).to(device="cuda", dtype=torch.float16)
+
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+    model.resize_token_embeddings(len(tokenizer))
 
 print("Model : ", model)
 
