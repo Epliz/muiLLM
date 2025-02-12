@@ -6,10 +6,23 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
+typedef enum muillm_gpu_arch {
+  MUILLM_GPU_ARCH_UNKNOWN = 0,
+  MUILLM_GPU_ARCH_MI100,
+  MUILLM_GPU_ARCH_MI200,
+  MUILLM_GPU_ARCH_MI300,
+  MUILLM_GPU_ARCH_MI400
+} muillm_gpu_arch_t;
+
+typedef struct muillm_comm_p2p_gpu_info {
+  muillm_gpu_arch_t arch;
+} muillm_comm_p2p_gpu_info_t;
+
 typedef struct muillm_comm_p2p_buffer_set {
   void* buffers[MUILLM_COMM_MAX_GPUS];
   size_t capacity;
 } muillm_comm_p2p_buffer_set_t;
+
 
 typedef struct muillm_comm_p2p: muillm_comm {
 
@@ -24,8 +37,12 @@ typedef struct muillm_comm_p2p: muillm_comm {
   uint32_t signal_seq_no;
 
   // event to flush the caches
-  hipEvent_t acquire_event;
+  hipEvent_t cache_flush_event;
 
+  // indicator whether we can skip the cache flush event
+  bool cant_skip_cache_flush_event;
+
+  muillm_comm_p2p_gpu_info_t gpu_info;
 } muillm_comm_p2p_t;
 
 muillm_comm_error_t muillm_comm_p2p_init_comm(

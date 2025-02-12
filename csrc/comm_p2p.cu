@@ -207,6 +207,39 @@ muillm_comm_error_t muillm_comm_p2p_get_buffers(
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t __detect_gpu_properties(
+  int device,
+  muillm_comm_p2p_gpu_info_t* gpu_info
+) {
+
+  hipDeviceProp_t properties;
+  if (hipGetDeviceProperties(&properties, device) != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  const char* gfx908 = "gfx908"; // MI100
+  const char* gfx90a = "gfx90a"; // MI200
+  const char* gfx94x = "gfx94"; // MI300, MI300a
+  const char* gfx95x = "gfx95"; // MI400
+
+  if (strncmp(properties.gcnArchName, gfx908, strlen(gfx908)) == 0) {
+    gpu_info->arch = MUILLM_GPU_ARCH_MI100;
+  } else if (strncmp(properties.gcnArchName, gfx90a, strlen(gfx90a)) == 0) {
+    gpu_info->arch = MUILLM_GPU_ARCH_MI200;
+  } else if (strncmp(properties.gcnArchName, gfx94x, strlen(gfx94x)) == 0) {
+    gpu_info->arch = MUILLM_GPU_ARCH_MI300;
+  } else if (strncmp(properties.gcnArchName, gfx95x, strlen(gfx95x)) == 0) {
+    gpu_info->arch = MUILLM_GPU_ARCH_MI400;
+  } else {
+    gpu_info->arch = MUILLM_GPU_ARCH_UNKNOWN;
+  }
+
+  printf("arch name %s\n", properties.gcnArchName);
+  printf("detected arch %d\n", gpu_info->arch);
+
+  return MUILLM_COMM_SUCCESS;
+}
+
 static muillm_comm_error_t __init_buffer_set(
   muillm_comm_p2p_t* comm,
   muillm_comm_p2p_buffer_set_t** buffer_set_ptr,
@@ -329,6 +362,10 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
+  if ((muillm_error = __detect_gpu_properties(local_rank, &comm->gpu_info)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+
   // check that signal memory is supported
   int signals_supported;
   if (hipDeviceGetAttribute(&signals_supported, hipDeviceAttributeCanUseStreamWaitValue, 0) != hipSuccess) {
@@ -344,8 +381,12 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   // setup p2p 
   __init_p2p_recv(comm);
 
+  // by default, do not skip the cache flush
+  // but MI300 and successors don't need it apparently
+  comm->cant_skip_cache_flush_event = comm->gpu_info.arch < MUILLM_GPU_ARCH_MI300;
+
   // allocate cache flush event
-  if (hipEventCreateWithFlags(&comm->acquire_event, hipEventDisableTiming | hipEventReleaseToSystem) != hipSuccess) {
+  if (hipEventCreateWithFlags(&comm->cache_flush_event, hipEventDisableTiming | hipEventReleaseToSystem) != hipSuccess) {
     std::cout<<"event creation failed\n"<<std::endl;
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
@@ -466,10 +507,13 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
     uint64_t seq_no = comm->signal_seq_no;
 
     // GPU barrier: all GPUs wait on each other
-    // record an event to flush caches
-    if (hipEventRecord(comm->acquire_event, stream) != hipSuccess) {
-      std::cout<<"Failed to record event "<<local_rank<<std::endl;
-      return MUILLM_COMM_UNKNOWN_ERROR;
+    if (comm->cant_skip_cache_flush_event) {
+      // on MI100, we get a crash if not putting this event here
+      // record an event to flush caches
+      if (hipEventRecord(comm->cache_flush_event, stream) != hipSuccess) {
+        std::cout<<"Failed to record event "<<local_rank<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
     }
 
     // write the values
