@@ -156,7 +156,8 @@ std::vector<at::Tensor> muillm_rope_forward_static_cache(
     torch::Tensor& v_in,
     torch::Tensor& k_cache,
     torch::Tensor& v_cache,
-    torch::Tensor& cache_position
+    torch::Tensor& cache_position,
+    uint64_t seen_tokens
 );
 
 #include "causal_transformer_decoding.cuh"

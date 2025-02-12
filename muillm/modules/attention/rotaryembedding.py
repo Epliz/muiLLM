@@ -88,8 +88,8 @@ class _MuiRotaryDynamicCache(torch.autograd.Function):
 
 class _MuiRotaryStaticCache(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, positions_ids, cos_cached, sin_cached, q, k, v, k_cache, v_cache, cache_position):
-        output = muillm_ext.muillm_rope_forward_static_cache(positions_ids, cos_cached, sin_cached, q, k, v, k_cache, v_cache, cache_position)
+    def forward(ctx, positions_ids, cos_cached, sin_cached, q, k, v, k_cache, v_cache, cache_position, seen_tokens):
+        output = muillm_ext.muillm_rope_forward_static_cache(positions_ids, cos_cached, sin_cached, q, k, v, k_cache, v_cache, cache_position, seen_tokens)
 
         ctx.save_for_backward(positions_ids, cos_cached, sin_cached, q, k)
 
@@ -231,11 +231,7 @@ class MuiMistralRotaryEmbedding(MuiModule):
                 if cache_position is None:
                     raise ValueError("cache_position is needed")
 
-                query_states, key_states = _MuiRotaryStaticCache.apply(position_ids, cos, sin, q, k, v, k_cache, v_cache, cache_position)
-
-                # restrict to as many tokens as seen by the cache
-                key_states = torch.narrow(k_cache, dim=2, start=0, length=cache._seen_tokens)
-                value_states = torch.narrow(v_cache, dim=2, start=0, length=cache._seen_tokens)
+                query_states, key_states, value_states = _MuiRotaryStaticCache.apply(position_ids, cos, sin, q, k, v, k_cache, v_cache, cache_position, cache._seen_tokens)
 
                 return query_states, key_states, value_states
             elif isinstance(cache, DynamicCache):

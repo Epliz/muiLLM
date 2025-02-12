@@ -632,7 +632,6 @@ void __global__ apply_rope_kernel_write_static_cache(
   const half* __restrict__ k_in, // shape [B, num_k_heads, T, embed_dim]
   const half* __restrict__ v_in, // shape [B, num_v_heads, T, embed_dim]
   half* __restrict__ q_out, // shape [B, num_q_heads, T, embed_dim]
-  half* __restrict__ k_out, // shape [B, num_k_heads, T, embed_dim]
   // KV cache
   half* __restrict__ k_cache_out, // [B, num_k_heads, MAX_T, embed_dim]
   half* __restrict__ v_cache_out, // [B, num_v_heads, MAX_T, embed_dim]
@@ -679,8 +678,10 @@ void __global__ apply_rope_kernel_write_static_cache(
     unsigned head_stride;
     unsigned tok_stride;
 
+    bool q_or_k = false;
     // determine if we are processing q, k or v
     if (head_idx < num_q_heads) {
+        q_or_k = true;
         embeds_in = q_in;
         embeds_out = q_out;
         // no q cache
@@ -692,8 +693,9 @@ void __global__ apply_rope_kernel_write_static_cache(
         tok_stride = q_in_tok_stride;
     } else if (head_idx < num_q_heads + num_k_heads) {
         // k
+        q_or_k = true;
         embeds_in = k_in;
-        embeds_out = k_out;
+        embeds_out = nullptr;
         cache_out = k_cache_out;
         num_heads = num_k_heads;
 
@@ -752,7 +754,8 @@ void __global__ apply_rope_kernel_write_static_cache(
       cache_out_write = &cache_out[(((batch_idx * num_heads) + head_idx) * MAX_T + cache_tok_pos) * embed_dim + 0];
     }
 
-    if (embeds_out != nullptr) {
+    // we need to do rope on both q and k, but don't need to write out k
+    if (q_or_k) {
       // q or k
       unsigned half_embed_dim = embed_dim / 2;
 
@@ -771,7 +774,9 @@ void __global__ apply_rope_kernel_write_static_cache(
     
         half r = __hfma(rot_embed, sin_pos,__hmul(embed, cos_pos));
 
-        *addr(embeds_out, d) = r;
+        if (embeds_out != nullptr) {
+          *addr(embeds_out, d) = r;
+        }
 
         // TODO: variants with and without cache write?
         // write the new token in cache
@@ -791,7 +796,9 @@ void __global__ apply_rope_kernel_write_static_cache(
 
         half r = __hfma(rot_embed, sin_pos,__hmul(embed, cos_pos));
 
-        *addr(embeds_out, d) = r;
+        if (embeds_out != nullptr) {
+          *addr(embeds_out, d) = r;
+        }
 
         // TODO: variants with and without cache write?
         // write the new token in cache
@@ -818,7 +825,8 @@ std::vector<at::Tensor> muillm_rope_forward_static_cache(
     torch::Tensor& v_in,
     torch::Tensor& k_cache,
     torch::Tensor& v_cache,
-    torch::Tensor& cache_position
+    torch::Tensor& cache_position,
+    uint64_t seen_tokens
 ) {
   CHECK_INPUT(position_ids);
   CHECK_INPUT(cos_cached);
@@ -849,7 +857,6 @@ std::vector<at::Tensor> muillm_rope_forward_static_cache(
 
   auto k_sizes = k_in.sizes().vec();
   auto k_strides = k_in.strides().vec();
-  auto k_out = torch::empty(k_sizes, output_options);
 
   auto v_sizes = v_in.sizes().vec();
   auto v_strides = v_in.strides().vec();
@@ -903,7 +910,6 @@ std::vector<at::Tensor> muillm_rope_forward_static_cache(
     (const half*)k_in.data_ptr(),
     (const half*)v_in.data_ptr(),
     (half*)q_out.data_ptr(),
-    (half*)k_out.data_ptr(),
     // KV cache
     (half*)k_cache.data_ptr(),
     (half*)v_cache.data_ptr(),
@@ -932,5 +938,9 @@ std::vector<at::Tensor> muillm_rope_forward_static_cache(
     cache_layout
   );
 
-  return {q_out, k_out};
+  // restrict to as many tokens as seen by the cache
+  auto key_states = k_cache.narrow(/* dim */ 2, /* start */0, /* length */ seen_tokens);
+  auto value_states = v_cache.narrow(/* dim */ 2, /* start */ 0, /* length */ seen_tokens);
+
+  return {q_out, key_states, value_states};
 }
