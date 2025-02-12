@@ -353,7 +353,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   // allocate signal memory
   __allocate_locked_shared_cpu_mem(
     comm,
-    sizeof(uint64_t),
+    sizeof(uint64_t), // alloc 8 bytese even though we use only 4
     (void**) &comm->signal_host,
     (void**) &comm->signal
   );
@@ -420,7 +420,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
 }
 
 __global__ void __muillm_inc_value_p2p_kernel(
-  uint64_t* signal
+  uint32_t* signal
 ) {
   if (threadIdx.x == 0) {
     atomicAdd_system(signal, 1);
@@ -428,7 +428,7 @@ __global__ void __muillm_inc_value_p2p_kernel(
   }
 }
 
-static muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint64_t* signal, int rank) {
+static muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal, int rank) {
   __muillm_inc_value_p2p_kernel<<<1, 1, 0, stream>>>(signal);
   return MUILLM_COMM_SUCCESS;
 }
@@ -460,7 +460,7 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
     // wait for the other ranks
     // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
     // have seen the previous one
-    if ((hip_error = hipStreamWaitValue64(stream, comm->signal, seq_no, hipStreamWaitValueGte, -1)) != hipSuccess) {
+    if ((hip_error = hipStreamWaitValue32(stream, comm->signal, seq_no, hipStreamWaitValueGte, -1)) != hipSuccess) {
       std::cout<<"Failed to wait for value"<<std::endl;
       std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
       return MUILLM_COMM_UNKNOWN_ERROR;

@@ -18,10 +18,10 @@ typedef struct muillm_comm_p2p: muillm_comm {
   muillm_comm_p2p_buffer_set_t* second_buffers;
 
   // shared signal memory to synchronize GPUs
-  uint64_t* signal_host;
-  uint64_t* signal;
+  uint32_t* signal_host;
+  uint32_t* signal;
 
-  uint64_t signal_seq_no;
+  uint32_t signal_seq_no;
 
   // event to flush the caches
   hipEvent_t acquire_event;
