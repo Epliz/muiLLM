@@ -779,95 +779,14 @@ muillm_comm_error_t muillm_comm_p2p_all_reduce_sum(
     return muillm_error;
   }
 
-  // ensure all GPUs have copied into the reduction buffers
-  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
-    std::cout<<"p2p reduction barrier failed"<<std::endl;
-    return muillm_error;
-  }
-
-  // do the reduction
-  const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
-
-  if (datatype == MUILLM_COMM_FP16) {
-    if (local_size == 8) {
-      __all_reduce_fp16_tp8_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        (const half*) buffer_set->buffers[0],
-        (const half*) buffer_set->buffers[1],
-        (const half*) buffer_set->buffers[2],
-        (const half*) buffer_set->buffers[3],
-        (const half*) buffer_set->buffers[4],
-        (const half*) buffer_set->buffers[5],
-        (const half*) buffer_set->buffers[6],
-        (const half*) buffer_set->buffers[7],
-        (half*) dst_ptr,
-        count
-      );
-    } else if (local_size == 4) {
-      __all_reduce_fp16_tp4_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        (const half*) buffer_set->buffers[0],
-        (const half*) buffer_set->buffers[1],
-        (const half*) buffer_set->buffers[2],
-        (const half*) buffer_set->buffers[3],
-        (half*) dst_ptr,
-        count
-      );
-    } else if (local_size == 2) {
-      __all_reduce_fp16_tp2_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        (const half*) buffer_set->buffers[0],
-        (const half*) buffer_set->buffers[1],
-        (half*) dst_ptr,
-        count
-      );
-    } else {
-      std::cout<<"reduction unsupported tp size"<<std::endl;
-      return MUILLM_COMM_UNKNOWN_ERROR;
-    }
-  } else if (datatype == MUILLM_COMM_FP32) {
-    if (local_size == 8) {
-      __all_reduce_fp32_tp8_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        (const float*) buffer_set->buffers[0],
-        (const float*) buffer_set->buffers[1],
-        (const float*) buffer_set->buffers[2],
-        (const float*) buffer_set->buffers[3],
-        (const float*) buffer_set->buffers[4],
-        (const float*) buffer_set->buffers[5],
-        (const float*) buffer_set->buffers[6],
-        (const float*) buffer_set->buffers[7],
-        (float*) dst_ptr,
-        count
-      );
-    } else if (local_size == 4) {
-      __all_reduce_fp32_tp4_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        (const float*) buffer_set->buffers[0],
-        (const float*) buffer_set->buffers[1],
-        (const float*) buffer_set->buffers[2],
-        (const float*) buffer_set->buffers[3],
-        (float*) dst_ptr,
-        count
-      );
-    } else if (local_size == 2) {
-      __all_reduce_fp32_tp2_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        (const float*) buffer_set->buffers[0],
-        (const float*) buffer_set->buffers[1],
-        (float*) dst_ptr,
-        count
-      );
-    } else {
-      std::cout<<"reduction unsupported tp size"<<std::endl;
-      return MUILLM_COMM_UNKNOWN_ERROR;
-    }
-  } else {
-    std::cout<<"reduction unsupported dtype"<<std::endl;
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
-
-  if (hipPeekAtLastError() != hipSuccess) {
-    printf("p2p reduce failed\n");
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
-
-  return MUILLM_COMM_SUCCESS;
+  return muillm_comm_p2p_placed_all_reduce_sum(
+    comm,
+    (const void**) buffer_set->buffers,
+    dst_ptr,
+    count,
+    datatype,
+    stream
+  );
 }
 
 muillm_comm_error_t muillm_comm_p2p_broadcast(
