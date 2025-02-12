@@ -428,8 +428,29 @@ __global__ void __muillm_inc_value_p2p_kernel(
   }
 }
 
-static muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal, int rank) {
+static muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal) {
   __muillm_inc_value_p2p_kernel<<<1, 1, 0, stream>>>(signal);
+  return MUILLM_COMM_SUCCESS;
+}
+
+__global__ void __muillm_inc_wait_value_p2p_kernel(
+  volatile uint32_t* signal,
+  uint32_t seq_no
+) {
+  if (threadIdx.x == 0) {
+    // increment the value
+    atomicAdd_system((uint32_t*) signal, 1);
+    __threadfence_system();
+
+    // wait for the other ranks
+    // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
+    // have seen the previous one
+    while (*signal < seq_no) __threadfence_system();
+  }
+}
+
+static muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
+  __muillm_inc_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -452,18 +473,9 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
     }
 
     // write the values
-    if ((muillm_error = __mui_stream_inc_value(stream, comm->signal, local_rank)) != MUILLM_COMM_SUCCESS) {
+    if ((muillm_error = __mui_stream_inc_wait_value(stream, comm->signal, seq_no)) != MUILLM_COMM_SUCCESS) {
       std::cout<<"inc value failed"<<std::endl;
       return muillm_error;
-    }
-
-    // wait for the other ranks
-    // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
-    // have seen the previous one
-    if ((hip_error = hipStreamWaitValue32(stream, comm->signal, seq_no, hipStreamWaitValueGte, -1)) != hipSuccess) {
-      std::cout<<"Failed to wait for value"<<std::endl;
-      std::cout<<"error: "<<hipGetErrorName(hip_error)<<std::endl;
-      return MUILLM_COMM_UNKNOWN_ERROR;
     }
   } else {
     return MUILLM_COMM_UNKNOWN_ERROR;
