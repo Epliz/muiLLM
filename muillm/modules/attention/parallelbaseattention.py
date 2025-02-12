@@ -144,11 +144,15 @@ class MuiParallelBaseAttention(MuiModule):
 
         bsz, q_len, _ = query_states.size()
 
-        # TODO: optimization avoiding transpose for q_len==1
-        query_states = query_states.view(bsz, q_len, self.num_tp_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
-
+        if (q_len == 1):
+            # as q_len is 1, we can avoid the transpose
+            query_states = query_states.view(bsz, self.num_tp_heads, q_len, self.head_dim)
+            key_states = key_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
+            value_states = value_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
+        else:
+            query_states = query_states.view(bsz, q_len, self.num_tp_heads, self.head_dim).transpose(1, 2)
+            key_states = key_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
+            value_states = value_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
 
         query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
             query_states,
@@ -161,8 +165,8 @@ class MuiParallelBaseAttention(MuiModule):
         )
         # at this point, we have the following shapes:
         #  q: [B, num_q_heads, T, embed_dim]
-        #  k: [B, num_k_heads, NEW_T, embed_dim]
-        #  v: [B, num_v_heads, NEW_T, embed_dim]
+        #  k: [B, num_k_heads, S, embed_dim]
+        #  v: [B, num_v_heads, S, embed_dim]
 
         if (q_len == 1) and (query_states.dtype == torch.float16):
             #
@@ -170,7 +174,7 @@ class MuiParallelBaseAttention(MuiModule):
                 attn_output = mui_causally_decode(query_states, key_states, value_states)
             else:
                 # The mask has shape:
-                # M: [B, 1, NEW_T, T]
+                # M: [B, 1, S, T]
                 # It contains 0 where OK, min_dtype where padded
                 # min_dtype obtained with torch.finfo(dtype).min
                 attn_output = mui_causally_decode_masked(query_states, key_states, value_states, attention_mask)
@@ -185,7 +189,7 @@ class MuiParallelBaseAttention(MuiModule):
 
             if attention_mask is not None:  # no matter the length, we just slice it
                 # The mask has shape:
-                # M: [B, 1, NEW_T, T]
+                # M: [B, 1, S, T]
                 # It contains 0 where OK, min_dtype where padded
                 # min_dtype obtained with torch.finfo(dtype).min
                 attn_weights = attn_weights + attention_mask
