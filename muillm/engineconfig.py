@@ -1,9 +1,11 @@
 from typing import Optional
-from muillm.comms.communicator import Communicator, MuiCommunicator, TorchCommunicator
+from muillm.comms.communicator import MuiCommunicator
 from muillm.quantization.quantizationmethod import QuantizationMethod
 from muillm.synchronization.synchronizer import Synchronizer
 
 import torch
+
+import muillm_ext
 
 class MuiEngineConfig:
     def __init__(
@@ -25,10 +27,13 @@ class MuiEngineConfig:
 
         self.tensor_parallelism = tensor_parallelism
 
+        # initialize engine in C++ side
+        self.cpp_engine = muillm_ext.muillm_engine_init()
+
         # only creates comms if necessary because we want to use tensor parallelism
         self.comms = None
         if self.tensor_parallelism > 1:
-            self.comms = MuiCommunicator()
+            self.comms = MuiCommunicator(cpp_engine=self.cpp_engine)
 
             if self.tensor_parallelism != self.comms.world_size:
                 raise ValueError(f"tensor_parallelism should match world_size but got {self.tensor_parallelism} and {self.comms.world_size}")

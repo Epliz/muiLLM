@@ -1,6 +1,8 @@
 #ifndef __MUILLM_LINEAR_KERNELS_CUH__
 #define __MUILLM_LINEAR_KERNELS_CUH__
 
+#include "engine.h"
+
 #include <torch/extension.h>
 
 enum mui_activation {
@@ -11,6 +13,7 @@ enum mui_activation {
 // variant where the output needs to be placed somewhere precise
 // (used when fusing reductions by parallel linear)
 void muillm_linear_activ_forward_placed_output(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& weights,
@@ -23,6 +26,7 @@ void muillm_linear_activ_forward_placed_output(
 );
 
 at::Tensor muillm_linear_activ_forward(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& weights,

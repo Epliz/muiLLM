@@ -2,6 +2,7 @@
 #define __MUILLM_COMM_HPP__
 
 #include "comm_base.h"
+#include "engine.h"
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -12,6 +13,7 @@
 typedef struct muillm_comm muillm_comm_t;
 
 muillm_comm_error_t muillm_comm_init(
+    muillm_engine_t* engine,
     int world_size,
     int local_size,
     int rank,

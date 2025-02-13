@@ -15,9 +15,9 @@ import muillm_ext
 
 class _MuiParallelLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, comm, x, weights, norm_weights, variance_epsilon, add_bias, residual, sharding_dim, reduce):
+    def forward(ctx, engine, comm, x, weights, norm_weights, variance_epsilon, add_bias, residual, sharding_dim, reduce):
 
-        output = muillm_ext.muillm_parallel_linear_forward(comm.comms, x, weights, norm_weights, variance_epsilon, mul_bias=None, add_bias=add_bias, residual=residual, sharding_dim=sharding_dim, reduce=reduce)
+        output = muillm_ext.muillm_parallel_linear_forward(engine, comm.comms, x, weights, norm_weights, variance_epsilon, mul_bias=None, add_bias=add_bias, residual=residual, sharding_dim=sharding_dim, reduce=reduce)
 
         ctx.save_for_backward(x, weights, norm_weights, variance_epsilon, add_bias)
 
@@ -41,6 +41,7 @@ class MuiParallelLinear(MuiModule):
 
         linear = nn.Linear(in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
 
+        self.cpp_engine = engine_config.cpp_engine
         self.comms = engine_config.comms
         self.tensor_parallelism = engine_config.tensor_parallelism
         self.sharding_dim = sharding_dim + len(linear.weight.shape) if sharding_dim < 0 else sharding_dim
@@ -220,7 +221,7 @@ class MuiParallelLinear(MuiModule):
             # input is effectively 1D, and we support the type
             # the kernel handles residual or not
             # the kernel does the all-reduce
-            output = _MuiParallelLinear.apply(self.comms, input, self.weights[0], norm_weights, self.variance_epsilon, bias, residual, self.sharding_dim, collect_outputs)
+            output = _MuiParallelLinear.apply(self.cpp_engine, self.comms, input, self.weights[0], norm_weights, self.variance_epsilon, bias, residual, self.sharding_dim, collect_outputs)
         else:
             if self.normalize:
                 if self.sharding_dim == 1:

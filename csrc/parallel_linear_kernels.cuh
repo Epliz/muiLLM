@@ -7,6 +7,7 @@
 #include <vector>
 
 at::Tensor muillm_parallel_linear_activ_forward(
+    muillm_engine_t* engine,
     muillm_comm_t* comm,
     torch::Tensor& norm_weights,
     float epsilon,

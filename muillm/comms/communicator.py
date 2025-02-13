@@ -104,17 +104,19 @@ class _MuiCommBroadcast(torch.autograd.Function):
 class MuiCommunicator(TorchCommunicator):
     def __init__(
             self,
+            cpp_engine,
             world_size: Optional[int] = None,
             local_size: Optional[int] = None,
             rank: Optional[int] = None,
-            local_rank: Optional[int] = None):
+            local_rank: Optional[int] = None,
+            ):
         # We use torch dist for our un-implemented operations
         super().__init__(world_size=world_size, local_size=local_size, rank=rank, local_rank=local_rank)
 
         if (self.is_multi_node()):
             raise ValueError(f"Multi-node setups are not supported with MuiCommunicator, use TorchCommunicator instead. Specified WORLD_SIZE {self.world_size} and LOCAL_SIZE {self.local_size}")
 
-        self.comms = muillm_ext.muillm_comm_init(self.world_size, self.local_size, self.rank, self.local_rank)
+        self.comms = muillm_ext.muillm_comm_init(cpp_engine, self.world_size, self.local_size, self.rank, self.local_rank)
 
         # set the current device to the GPU we need
         torch.cuda.set_device(self.local_rank)

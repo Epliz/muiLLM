@@ -200,13 +200,14 @@ static muillm_comm_error_t __init_staged_recv(
 }
 
 muillm_comm_error_t muillm_comm_staged_init_comm(
-    int world_size,
-    int local_size,
-    int rank,
-    int local_rank,
-    const muillm_comm_local_socket_t* local_socket,
-    muillm_comm_staged_t** comm_ptr,
-    hipStream_t stream
+  muillm_engine_t* engine,
+  int world_size,
+  int local_size,
+  int rank,
+  int local_rank,
+  const muillm_comm_local_socket_t* local_socket,
+  muillm_comm_staged_t** comm_ptr,
+  hipStream_t stream
 ) {
   if (world_size != local_size) {
     // we currently ony support single machine, so

@@ -1,9 +1,12 @@
 #ifndef __MUILLM_GATEUP_KERNELS_CUH__
 #define __MUILLM_GATEUP_KERNELS_CUH__
 
+#include "engine.h"
+
 #include <torch/extension.h>
 
 void muillm_gateupsilu_forward_placed_output(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -14,6 +17,7 @@ void muillm_gateupsilu_forward_placed_output(
     void* output_ptr);
 
 void muillm_gateupsilu_split_forward_placed_output(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -24,6 +28,7 @@ void muillm_gateupsilu_split_forward_placed_output(
     void* output_ptr);
 
 at::Tensor muillm_gateupsilu_forward(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -33,6 +38,7 @@ at::Tensor muillm_gateupsilu_forward(
     torch::Tensor& x);
 
 at::Tensor muillm_gateupsilu_split_forward(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,

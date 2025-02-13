@@ -2,6 +2,7 @@
 
 #include "comm.h"
 #include "comm_base.h"
+#include "gpu_info.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -207,39 +208,6 @@ muillm_comm_error_t muillm_comm_p2p_get_buffers(
   return MUILLM_COMM_SUCCESS;
 }
 
-muillm_comm_error_t __detect_gpu_properties(
-  int device,
-  muillm_comm_p2p_gpu_info_t* gpu_info
-) {
-
-  hipDeviceProp_t properties;
-  if (hipGetDeviceProperties(&properties, device) != hipSuccess) {
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
-
-  const char* gfx908 = "gfx908"; // MI100
-  const char* gfx90a = "gfx90a"; // MI200
-  const char* gfx94x = "gfx94"; // MI300, MI300a
-  const char* gfx95x = "gfx95"; // MI400
-
-  if (strncmp(properties.gcnArchName, gfx908, strlen(gfx908)) == 0) {
-    gpu_info->arch = MUILLM_GPU_ARCH_MI100;
-  } else if (strncmp(properties.gcnArchName, gfx90a, strlen(gfx90a)) == 0) {
-    gpu_info->arch = MUILLM_GPU_ARCH_MI200;
-  } else if (strncmp(properties.gcnArchName, gfx94x, strlen(gfx94x)) == 0) {
-    gpu_info->arch = MUILLM_GPU_ARCH_MI300;
-  } else if (strncmp(properties.gcnArchName, gfx95x, strlen(gfx95x)) == 0) {
-    gpu_info->arch = MUILLM_GPU_ARCH_MI400;
-  } else {
-    gpu_info->arch = MUILLM_GPU_ARCH_UNKNOWN;
-  }
-
-  printf("arch name %s\n", properties.gcnArchName);
-  printf("detected arch %d\n", gpu_info->arch);
-
-  return MUILLM_COMM_SUCCESS;
-}
-
 static muillm_comm_error_t __init_buffer_set(
   muillm_comm_p2p_t* comm,
   muillm_comm_p2p_buffer_set_t** buffer_set_ptr,
@@ -317,13 +285,14 @@ muillm_comm_error_t check_p2p_is_working(
 }
 
 muillm_comm_error_t muillm_comm_p2p_init_comm(
-    int world_size,
-    int local_size,
-    int rank,
-    int local_rank,
-    const muillm_comm_local_socket_t* local_socket,
-    muillm_comm_p2p_t** comm_ptr,
-    hipStream_t stream
+  muillm_engine_t* engine,
+  int world_size,
+  int local_size,
+  int rank,
+  int local_rank,
+  const muillm_comm_local_socket_t* local_socket,
+  muillm_comm_p2p_t** comm_ptr,
+  hipStream_t stream
 ) {
   if (world_size != local_size) {
     // we currently ony support single machine, so
@@ -338,8 +307,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   muillm_comm_method_t transfer_method = MUILLM_COMM_METHOD_P2P_TRANSFER;
 
   // create the comm object
-  muillm_comm_p2p_t* comm = nullptr;
-  comm = new muillm_comm_p2p_t;
+  muillm_comm_p2p_t* comm = new muillm_comm_p2p_t;
   comm->transfer_method = transfer_method;
 
   comm->world_size = world_size;
@@ -362,9 +330,8 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
-  if ((muillm_error = __detect_gpu_properties(local_rank, &comm->gpu_info)) != MUILLM_COMM_SUCCESS) {
-    return muillm_error;
-  }
+  // get the gpu info from the engine
+  comm->gpu_info = engine->gpu_infos[local_rank];
 
   // check that signal memory is supported
   int signals_supported;
@@ -383,7 +350,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
 
   // by default, do not skip the cache flush
   // but MI300 and successors don't need it apparently
-  comm->cant_skip_cache_flush_event = comm->gpu_info.arch < MUILLM_GPU_ARCH_MI300;
+  comm->cant_skip_cache_flush_event = comm->gpu_info->arch < MUILLM_GPU_ARCH_MI300;
 
   // allocate cache flush event
   if (hipEventCreateWithFlags(&comm->cache_flush_event, hipEventDisableTiming | hipEventReleaseToSystem) != hipSuccess) {

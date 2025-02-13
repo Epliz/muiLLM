@@ -2,6 +2,7 @@
 #define __MUILLM_COMM_STAGED_HPP__
 
 #include "comm_base.h"
+#include "engine.h"
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -30,13 +31,14 @@ typedef struct muillm_comm_staged: muillm_comm {
 } muillm_comm_staged_t;
 
 muillm_comm_error_t muillm_comm_staged_init_comm(
-    int world_size,
-    int local_size,
-    int rank,
-    int local_rank,
-    const muillm_comm_local_socket_t* local_socket,
-    muillm_comm_staged_t** comm_ptr,
-    hipStream_t stream
+  muillm_engine_t* engine,
+  int world_size,
+  int local_size,
+  int rank,
+  int local_rank,
+  const muillm_comm_local_socket_t* local_socket,
+  muillm_comm_staged_t** comm_ptr,
+  hipStream_t stream
 );
 
 muillm_comm_error_t muillm_comm_staged_placed_all_reduce_sum(

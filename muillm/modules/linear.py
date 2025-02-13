@@ -14,14 +14,14 @@ import muillm_ext
 
 class _MuiLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weights, norm_weights, variance_epsilon, add_bias, residual):
+    def forward(ctx, engine, x, weights, norm_weights, variance_epsilon, add_bias, residual):
         if (add_bias is not None) and (residual is not None):
             raise ValueError("bias and residual at the same time is not supported")
 
         if residual is not None:
             add_bias = residual
 
-        output = muillm_ext.muillm_linear_forward(x, weights, norm_weights, variance_epsilon, mul_bias=None, add_bias=add_bias)
+        output = muillm_ext.muillm_linear_forward(engine, x, weights, norm_weights, variance_epsilon, mul_bias=None, add_bias=add_bias)
 
         ctx.save_for_backward(x, weights, norm_weights, variance_epsilon, add_bias)
 
@@ -43,6 +43,8 @@ class MuiLinear(MuiModule, nn.Linear):
                  variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
         MuiModule.__init__(self, engine_config=engine_config)
         nn.Linear.__init__(self, in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
+
+        self.cpp_engine = engine_config.cpp_engine
 
         self.device = self.weight.device
         self.dtype = self.weight.dtype
@@ -117,7 +119,7 @@ class MuiLinear(MuiModule, nn.Linear):
 
         if self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
-            return _MuiLinear.apply(input, self.weight, self.norm_weights, self.variance_epsilon, self.bias, residual)
+            return _MuiLinear.apply(self.cpp_engine, input, self.weight, self.norm_weights, self.variance_epsilon, self.bias, residual)
         else:
             if self.normalize:
                 input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)

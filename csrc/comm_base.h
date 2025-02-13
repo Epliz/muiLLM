@@ -1,6 +1,8 @@
 #ifndef __MUILLM_COMM_BASE_HPP__
 #define __MUILLM_COMM_BASE_HPP__
 
+#include "base.h"
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -32,7 +34,7 @@ typedef enum muillm_comm_datatype {
   MUILLM_COMM_FP64
 } muillm_comm_datatype_t;
 
-#define MUILLM_COMM_MAX_GPUS 8
+#define MUILLM_COMM_MAX_GPUS (MUILLM_MAX_GPUS)
 
 #define CPU_CACHELINE_SIZE 64
 #define INT_CACHELINE_SIZE (CPU_CACHELINE_SIZE / sizeof(int))

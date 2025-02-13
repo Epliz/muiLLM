@@ -6,6 +6,7 @@
 #include <iostream>
 
 at::Tensor muillm_parallel_linear_activ_forward(
+    muillm_engine_t* engine,
     muillm_comm_t* comm,
     torch::Tensor& norm_weights,
     float epsilon,
@@ -69,6 +70,7 @@ at::Tensor muillm_parallel_linear_activ_forward(
     void* output_ptr = output.data_ptr();
 
     muillm_linear_activ_forward_placed_output(
+      engine,
       norm_weights,
       epsilon,
       weights,
@@ -104,6 +106,7 @@ at::Tensor muillm_parallel_linear_activ_forward(
     return output;
   } else {
     return muillm_linear_activ_forward(
+        engine,
         norm_weights,
         epsilon,
         weights,

@@ -2,21 +2,11 @@
 #define __MUILLM_COMM_P2P_HPP__
 
 #include "comm_base.h"
+#include "engine.h"
+#include "gpu_info.h"
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
-
-typedef enum muillm_gpu_arch {
-  MUILLM_GPU_ARCH_UNKNOWN = 0,
-  MUILLM_GPU_ARCH_MI100,
-  MUILLM_GPU_ARCH_MI200,
-  MUILLM_GPU_ARCH_MI300,
-  MUILLM_GPU_ARCH_MI400
-} muillm_gpu_arch_t;
-
-typedef struct muillm_comm_p2p_gpu_info {
-  muillm_gpu_arch_t arch;
-} muillm_comm_p2p_gpu_info_t;
 
 typedef struct muillm_comm_p2p_buffer_set {
   void* buffers[MUILLM_COMM_MAX_GPUS];
@@ -42,10 +32,11 @@ typedef struct muillm_comm_p2p: muillm_comm {
   // indicator whether we can skip the cache flush event
   bool cant_skip_cache_flush_event;
 
-  muillm_comm_p2p_gpu_info_t gpu_info;
+  muillm_gpu_info_t* gpu_info;
 } muillm_comm_p2p_t;
 
 muillm_comm_error_t muillm_comm_p2p_init_comm(
+    muillm_engine_t* engine,
     int world_size,
     int local_size,
     int rank,

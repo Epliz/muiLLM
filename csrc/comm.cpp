@@ -16,12 +16,13 @@ void handler(int signo)
 }
 
 muillm_comm_error_t muillm_comm_init(
-    int world_size,
-    int local_size,
-    int rank,
-    int local_rank,
-    muillm_comm_t** comm_ptr,
-    hipStream_t stream
+  muillm_engine_t* engine,
+  int world_size,
+  int local_size,
+  int rank,
+  int local_rank,
+  muillm_comm_t** comm_ptr,
+  hipStream_t stream
 ) {
   muillm_comm_error_t muillm_error;
 
@@ -51,6 +52,7 @@ muillm_comm_error_t muillm_comm_init(
 
   // try p2p comms first, but it might not always work
   muillm_error = muillm_comm_p2p_init_comm(
+    engine,
     world_size,
     local_size,
     rank,
@@ -66,6 +68,7 @@ muillm_comm_error_t muillm_comm_init(
 
   // try staged comms as a fallback
   return muillm_comm_staged_init_comm(
+    engine,
     world_size,
     local_size,
     rank,

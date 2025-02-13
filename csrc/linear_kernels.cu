@@ -6,7 +6,7 @@
 #include "linear_kernels.cuh"
 
 #define ROWS_PER_BLOCK 4
-#define THREADS_PER_BLOCK 64
+#define GEMV_THREADS_PER_BLOCK 64
 
 #define DIV_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
@@ -75,6 +75,7 @@ static inline float __device__ silu(float x) {
   return x / (1.0f + expf(-x));
 }
 
+template<int THREADS_PER_BLOCK>
 __global__ void muillm_gemv_kernel(
     const half* __restrict__ W, // weight matrix - size N x K
     const half* __restrict__ X, // input = size K
@@ -230,7 +231,7 @@ __global__ void muillm_gemv_kernel(
   }
 }
 
-
+template<int THREADS_PER_BLOCK>
 __global__ void muillm_gemv_norm_inputs_kernel(
     const half* __restrict__ NW, // input normalization weights matrix - size K
     const half* __restrict__ W, // weight matrix - size N x K
@@ -450,8 +451,8 @@ __global__ void muillm_gemv_norm_inputs_kernel(
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-
 void muillm_linear_activ_forward_placed_output(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& weights,
@@ -483,8 +484,15 @@ void muillm_linear_activ_forward_placed_output(
   const auto N = weights.size(0);
   const auto K = weights.size(1);
 
-  const int threads_per_blocks = THREADS_PER_BLOCK;
   const int num_blocks = DIV_ROUND_UP(N, ROWS_PER_BLOCK);
+  int threads_per_blocks = GEMV_THREADS_PER_BLOCK;
+
+  int simd_lanes = engine->gpu_infos[0]->simd_lanes;
+
+  // try to occupy enough to saturate memory bandwidth
+  while ((num_blocks * threads_per_blocks < 8 * simd_lanes) && threads_per_blocks < 256) {
+    threads_per_blocks *= 2;
+  }
 
   if (normalize) {
     const auto NORM_K = norm_weights.size(0);
@@ -492,36 +500,100 @@ void muillm_linear_activ_forward_placed_output(
 
     float scale = 1.f / K;
 
-    muillm_gemv_norm_inputs_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-      norm_weights.defined() ? (const half*)norm_weights.data_ptr() : nullptr,
-      (const half*)weights.data_ptr(),
-      (const half*)x.data_ptr(),
-      activ,
-      mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
-      add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
-      residual.defined() ? (const half*)residual.data_ptr() : nullptr,
-      (half*) output_ptr,
-      N,
-      K,
-      epsilon,
-      scale
-    );
+    if (threads_per_blocks == 64) {
+      muillm_gemv_norm_inputs_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        norm_weights.defined() ? (const half*)norm_weights.data_ptr() : nullptr,
+        (const half*)weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        activ,
+        mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
+        add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
+        residual.defined() ? (const half*)residual.data_ptr() : nullptr,
+        (half*) output_ptr,
+        N,
+        K,
+        epsilon,
+        scale
+      );
+    } else if (threads_per_blocks == 128) {
+      muillm_gemv_norm_inputs_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        norm_weights.defined() ? (const half*)norm_weights.data_ptr() : nullptr,
+        (const half*)weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        activ,
+        mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
+        add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
+        residual.defined() ? (const half*)residual.data_ptr() : nullptr,
+        (half*) output_ptr,
+        N,
+        K,
+        epsilon,
+        scale
+      );
+    } else if (threads_per_blocks == 256) {
+      muillm_gemv_norm_inputs_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        norm_weights.defined() ? (const half*)norm_weights.data_ptr() : nullptr,
+        (const half*)weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        activ,
+        mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
+        add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
+        residual.defined() ? (const half*)residual.data_ptr() : nullptr,
+        (half*) output_ptr,
+        N,
+        K,
+        epsilon,
+        scale
+      );
+    } else {
+      TORCH_CHECK(false, "unsupported threads_per_blocks");
+    }
   } else {
-    muillm_gemv_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-      (const half*)weights.data_ptr(),
-      (const half*)x.data_ptr(),
-      activ,
-      mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
-      add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
-      residual.defined() ? (const half*)residual.data_ptr() : nullptr,
-      (half*) output_ptr,
-      N,
-      K
-    );
+
+    if (threads_per_blocks == 64) {
+      muillm_gemv_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        activ,
+        mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
+        add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
+        residual.defined() ? (const half*)residual.data_ptr() : nullptr,
+        (half*) output_ptr,
+        N,
+        K
+      );
+    } else if (threads_per_blocks == 128) {
+      muillm_gemv_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        activ,
+        mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
+        add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
+        residual.defined() ? (const half*)residual.data_ptr() : nullptr,
+        (half*) output_ptr,
+        N,
+        K
+      );
+    } else if (threads_per_blocks == 256) {
+      muillm_gemv_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        activ,
+        mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
+        add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
+        residual.defined() ? (const half*)residual.data_ptr() : nullptr,
+        (half*) output_ptr,
+        N,
+        K
+      );
+    } else {
+      TORCH_CHECK(false, "unsupported threads_per_blocks");
+    }
   }
 }
 
 at::Tensor muillm_linear_activ_forward(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& weights,
@@ -554,6 +626,7 @@ at::Tensor muillm_linear_activ_forward(
   void* output_ptr = y.data_ptr();
 
   muillm_linear_activ_forward_placed_output(
+    engine,
     norm_weights,
     epsilon,
     weights,

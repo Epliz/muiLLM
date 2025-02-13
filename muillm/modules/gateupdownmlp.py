@@ -28,8 +28,8 @@ class _MuiGateUpSiLUMethod(Enum):
 
 class _MuiGateUpSiLU(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
-        output = muillm_ext.muillm_gateupsilu_forward(norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
+    def forward(ctx, engine, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
+        output = muillm_ext.muillm_gateupsilu_forward(engine, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
 
         ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual)
 
@@ -41,8 +41,8 @@ class _MuiGateUpSiLU(torch.autograd.Function):
 
 class _MuiGateUpSiLUSplit(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
-        output = muillm_ext.muillm_gateupsilu_split_forward(norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
+    def forward(ctx, engine, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
+        output = muillm_ext.muillm_gateupsilu_split_forward(engine, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
 
         ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual)
 
@@ -55,6 +55,8 @@ class _MuiGateUpSiLUSplit(torch.autograd.Function):
 class MuiGateUpDownMLP(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, hidden_size: int, intermediate_size: int, activation_function: nn.Module, variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
         super().__init__(engine_config=engine_config)
+        self.cpp_engine = engine_config.cpp_engine
+
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
@@ -138,7 +140,7 @@ class MuiGateUpDownMLP(MuiModule):
 
             # Also check that we don't have quantized linear
             if isinstance(self.gate_proj, MuiLinear) and isinstance(self.up_proj, MuiLinear):
-                return _MuiGateUpSiLU.apply(input, self.norm_weights, self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight, self.down_proj.weight, residual)
+                return _MuiGateUpSiLU.apply(self.cpp_engine, input, self.norm_weights, self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight, self.down_proj.weight, residual)
 
         # else: # not dispatchable or not MuiLinear
         return self._forward_unfused(input=input, residual=residual)
@@ -154,7 +156,7 @@ class MuiGateUpDownMLP(MuiModule):
 
                 # as we shard gate/up by rows, we don't need to shard the input and we
                 # still can use the fused RMSNorm
-                return _MuiGateUpSiLUSplit.apply(input, self.norm_weights, self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight, self.down_proj.weight, residual)
+                return _MuiGateUpSiLUSplit.apply(self.cpp_engine, input, self.norm_weights, self.variance_epsilon, self.gate_proj.weight, self.up_proj.weight, self.down_proj.weight, residual)
 
         # else: # not dispatchable or not MuiLinear
         return self._forward_unfused(input=input, residual=residual)

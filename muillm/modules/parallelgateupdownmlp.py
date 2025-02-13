@@ -28,8 +28,8 @@ class _MuiParallelGateUpSiLUMethod(Enum):
 
 class _MuiParallelGateUpSiLU(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, comm, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
-        output = muillm_ext.muillm_parallel_gateupsilu_forward(comm.comms, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
+    def forward(ctx, engine, comm, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
+        output = muillm_ext.muillm_parallel_gateupsilu_forward(engine, comm.comms, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
 
         ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual)
 
@@ -41,8 +41,8 @@ class _MuiParallelGateUpSiLU(torch.autograd.Function):
 
 class _MuiParallelGateUpSiLUSplit(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, comm, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
-        output = muillm_ext.muillm_parallel_gateupsilu_split_forward(comm.comms, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
+    def forward(ctx, engine, comm, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
+        output = muillm_ext.muillm_parallel_gateupsilu_split_forward(engine, comm.comms, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
 
         ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual)
 
@@ -57,6 +57,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
         super().__init__(engine_config=engine_config)
 
         self.tensor_parallelism = engine_config.tensor_parallelism
+        self.cpp_engine = engine_config.cpp_engine
         self.comms = engine_config.comms
 
         self.hidden_size = hidden_size
@@ -189,7 +190,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
             if isinstance(self.gate_proj, MuiParallelLinear) and isinstance(self.up_proj, MuiParallelLinear):
                 norm_weights = self.norm_weights[0] if self.norm_weights is not None else None
                 # the kernel handles residual or not
-                output = _MuiParallelGateUpSiLU.apply(self.comms, inputs, norm_weights, self.variance_epsilon, self.gate_proj.weights[0], self.up_proj.weights[0], self.down_proj.weights[0], residual)
+                output = _MuiParallelGateUpSiLU.apply(self.cpp_engine, self.comms, inputs, norm_weights, self.variance_epsilon, self.gate_proj.weights[0], self.up_proj.weights[0], self.down_proj.weights[0], residual)
 
                 return [output]
 
@@ -215,7 +216,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
                 # still can use the fused RMSNorm
                 norm_weights = self.norm_weights[0] if self.norm_weights is not None else None
                 # the kernel handles residual or not
-                output = _MuiParallelGateUpSiLUSplit.apply(self.comms, inputs, norm_weights, self.variance_epsilon, self.gate_proj.weights[0], self.up_proj.weights[0], self.down_proj.weights[0], residual)
+                output = _MuiParallelGateUpSiLUSplit.apply(self.cpp_engine, self.comms, inputs, norm_weights, self.variance_epsilon, self.gate_proj.weights[0], self.up_proj.weights[0], self.down_proj.weights[0], residual)
 
                 return [output]
 

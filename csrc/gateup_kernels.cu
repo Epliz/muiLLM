@@ -6,7 +6,7 @@
 #include <cuda_fp16.h>
 
 #define ROWS_PER_BLOCK 4
-#define THREADS_PER_BLOCK 64
+#define GEMV_THREADS_PER_BLOCK 64
 
 #define DIV_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
@@ -75,6 +75,7 @@ static inline float __device__ silu(float x) {
   return x / (1.0f + expf(-x));
 }
 
+template<int THREADS_PER_BLOCK>
 __global__ void muillm_gateupsilu_gemv_kernel(
     const half* __restrict__ GW, // weight matrix - size N x K
     const half* __restrict__ UW, // weight matrix - size N x K
@@ -308,6 +309,7 @@ __global__ void muillm_gateupsilu_gemv_kernel(
   }
 }
 
+template<int THREADS_PER_BLOCK>
 __global__ void muillm_gateupsilu_gemv_norm_inputs_kernel(
     const half* __restrict__ NW, // input normalization weights matrix - size K
     const half* __restrict__ GW, // weight matrix - size N x K
@@ -616,6 +618,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_kernel(
 
 
 void muillm_gateupsilu_forward_placed_output(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -652,39 +655,97 @@ void muillm_gateupsilu_forward_placed_output(
 
   auto y = torch::empty(output_sizes, output_options);
 
-  const int threads_per_blocks = THREADS_PER_BLOCK;
   const int num_blocks = DIV_ROUND_UP(N, ROWS_PER_BLOCK);
+  int threads_per_blocks = GEMV_THREADS_PER_BLOCK;
+
+  int simd_lanes = engine->gpu_infos[0]->simd_lanes;
+
+  // try to occupy enough to saturate memory bandwidth
+  while ((num_blocks * threads_per_blocks < 8 * simd_lanes) && threads_per_blocks < 256) {
+    threads_per_blocks *= 2;
+  }
 
   if (normalize) {
     float scale = 1.f / K;
 
-    muillm_gateupsilu_gemv_norm_inputs_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-      (const half*)norm_weights.data_ptr(),
-      (const half*)gate_weights.data_ptr(),
-      (const half*)up_weights.data_ptr(),
-      (const half*)x.data_ptr(),
-      (half*)y.data_ptr(),
-      N,
-      K,
-      epsilon,
-      scale
-    );
+    if (threads_per_blocks == 64) {
+      muillm_gateupsilu_gemv_norm_inputs_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights.data_ptr(),
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)y.data_ptr(),
+        N,
+        K,
+        epsilon,
+        scale
+      );
+    } else if (threads_per_blocks == 128) {
+      muillm_gateupsilu_gemv_norm_inputs_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights.data_ptr(),
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)y.data_ptr(),
+        N,
+        K,
+        epsilon,
+        scale
+      );
+    } else if (threads_per_blocks == 256) {
+      muillm_gateupsilu_gemv_norm_inputs_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights.data_ptr(),
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)y.data_ptr(),
+        N,
+        K,
+        epsilon,
+        scale
+      );
+    } else {
+      TORCH_CHECK(false, "unsupported threads_per_blocks");
+    }
   } else {
 
-    muillm_gateupsilu_gemv_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-      (const half*)gate_weights.data_ptr(),
-      (const half*)up_weights.data_ptr(),
-      (const half*)x.data_ptr(),
-      (half*)y.data_ptr(),
-      N,
-      K
-    );
+    if (threads_per_blocks == 64) {
+      muillm_gateupsilu_gemv_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)y.data_ptr(),
+        N,
+        K
+      );
+    } else if (threads_per_blocks == 128) {
+      muillm_gateupsilu_gemv_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)y.data_ptr(),
+        N,
+        K
+      );
+    } else if (threads_per_blocks == 256) {
+      muillm_gateupsilu_gemv_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)y.data_ptr(),
+        N,
+        K
+      );
+    } else {
+      TORCH_CHECK(false, "unsupported threads_per_blocks");
+    }
   }
 
   // down proj
   auto undef_tensor = torch::Tensor();
 
   muillm_linear_activ_forward_placed_output(
+      engine,
       undef_tensor /*norm_weights*/,
       epsilon,
       down_weights,
@@ -698,6 +759,7 @@ void muillm_gateupsilu_forward_placed_output(
 }
 
 at::Tensor muillm_gateupsilu_forward(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -727,6 +789,7 @@ at::Tensor muillm_gateupsilu_forward(
   void* output_ptr = output.data_ptr();
 
   muillm_gateupsilu_forward_placed_output(
+    engine,
     norm_weights,
     epsilon,
     gate_weights,
@@ -740,6 +803,7 @@ at::Tensor muillm_gateupsilu_forward(
   return output;
 }
 
+template<int THREADS_PER_BLOCK>
 __global__ void muillm_gateupsilu_gemv_norm_inputs_split_kernel(
     const half* __restrict__ NW, // input normalization weights matrix - size K
     const half* __restrict__ GW, // weight matrix - size N x K
@@ -934,6 +998,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_split_kernel(
   }
 }
 
+template<int THREADS_PER_BLOCK>
 __global__ void muillm_gateupsilu_gemv_split_kernel(
     const half* __restrict__ GW, // weight matrix - size N x K
     const half* __restrict__ UW, // weight matrix - size N x K
@@ -1071,7 +1136,7 @@ __global__ void muillm_gateupsilu_gemv_split_kernel(
   }
 }
 
-
+template<int THREADS_PER_BLOCK>
 __global__ void muillm_gateupsilu_combine_kernel(
     const half* __restrict__ GY, // input - size N
     const half* __restrict__ UY, // input - size N
@@ -1096,6 +1161,7 @@ __global__ void muillm_gateupsilu_combine_kernel(
 
 
 void muillm_gateupsilu_split_forward_placed_output(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -1137,48 +1203,130 @@ void muillm_gateupsilu_split_forward_placed_output(
   // output for the reduction
   auto y = torch::empty(output_sizes, output_options);
 
-  const int threads_per_blocks = THREADS_PER_BLOCK;
   const int num_blocks = DIV_ROUND_UP(N, ROWS_PER_BLOCK);
+  int threads_per_blocks = GEMV_THREADS_PER_BLOCK;
+
+  int simd_lanes = engine->gpu_infos[0]->simd_lanes;
+
+  // try to occupy enough to saturate memory bandwidth
+  while ((num_blocks * threads_per_blocks < 8 * simd_lanes) && threads_per_blocks < 256) {
+    threads_per_blocks *= 2;
+  }
 
   // Do GEMVs (some blocks the gate proj, some the up proj)
   if (normalize) {
     float scale = 1.f / K;
-    muillm_gateupsilu_gemv_norm_inputs_split_kernel<<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
-      (const half*)norm_weights.data_ptr(),
-      (const half*)gate_weights.data_ptr(),
-      (const half*)up_weights.data_ptr(),
-      (const half*)x.data_ptr(),
-      (half*)gy.data_ptr(),
-      (half*)uy.data_ptr(),
-      N,
-      K,
-      epsilon,
-      scale
-    );
+
+    if (threads_per_blocks == 64) {
+      muillm_gateupsilu_gemv_norm_inputs_split_kernel<64><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights.data_ptr(),
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)gy.data_ptr(),
+        (half*)uy.data_ptr(),
+        N,
+        K,
+        epsilon,
+        scale
+      );
+    } else if (threads_per_blocks == 128) {
+      muillm_gateupsilu_gemv_norm_inputs_split_kernel<128><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights.data_ptr(),
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)gy.data_ptr(),
+        (half*)uy.data_ptr(),
+        N,
+        K,
+        epsilon,
+        scale
+      );
+    } else if (threads_per_blocks == 256) {
+      muillm_gateupsilu_gemv_norm_inputs_split_kernel<256><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights.data_ptr(),
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)gy.data_ptr(),
+        (half*)uy.data_ptr(),
+        N,
+        K,
+        epsilon,
+        scale
+      );
+    } else {
+      TORCH_CHECK(false, "unsupported threads_per_blocks");
+    }
   } else {
-    muillm_gateupsilu_gemv_split_kernel<<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
-      (const half*)gate_weights.data_ptr(),
-      (const half*)up_weights.data_ptr(),
-      (const half*)x.data_ptr(),
-      (half*)gy.data_ptr(),
-      (half*)uy.data_ptr(),
-      N,
-      K
-    );
+
+    if (threads_per_blocks == 64) {
+      muillm_gateupsilu_gemv_split_kernel<64><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)gy.data_ptr(),
+        (half*)uy.data_ptr(),
+        N,
+        K
+      );
+    } else if (threads_per_blocks == 128) {
+      muillm_gateupsilu_gemv_split_kernel<128><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)gy.data_ptr(),
+        (half*)uy.data_ptr(),
+        N,
+        K
+      );
+    } else if (threads_per_blocks == 256) {
+      muillm_gateupsilu_gemv_split_kernel<256><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights.data_ptr(),
+        (const half*)up_weights.data_ptr(),
+        (const half*)x.data_ptr(),
+        (half*)gy.data_ptr(),
+        (half*)uy.data_ptr(),
+        N,
+        K
+      );
+    } else {
+      TORCH_CHECK(false, "unsupported threads_per_blocks");
+    }
   }
 
   // do final reduction
-  const int num_blocks_combine = DIV_ROUND_UP(N, THREADS_PER_BLOCK);
-  muillm_gateupsilu_combine_kernel<<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
-    (const half*)gy.data_ptr(),
-    (const half*)uy.data_ptr(),
-    (half*)y.data_ptr(),
-    N
-  );
+  const int num_blocks_combine = DIV_ROUND_UP(N, threads_per_blocks);
+  if (threads_per_blocks == 64) {
+    muillm_gateupsilu_combine_kernel<64><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+      (const half*)gy.data_ptr(),
+      (const half*)uy.data_ptr(),
+      (half*)y.data_ptr(),
+      N
+    );
+  } else if (threads_per_blocks == 128) {
+    muillm_gateupsilu_combine_kernel<128><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+      (const half*)gy.data_ptr(),
+      (const half*)uy.data_ptr(),
+      (half*)y.data_ptr(),
+      N
+    );
+  } else if (threads_per_blocks == 256) {
+    muillm_gateupsilu_combine_kernel<256><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+      (const half*)gy.data_ptr(),
+      (const half*)uy.data_ptr(),
+      (half*)y.data_ptr(),
+      N
+    );
+  } else {
+    TORCH_CHECK(false, "unsupported threads_per_blocks");
+  }
 
   // down proj
   auto undef_tensor = torch::Tensor();
   muillm_linear_activ_forward_placed_output(
+      engine,
       undef_tensor /*norm_weights*/,
       epsilon,
       down_weights,
@@ -1192,6 +1340,7 @@ void muillm_gateupsilu_split_forward_placed_output(
 }
 
 at::Tensor muillm_gateupsilu_split_forward(
+    muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -1222,6 +1371,7 @@ at::Tensor muillm_gateupsilu_split_forward(
   void* output_ptr = output.data_ptr();
   
   muillm_gateupsilu_split_forward_placed_output(
+    engine,
     norm_weights,
     epsilon,
     gate_weights,

@@ -4,6 +4,7 @@
 #include <ATen/cuda/CUDAContext.h>
 
 at::Tensor muillm_parallel_gateupsilu_forward(
+    muillm_engine_t* engine,
     muillm_comm_t* comm,
     torch::Tensor& norm_weights,
     float epsilon,
@@ -55,6 +56,7 @@ at::Tensor muillm_parallel_gateupsilu_forward(
   void* output_ptr = output.data_ptr();
 
   muillm_gateupsilu_forward_placed_output(
+    engine,
     norm_weights,
     epsilon,
     gate_weights,
@@ -82,6 +84,7 @@ at::Tensor muillm_parallel_gateupsilu_forward(
 }
 
 at::Tensor muillm_parallel_gateupsilu_split_forward(
+    muillm_engine_t* engine,
     muillm_comm_t* comm,
     torch::Tensor& norm_weights,
     float epsilon,
@@ -134,6 +137,7 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
   void* output_ptr = output.data_ptr();
 
   muillm_gateupsilu_split_forward_placed_output(
+    engine,
     norm_weights,
     epsilon,
     gate_weights,
