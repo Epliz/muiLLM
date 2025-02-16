@@ -148,11 +148,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
     int group_size_shift,
     torch::Tensor x);
 
-at::Tensor muillm_rmsnorm_forward(
-    torch::Tensor weights,
-    torch::Tensor inputs,
-    float epsilon);
-
+#include "rmsnorm_kernels.cuh"
 
 std::vector<at::Tensor> muillm_rope_forward_no_cache(
     torch::Tensor& position_ids,
@@ -251,18 +247,7 @@ at::Tensor muillm_to_cpu_trampoline(
   return muillm_to_cpu(sync.sync_ptr, tensor);
 }
 
-#include "comm.h"
-
-muillm_comm_error_t muillm_all_reduce_sum(
-    muillm_comm_t* comm,
-    torch::Tensor& tensor
-);
-
-muillm_comm_error_t muillm_broadcast(
-    muillm_comm_t* comm,
-    torch::Tensor& tensor,
-    int src
-);
+#include "comm_torch.h"
 
 // needed because Pybind11 can't seem to be able to deal with opaque pointers
 struct muillm_comm_ptr {
@@ -345,6 +330,68 @@ at::Tensor muillm_parallel_linear_forward_trampoline(
     );
 }
 
+#include "modules/parallel_linear_module.h"
+
+// needed because Pybind11 can't seem to be able to deal with opaque pointers
+typedef struct muillm_parallel_linear_module_ptr {
+    MuiLLMParallelLinear* ptr;
+} muillm_parallel_linear_module_ptr_t;
+
+// init
+muillm_parallel_linear_module_ptr_t muillm_parallel_linear_module_init_trampoline(
+    muillm_engine_ptr engine,
+    muillm_comm_ptr comm,
+    torch::Tensor weights,
+    std::optional<torch::Tensor> norm_weights_,
+    float epsilon,
+    std::optional<torch::Tensor> mul_bias_,
+    std::optional<torch::Tensor> add_bias_,
+    int sharding_dim) {
+
+    auto undef_tensor = torch::Tensor();
+
+    torch::Tensor& norm_weights = norm_weights_.has_value() ? norm_weights_.value() : undef_tensor;
+    torch::Tensor& mul_bias = mul_bias_.has_value() ? mul_bias_.value() : undef_tensor;
+    torch::Tensor& add_bias = add_bias_.has_value() ? add_bias_.value() : undef_tensor;
+
+    MuiLLMParallelLinear* m = new MuiLLMParallelLinear(
+      engine.engine_ptr,
+      comm.comm_ptr,
+      norm_weights,
+      weights,
+      mul_bias,
+      add_bias,
+      epsilon,
+      sharding_dim
+    );
+
+    muillm_parallel_linear_module_ptr_t ret;
+    ret.ptr = m;
+    return ret;
+}
+
+// deinit
+void muillm_parallel_linear_module_deinit_trampoline(
+    muillm_parallel_linear_module_ptr_t module_ptr) {
+    delete module_ptr.ptr;
+}
+
+// forward
+at::Tensor muillm_parallel_linear_module_forward_trampoline(
+    muillm_parallel_linear_module_ptr_t module_ptr,
+    torch::Tensor& inputs,
+    std::optional<torch::Tensor> residual_,
+    bool reduce) {
+
+    auto undef_tensor = torch::Tensor();
+    torch::Tensor& residual = residual_.has_value() ? residual_.value() : undef_tensor;
+    
+    MuiLLMParallelLinear* m = module_ptr.ptr;
+
+    return m->forward(inputs, residual, reduce);
+}
+
+// parallel Gate/Up Silu (FFN)
 at::Tensor muillm_parallel_gateupsilu_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
@@ -459,4 +506,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_comm_init", &muillm_comm_init_trampoline, "muillm comm init");
   m.def("muillm_all_reduce_sum", &muillm_all_reduce_sum_trampoline, "muillm all_reduce sum");
   m.def("muillm_broadcast", &muillm_broadcast_trampoline, "muillm broadcast");
+
+  // modules
+  pybind11::class_<muillm_parallel_linear_module_ptr_t> cl_parallel_linear_module(m, "muillm_parallel_linear_module_ptr");
+  cl_parallel_linear_module.def(pybind11::init<>());
+
+  m.def("muillm_parallel_linear_module_init", &muillm_parallel_linear_module_init_trampoline, "muillm parallel linear module init", py::arg("engine"), py::arg("comm"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("sharding_dim") = 1);
+  m.def("muillm_parallel_linear_module_deinit", &muillm_parallel_linear_module_deinit_trampoline, "muillm parallel linear module deinit", py::arg("module"));
+  m.def("muillm_parallel_linear_module_forward", &muillm_parallel_linear_module_forward_trampoline, "muillm parallel linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("reduce") = false);
 }

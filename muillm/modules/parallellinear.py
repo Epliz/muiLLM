@@ -15,24 +15,16 @@ import muillm_ext
 
 class _MuiParallelLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, engine, comm, x, weights, norm_weights, variance_epsilon, add_bias, residual, sharding_dim, reduce):
+    def forward(ctx, module, x, residual, reduce):
+        output = muillm_ext.muillm_parallel_linear_module_forward(module, x, residual=residual, reduce=reduce)
 
-        output = muillm_ext.muillm_parallel_linear_forward(engine, comm.comms, x, weights, norm_weights, variance_epsilon, mul_bias=None, add_bias=add_bias, residual=residual, sharding_dim=sharding_dim, reduce=reduce)
-
-        ctx.save_for_backward(x, weights, norm_weights, variance_epsilon, add_bias)
+        ctx.save_for_backward(x)
 
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        inputs, weights, bias = ctx.saved_tensors
-
-        g_x = torch.matmul(grad_output, weights)
-        g_w = torch.matmul(inputs, grad_output)
-        g_b = None
-        if bias is not None:
-            g_b = grad_output.sum(axis=-1)
-        return g_x, g_w, g_b
+        raise ValueError("Not implemented")
 
 class MuiParallelLinear(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, in_features: int, out_features: int, bias: bool = True,
@@ -67,6 +59,9 @@ class MuiParallelLinear(MuiModule):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
+        self.cpp_module = None
+        self._create_cpp_module()
+
         # Need to synchronize after copying the tensors to make sure the transfers
         # completed
         self.__sync_all()
@@ -77,6 +72,24 @@ class MuiParallelLinear(MuiModule):
         self.is_cuda = self.weights[0].is_cuda
         dispatchable_device = self.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
+
+    def _create_cpp_module(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_linear_module_deinit(self.cpp_module)
+
+        norm_weights = self.norm_weights[0] if self.norm_weights is not None else None
+        bias = self.biases[0] if self.biases is not None else None
+
+        self.cpp_module = muillm_ext.muillm_parallel_linear_module_init(
+            self.cpp_engine,
+            self.comms.comms,
+            self.weights[0],
+            norm_weights,
+            self.variance_epsilon,
+            None, # mul_bias
+            bias,
+            self.sharding_dim
+        )
 
     @staticmethod
     def _set_requires_grads(params: nn.ParameterList, requires_grads: bool) -> None:
@@ -103,6 +116,9 @@ class MuiParallelLinear(MuiModule):
         norm_weights_requires_grad = norm_weights.requires_grad
         self.norm_weights = nn.ParameterList([norm_weights.detach()])
         MuiParallelLinear._set_requires_grads(self.norm_weights, norm_weights_requires_grad)
+
+        # re-create the cpp module
+        self._create_cpp_module()
 
     def copy_module(self, prev_module: Union[nn.Linear, MuiLinear], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
         has_bias = prev_module.bias is not None
@@ -131,6 +147,8 @@ class MuiParallelLinear(MuiModule):
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
+
+        self._create_cpp_module()
 
         # Need to synchronize after copying the tensors to make sure the transfers
         # completed
@@ -214,33 +232,7 @@ class MuiParallelLinear(MuiModule):
     def parallel_forward(self, input: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None, collect_outputs: bool = True) -> Tensor:
         input = self._shard_inputs_if_needed(input)
 
-        norm_weights = self.norm_weights[0] if self.norm_weights is not None else None
-        bias = self.biases[0] if self.biases is not None else None
-
-        if self.dispatchable and (input.numel() == input.shape[-1]):
-            # input is effectively 1D, and we support the type
-            # the kernel handles residual or not
-            # the kernel does the all-reduce
-            output = _MuiParallelLinear.apply(self.cpp_engine, self.comms, input, self.weights[0], norm_weights, self.variance_epsilon, bias, residual, self.sharding_dim, collect_outputs)
-        else:
-            if self.normalize:
-                if self.sharding_dim == 1:
-                    raise ValueError("normalizing sharded inputs is unsupported for sharding dim 1")
-
-                input = _MuiRMSNorm.apply(input, norm_weights, self.variance_epsilon)
-
-            output = F.linear(input, self.weights[0], bias)
-
-            rank = self.comms.rank
-            if rank != 0:
-                # only apply the residual on rank 0
-                residual = None
-
-            if residual is not None:
-                output = output + residual
-
-            if collect_outputs:
-                output = self.__collect_outputs(output)
+        output = _MuiParallelLinear.apply(self.cpp_module, input, residual, collect_outputs)
 
         # wrap in a list to indicate that it is the output of parallel_forward
         return [output]

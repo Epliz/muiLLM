@@ -64,6 +64,8 @@ setup(
             # parallel
             'csrc/parallel_linear_kernels.cu',
             'csrc/parallel_gateup_kernels.cu',
+            # parallel modules
+            'csrc/modules/parallel_linear_module.cpp',
             # other
             'csrc/engine.cpp',
             'csrc/gpu_info.cpp',
