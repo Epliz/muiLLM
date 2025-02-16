@@ -178,9 +178,8 @@ class MuiParallelBaseAttention(MuiModule):
                 # It contains 0 where OK, min_dtype where padded
                 # min_dtype obtained with torch.finfo(dtype).min
                 attn_output = mui_causally_decode_masked(query_states, key_states, value_states, attention_mask)
-        
-            # q_len is 1 so we can remove the transposition
-            attn_output = attn_output.reshape(bsz, q_len, self.tp_hidden_size)
+            
+            attn_output = self.o_proj.parallel_forward([attn_output], residual=residual)[0]
         else:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -210,7 +209,7 @@ class MuiParallelBaseAttention(MuiModule):
             # from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
             attn_output = attn_output.view(bsz, q_len, self.tp_hidden_size)
 
-        attn_output = self.o_proj.parallel_forward([attn_output], residual=residual)[0]
+            attn_output = self.o_proj.parallel_forward([attn_output], residual=residual)[0]
 
         return [attn_output]
 
