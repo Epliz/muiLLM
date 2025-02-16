@@ -754,7 +754,8 @@ void muillm_gateupsilu_forward_placed_output(
       undef_tensor/*add_bias*/,
       residual,
       y,
-      output_ptr
+      output_ptr,
+      stream
   );
 }
 
@@ -1335,7 +1336,8 @@ void muillm_gateupsilu_split_forward_placed_output(
       undef_tensor/*add_bias*/,
       residual,
       y,
-      output_ptr
+      output_ptr,
+      stream
   );
 }
 

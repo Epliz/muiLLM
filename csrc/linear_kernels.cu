@@ -461,7 +461,8 @@ void muillm_linear_activ_forward_placed_output(
     torch::Tensor& add_bias,
     torch::Tensor& residual,
     torch::Tensor& x,
-    void* output_ptr) {
+    void* output_ptr,
+    hipStream_t stream) {
   bool normalize = norm_weights.defined();
   if (normalize) {
     CHECK_INPUT(norm_weights);
@@ -477,9 +478,6 @@ void muillm_linear_activ_forward_placed_output(
     CHECK_INPUT(residual);
   }
   CHECK_INPUT(x);
-
-  auto device = x.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   const auto N = weights.size(0);
   const auto K = weights.size(1);
@@ -635,7 +633,8 @@ at::Tensor muillm_linear_activ_forward(
     add_bias,
     residual,
     x,
-    output_ptr
+    output_ptr,
+    stream
   );
 
   return y;

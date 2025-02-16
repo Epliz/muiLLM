@@ -80,7 +80,8 @@ at::Tensor muillm_parallel_linear_activ_forward(
       // we apply the residual only on device 0
       rank == 0 ? residual : undef_tensor,
       x,
-      buffers[rank]
+      buffers[rank],
+      stream
     );
 
     // finish the reduction

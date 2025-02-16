@@ -22,7 +22,8 @@ void muillm_linear_activ_forward_placed_output(
     torch::Tensor& add_bias,
     torch::Tensor& residual,
     torch::Tensor& x,
-    void* output_ptr
+    void* output_ptr,
+    hipStream_t stream
 );
 
 at::Tensor muillm_linear_activ_forward(
