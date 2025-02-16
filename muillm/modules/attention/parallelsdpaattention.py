@@ -76,7 +76,7 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,
-    ) -> Tuple[List[torch.Tensor], List[Optional[torch.Tensor]], List[Optional[Cache]]]:
+    ) -> torch.Tensor:
         # unwrap if needed
         if isinstance(query_states, list):
             query_states = query_states[0]
@@ -168,10 +168,7 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
 
         attn_output = self.o_proj.parallel_forward([attn_output], residual=residual)[0]
 
-        if not output_attentions:
-            attn_weights = None
-
-        return [attn_output], [attn_weights], [past_key_value]
+        return [attn_output]
 
     def forward(
         self,
@@ -188,9 +185,9 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> torch.Tensor:
         if self.tensor_parallelism > 1:
-            attn_outputs, attn_weights, past_key_values = self.parallel_forward(
+            attn_outputs = self.parallel_forward(
                 query_states=query_states,
                 key_states=key_states,
                 value_states=value_states,
@@ -206,6 +203,6 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
                 **kwargs,
             )
 
-            return attn_outputs[0], attn_weights[0], past_key_values[0]
+            return attn_outputs[0]
 
         raise ValueError("Only parallel inference is supported")

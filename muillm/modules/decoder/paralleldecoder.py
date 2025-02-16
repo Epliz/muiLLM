@@ -15,6 +15,7 @@ from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
 from muillm.modules.rmsnorm import MuiRMSNorm
 from muillm.modules.multilinear import MuiMultiLinear
 
+from transformers.cache_utils import Cache
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaMLP
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralMLP
 
@@ -76,7 +77,7 @@ class MuiParallelDecoderLayer(MuiModule):
         hidden_states: List[torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        past_key_value: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -102,6 +103,9 @@ class MuiParallelDecoderLayer(MuiModule):
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
         """
 
+        if output_attentions:
+            raise ValueError("output_attention is not supported")
+
         # unwrap inputs if needed
         if isinstance(hidden_states, list):
             hidden_states = hidden_states[0]
@@ -112,7 +116,7 @@ class MuiParallelDecoderLayer(MuiModule):
         query_states, key_states, value_states = self.qkv_proj.parallel_forward([hidden_states], collect_outputs=False)[0]
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn.parallel_forward(
+        hidden_states = self.self_attn.parallel_forward(
             query_states=[query_states],
             key_states=[key_states],
             value_states=[value_states],
@@ -128,9 +132,6 @@ class MuiParallelDecoderLayer(MuiModule):
         )
 
         hidden_states = hidden_states[0]
-        self_attn_weights = self_attn_weights[0]
-        present_key_value = present_key_value[0]
-
         # Fully Connected
         residual = hidden_states
         # post attention layer norm is fused in the MLP
@@ -139,11 +140,8 @@ class MuiParallelDecoderLayer(MuiModule):
 
         outputs = (hidden_states,)
 
-        if output_attentions:
-            outputs += ([self_attn_weights],)
-
         if use_cache:
-            outputs += ([present_key_value],)
+            outputs += ([past_key_value],)
 
         return outputs
 
@@ -152,7 +150,7 @@ class MuiParallelDecoderLayer(MuiModule):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        past_key_value: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
