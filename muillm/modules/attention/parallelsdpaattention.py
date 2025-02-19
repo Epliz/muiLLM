@@ -1,7 +1,7 @@
 import math
 from typing import List, Optional, Tuple, Union
 import warnings
-from muillm.modules.attention.parallelbaseattention import MuiParallelBaseAttention
+from muillm.modules.attention.parallelbaseattention import _MuiParallelAttention, MuiParallelBaseAttention
 from muillm.modules.multilinear import MuiMultiLinear
 from muillm.modules.parallellinear import MuiParallelLinear
 from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
@@ -123,16 +123,20 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
 
         if (q_len == 1) and (query_states.dtype == torch.float16):
             #
-            if all_ones_mask or (attention_mask is None):
-                attn_output = mui_causally_decode(query_states, key_states, value_states)
-            else:
-                # The mask has shape:
-                # M: [B, 1, S, T]
-                # It contains 0 where OK, min_dtype where padded
-                # min_dtype obtained with torch.finfo(dtype).min
-                attn_output = mui_causally_decode_masked(query_states, key_states, value_states, attention_mask)
+            # if all_ones_mask or (attention_mask is None):
+            #     attn_output = mui_causally_decode(query_states, key_states, value_states)
+            # else:
+            #     # The mask has shape:
+            #     # M: [B, 1, S, T]
+            #     # It contains 0 where OK, min_dtype where padded
+            #     # min_dtype obtained with torch.finfo(dtype).min
+            #     attn_output = mui_causally_decode_masked(query_states, key_states, value_states, attention_mask)
 
-            attn_output = self.o_proj.parallel_forward([attn_output], residual=residual)[0]
+            # attn_output = self.o_proj.parallel_forward([attn_output], residual=residual)[0]
+
+            # The mask has shape:
+            # M: [B, 1, S, T]
+            attn_output = _MuiParallelAttention.apply(self.cpp_module, query_states, key_states, value_states, attention_mask, residual)
         else:
 
             key_states = repeat_kv(key_states, self.num_key_value_groups)

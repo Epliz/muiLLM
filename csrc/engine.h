@@ -10,6 +10,12 @@ typedef struct muillm_engine {
   muillm_gpu_info_t* gpu_infos[MUILLM_MAX_GPUS];
 } muillm_engine_t;
   
+// needed because Pybind11 can't seem to be able to deal with opaque pointers
+struct muillm_engine_ptr {
+  muillm_engine_t* engine_ptr;
+};
+
+
 muillm_error_t muillm_engine_init(
   muillm_engine_t** engine
 );

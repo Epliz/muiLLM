@@ -2,7 +2,8 @@
 #define __MUILLM_PARALLEL_LINEAR_MODULE_H__
 
 #include "../engine.h"
-#include "../comm.h"
+#include "../comm_torch.h"
+
 
 #include <torch/torch.h>
 
@@ -40,5 +41,35 @@ struct MuiLLMParallelLinear: torch::nn::Module {
     bool collect_outputs
   );
 };
+
+// needed because Pybind11 can't seem to be able to deal with opaque pointers
+typedef struct muillm_parallel_linear_module_ptr {
+  MuiLLMParallelLinear* ptr;
+} muillm_parallel_linear_module_ptr_t;
+
+// init
+muillm_parallel_linear_module_ptr_t muillm_parallel_linear_module_init_trampoline(
+  muillm_engine_ptr engine,
+  muillm_comm_ptr comm,
+  torch::Tensor weights,
+  std::optional<torch::Tensor> norm_weights_,
+  float epsilon,
+  std::optional<torch::Tensor> mul_bias_,
+  std::optional<torch::Tensor> add_bias_,
+  int sharding_dim
+);
+
+// deinit
+void muillm_parallel_linear_module_deinit_trampoline(
+  muillm_parallel_linear_module_ptr_t module_ptr
+);
+
+// forward
+at::Tensor muillm_parallel_linear_module_forward_trampoline(
+  muillm_parallel_linear_module_ptr_t module_ptr,
+  torch::Tensor& inputs,
+  std::optional<torch::Tensor> residual_,
+  bool reduce
+);
 
 #endif /* __MUILLM_PARALLEL_LINEAR_MODULE_H__ */

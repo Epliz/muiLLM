@@ -2,7 +2,8 @@
 #define __MUILLM_PARALLEL_LINEAR_KERNELS_CUH__
 
 #include "linear_kernels.cuh"
-#include "comm.h"
+#include "engine.h"
+#include "comm_torch.h"
 
 #include <vector>
 
@@ -19,6 +20,21 @@ at::Tensor muillm_parallel_linear_activ_forward(
     int sharding_dim, // 0 for row-wise, 1 for column-wise
     bool reduce,
     torch::Tensor& x
+);
+
+// python trampoline
+at::Tensor muillm_parallel_linear_forward_trampoline(
+    muillm_engine_ptr engine,
+    muillm_comm_ptr comm,
+    torch::Tensor x,
+    torch::Tensor weights,
+    std::optional<torch::Tensor> norm_weights_,
+    float epsilon,
+    std::optional<torch::Tensor> mul_bias_,
+    std::optional<torch::Tensor> add_bias_,
+    std::optional<torch::Tensor> residual_,
+    int sharding_dim,
+    bool reduce
 );
 
 #endif // __MUILLM_PARALLEL_LINEAR_KERNELS_CUH__
