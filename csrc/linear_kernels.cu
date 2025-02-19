@@ -5,6 +5,40 @@
 
 #include "linear_kernels.cuh"
 
+// Python trampoline
+
+at::Tensor muillm_linear_forward_trampoline(
+  muillm_engine_ptr engine,
+  torch::Tensor x,
+  torch::Tensor weights,
+  std::optional<torch::Tensor> norm_weights_,
+  float epsilon,
+  std::optional<torch::Tensor> mul_bias_,
+  std::optional<torch::Tensor> add_bias_,
+  std::optional<torch::Tensor> residual_) {
+  auto undef_tensor = torch::Tensor();
+
+  torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : undef_tensor;
+  torch::Tensor mul_bias = mul_bias_.has_value() ? mul_bias_.value() : undef_tensor;
+  torch::Tensor add_bias = add_bias_.has_value() ? add_bias_.value() : undef_tensor;
+  torch::Tensor residual = residual_.has_value() ? residual_.value() : undef_tensor;
+  return muillm_linear_activ_forward(
+      engine.engine_ptr,
+      norm_weights,
+      epsilon,
+      weights,
+      mui_activation::Identity,
+      mul_bias,
+      add_bias,
+      residual,
+      x
+  );
+}
+
+//
+// actual module
+//
+
 #define ROWS_PER_BLOCK 4
 #define GEMV_THREADS_PER_BLOCK 64
 

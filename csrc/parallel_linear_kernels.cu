@@ -5,6 +5,51 @@
 
 #include <iostream>
 
+//
+// Python trampolines
+//
+
+at::Tensor muillm_parallel_linear_forward_trampoline(
+  muillm_engine_ptr engine,
+  muillm_comm_ptr comm,
+  torch::Tensor x,
+  torch::Tensor weights,
+  std::optional<torch::Tensor> norm_weights_,
+  float epsilon,
+  std::optional<torch::Tensor> mul_bias_,
+  std::optional<torch::Tensor> add_bias_,
+  std::optional<torch::Tensor> residual_,
+  int sharding_dim,
+  bool reduce) {
+
+  auto undef_tensor = torch::Tensor();
+  torch::Tensor empty_tensor_list;
+
+  torch::Tensor& norm_weights = norm_weights_.has_value() ? norm_weights_.value() : empty_tensor_list;
+  torch::Tensor& mul_biases = mul_bias_.has_value() ? mul_bias_.value() : empty_tensor_list;
+  torch::Tensor& add_biases = add_bias_.has_value() ? add_bias_.value() : empty_tensor_list;
+  torch::Tensor residual = residual_.has_value() ? residual_.value() : undef_tensor;
+
+  return muillm_parallel_linear_activ_forward(
+      engine.engine_ptr,
+      comm.comm_ptr,
+      norm_weights,
+      epsilon,
+      weights,
+      mui_activation::Identity,
+      mul_biases,
+      add_biases,
+      residual,
+      sharding_dim,
+      reduce,
+      x
+  );
+}
+
+//
+// Actual stuff
+//
+
 at::Tensor muillm_parallel_linear_activ_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,

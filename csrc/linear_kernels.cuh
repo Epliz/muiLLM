@@ -38,4 +38,16 @@ at::Tensor muillm_linear_activ_forward(
     torch::Tensor& x
 );
 
+// python trampoline
+at::Tensor muillm_linear_forward_trampoline(
+    muillm_engine_ptr engine,
+    torch::Tensor x,
+    torch::Tensor weights,
+    std::optional<torch::Tensor> norm_weights_,
+    float epsilon,
+    std::optional<torch::Tensor> mul_bias_,
+    std::optional<torch::Tensor> add_bias_,
+    std::optional<torch::Tensor> residual_
+);
+
 #endif // __MUILLM_LINEAR_KERNELS_CUH__

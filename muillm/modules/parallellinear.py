@@ -59,6 +59,7 @@ class MuiParallelLinear(MuiModule):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
+        # the cpp module will be created at the end of all layer replacements
         self.cpp_module = None
 
         # Need to synchronize after copying the tensors to make sure the transfers

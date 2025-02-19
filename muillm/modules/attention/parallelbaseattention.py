@@ -21,9 +21,22 @@ from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
 from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode, mui_causally_decode_masked
 from muillm.modules.attention.kvcache import repeat_kv
 from muillm.modules.linear import MuiLinear
+import muillm_ext
 
 logger = logging.get_logger(__name__)
 
+class _MuiParallelAttention(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, module, q, k, v, m, residual):
+        output = muillm_ext.muillm_parallel_attention_module_forward(module, q, k, v, m, residual)
+
+        ctx.save_for_backward(q, k, v, m)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
 
 class MuiParallelBaseAttention(MuiModule):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -31,6 +44,7 @@ class MuiParallelBaseAttention(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], rotary_emb: MuiMistralRotaryEmbedding, layer_idx: Optional[int] = None, device=None, dtype=None):
         super().__init__(engine_config=engine_config)
 
+        self.cpp_engine = engine_config.cpp_engine
         self.comms = engine_config.comms
         self.tensor_parallelism = engine_config.tensor_parallelism
 
@@ -79,6 +93,19 @@ class MuiParallelBaseAttention(MuiModule):
         self.rotary_emb = rotary_emb
 
         self.sqrt_head_dim = math.sqrt(self.head_dim)
+
+        # the cpp module will be created at the end of all layer replacements
+        self.cpp_module = None
+
+    def finalize_init(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_attention_module_deinit(self.cpp_module)
+
+        self.cpp_module = muillm_ext.muillm_parallel_attention_module_init(
+            self.cpp_engine,
+            self.comms.comms,
+            self.o_proj.cpp_module
+        )
 
     staticmethod
     def _create_rotary_embeddings(engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx:int, device=None, dtype=None) -> MuiMistralRotaryEmbedding:
@@ -141,6 +168,8 @@ class MuiParallelBaseAttention(MuiModule):
         if all_ones_mask is None:
             # if not specified, assume it might not have just ones
             all_ones_mask = False
+        if all_ones_mask:
+            attention_mask = None
 
         bsz, q_len, _ = query_states.size()
 
@@ -170,16 +199,20 @@ class MuiParallelBaseAttention(MuiModule):
 
         if (q_len == 1) and (query_states.dtype == torch.float16):
             #
-            if all_ones_mask or (attention_mask is None):
-                attn_output = mui_causally_decode(query_states, key_states, value_states)
-            else:
-                # The mask has shape:
-                # M: [B, 1, S, T]
-                # It contains 0 where OK, min_dtype where padded
-                # min_dtype obtained with torch.finfo(dtype).min
-                attn_output = mui_causally_decode_masked(query_states, key_states, value_states, attention_mask)
+            # if all_ones_mask or (attention_mask is None):
+            #     attn_output = mui_causally_decode(query_states, key_states, value_states)
+            # else:
+            #     # The mask has shape:
+            #     # M: [B, 1, S, T]
+            #     # It contains 0 where OK, min_dtype where padded
+            #     # min_dtype obtained with torch.finfo(dtype).min
+            #     attn_output = mui_causally_decode_masked(query_states, key_states, value_states, attention_mask)
             
-            attn_output = self.o_proj.parallel_forward([attn_output], residual=residual)[0]
+            # attn_output = self.o_proj.parallel_forward([attn_output], residual=residual)[0]
+
+            # The mask has shape:
+            # M: [B, 1, S, T]
+            attn_output = _MuiParallelAttention.apply(self.cpp_module, query_states, key_states, value_states, attention_mask, residual)
         else:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)

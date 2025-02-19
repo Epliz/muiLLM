@@ -4,6 +4,68 @@
 #include "../rmsnorm_kernels.cuh"
 #include "../comm_torch.h"
 
+//
+// Python trampolines
+//
+
+// init
+muillm_parallel_linear_module_ptr_t muillm_parallel_linear_module_init_trampoline(
+  muillm_engine_ptr engine,
+  muillm_comm_ptr comm,
+  torch::Tensor weights,
+  std::optional<torch::Tensor> norm_weights_,
+  float epsilon,
+  std::optional<torch::Tensor> mul_bias_,
+  std::optional<torch::Tensor> add_bias_,
+  int sharding_dim) {
+
+  auto undef_tensor = torch::Tensor();
+
+  torch::Tensor& norm_weights = norm_weights_.has_value() ? norm_weights_.value() : undef_tensor;
+  torch::Tensor& mul_bias = mul_bias_.has_value() ? mul_bias_.value() : undef_tensor;
+  torch::Tensor& add_bias = add_bias_.has_value() ? add_bias_.value() : undef_tensor;
+
+  MuiLLMParallelLinear* m = new MuiLLMParallelLinear(
+    engine.engine_ptr,
+    comm.comm_ptr,
+    norm_weights,
+    weights,
+    mul_bias,
+    add_bias,
+    epsilon,
+    sharding_dim
+  );
+
+  muillm_parallel_linear_module_ptr_t ret;
+  ret.ptr = m;
+  return ret;
+}
+
+// deinit
+void muillm_parallel_linear_module_deinit_trampoline(
+  muillm_parallel_linear_module_ptr_t module_ptr) {
+  delete module_ptr.ptr;
+}
+
+// forward
+at::Tensor muillm_parallel_linear_module_forward_trampoline(
+  muillm_parallel_linear_module_ptr_t module_ptr,
+  torch::Tensor& inputs,
+  std::optional<torch::Tensor> residual_,
+  bool reduce) {
+
+  auto undef_tensor = torch::Tensor();
+  torch::Tensor& residual = residual_.has_value() ? residual_.value() : undef_tensor;
+  
+  MuiLLMParallelLinear* m = module_ptr.ptr;
+
+  return m->forward(inputs, residual, reduce);
+}
+
+//
+// actual module
+//
+
 MuiLLMParallelLinear::MuiLLMParallelLinear(
   muillm_engine_t* engine,
   muillm_comm_t* comm,
