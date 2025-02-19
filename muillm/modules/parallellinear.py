@@ -60,20 +60,12 @@ class MuiParallelLinear(MuiModule):
         self._check_dispatchable()
 
         self.cpp_module = None
-        self._create_cpp_module()
 
         # Need to synchronize after copying the tensors to make sure the transfers
         # completed
         self.__sync_all()
 
-    def _check_dispatchable(self):
-        self.dtype = self.weights[0].dtype
-        dispatchable_type = (self.dtype == torch.float16)
-        self.is_cuda = self.weights[0].is_cuda
-        dispatchable_device = self.is_cuda
-        self.dispatchable = dispatchable_device and dispatchable_type
-
-    def _create_cpp_module(self):
+    def finalize_init(self):
         if self.cpp_module is not None:
             muillm_ext.muillm_parallel_linear_module_deinit(self.cpp_module)
 
@@ -90,6 +82,13 @@ class MuiParallelLinear(MuiModule):
             bias,
             self.sharding_dim
         )
+
+    def _check_dispatchable(self):
+        self.dtype = self.weights[0].dtype
+        dispatchable_type = (self.dtype == torch.float16)
+        self.is_cuda = self.weights[0].is_cuda
+        dispatchable_device = self.is_cuda
+        self.dispatchable = dispatchable_device and dispatchable_type
 
     @staticmethod
     def _set_requires_grads(params: nn.ParameterList, requires_grads: bool) -> None:
@@ -118,7 +117,7 @@ class MuiParallelLinear(MuiModule):
         MuiParallelLinear._set_requires_grads(self.norm_weights, norm_weights_requires_grad)
 
         # re-create the cpp module
-        self._create_cpp_module()
+        self.finalize_init()
 
     def copy_module(self, prev_module: Union[nn.Linear, MuiLinear], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
         has_bias = prev_module.bias is not None
@@ -148,7 +147,7 @@ class MuiParallelLinear(MuiModule):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
-        self._create_cpp_module()
+        self.finalize_init()
 
         # Need to synchronize after copying the tensors to make sure the transfers
         # completed

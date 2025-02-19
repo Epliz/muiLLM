@@ -8,6 +8,17 @@ from muillm.sampling.wrapping import wrap_model
 from muillm.quantization.quantizationmethod import QuantizationMethod
 from muillm.quantization.quantizedreplacements import quantize_layers
 
+def _finalize_module(module: nn.Module):
+    from muillm.modules.module import MuiModule
+
+    # finalize the sub modules first
+    for sub_module in module.children():
+        _finalize_module(sub_module)
+
+    # then finalize the current one
+    if isinstance(module, MuiModule):
+        module.finalize_init()
+
 def init_engine(model: nn.Module, quantization_method: QuantizationMethod = None, tensor_parallelism: Optional[int] = 1) -> nn.Module :
 
     engine_config = MuiEngineConfig(quantization_method, tensor_parallelism=tensor_parallelism)
@@ -23,5 +34,8 @@ def init_engine(model: nn.Module, quantization_method: QuantizationMethod = None
 
     # store the config in the model
     setattr(model, "muillm_config", engine_config)
+
+    # finalize model
+    _finalize_module(model)
 
     return model
