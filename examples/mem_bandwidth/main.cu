@@ -284,6 +284,74 @@ void float8_bandwidth(
   float8_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, N);
 }
 
+typedef float mui_float4 __attribute__((vector_size(4)));
+
+__device__ float4 load_nontemporal_float4(const float* p) {
+  float x = __builtin_nontemporal_load(p);
+  float y = __builtin_nontemporal_load(p + 1);
+  float z = __builtin_nontemporal_load(p + 2);
+  float w = __builtin_nontemporal_load(p + 3);
+
+  float4 v = make_float4(x, y, z, w);
+  return v;
+}
+
+__global__ void float8_nt_bandwidth_kernel(
+  const float* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+  int tid = blockIdx.x * FLOAT8_ELEMENTS_PER_BLOCK + (4 * threadIdx.x);
+
+  __shared__ float shared_acc;
+  if (threadIdx.x == 0) {
+    shared_acc = 0.f;
+  }
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+
+  float r = 0.f;
+  if ((blockIdx.x + 1) * FLOAT8_ELEMENTS_PER_BLOCK <= N) {
+    unsigned off = tid;
+    float4 v0 = load_nontemporal_float4(addr(A, off));
+    off += 4 * THREADS_PER_BLOCK;
+    float4 v1 = load_nontemporal_float4(addr(A, off));
+
+    float4 v01 = v0 + v1;
+
+    r = (v01.x+ v01.y) + (v01.z + v01.w);
+  }
+
+  r = warpReduce(r);
+
+  if (laneId == 0) {
+    atomicAdd(&shared_acc, r);
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    *out_flag = (shared_acc > 0.f);
+  }
+}
+
+void float8_nt_bandwidth(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(N, FLOAT8_ELEMENTS_PER_BLOCK);
+  float8_nt_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, N);
+}
+
 #define FLOAT16_ELEMENTS_PER_THREAD 16
 #define FLOAT16_ELEMENTS_PER_BLOCK ((THREADS_PER_BLOCK) * (FLOAT16_ELEMENTS_PER_THREAD))
 
@@ -507,6 +575,7 @@ int main(int argc, char** argv) {
     KERNEL_WITH_NAME(float2_bandwidth),
     KERNEL_WITH_NAME(float4_bandwidth),
     KERNEL_WITH_NAME(float8_bandwidth),
+    KERNEL_WITH_NAME(float8_nt_bandwidth),
     KERNEL_WITH_NAME(float16_bandwidth),
     KERNEL_WITH_NAME(float32_bandwidth)
   };
