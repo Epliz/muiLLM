@@ -67,6 +67,51 @@ static inline const T* __device__ addr(const T* p, unsigned index) {
 #define FLOAT_ELEMENTS_PER_THREAD 1
 #define FLOAT_ELEMENTS_PER_BLOCK ((THREADS_PER_BLOCK) * (FLOAT_ELEMENTS_PER_THREAD))
 
+
+__global__ void float_empty_bandwidth_kernel(
+  const float* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+  int tid = blockIdx.x * FLOAT_ELEMENTS_PER_BLOCK + threadIdx.x;
+
+
+  __shared__ float shared_accs[8];
+
+  float r = 0.f;
+
+  r = warpReduce(r);
+
+  if (laneId == 0) {
+    shared_accs[warpId] = r;
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
+  }
+}
+
+void float_empty_bandwidth(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(N, FLOAT_ELEMENTS_PER_BLOCK);
+  float_empty_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, N);
+}
+
 __global__ void float_bandwidth_kernel(
   const float* __restrict__ A,
   bool* __restrict__ out_flag,
@@ -77,13 +122,7 @@ __global__ void float_bandwidth_kernel(
   int laneId = threadIdx.x % warpSize;
   int tid = blockIdx.x * FLOAT_ELEMENTS_PER_BLOCK + threadIdx.x;
 
-  __shared__ float shared_acc;
-  if (threadIdx.x == 0) {
-    shared_acc = 0.f;
-  }
-  if (THREADS_PER_BLOCK > warpSize) {
-    __syncthreads();
-  }
+  __shared__ float shared_accs[8];
 
   float r = 0.f;
   if (tid < N) {
@@ -93,7 +132,7 @@ __global__ void float_bandwidth_kernel(
   r = warpReduce(r);
 
   if (laneId == 0) {
-    atomicAdd(&shared_acc, r);
+    shared_accs[warpId] = r;
   }
 
   if (THREADS_PER_BLOCK > warpSize) {
@@ -101,7 +140,11 @@ __global__ void float_bandwidth_kernel(
   }
 
   if (threadIdx.x == 0) {
-    *out_flag = (shared_acc > 0.f);
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
   }
 }
 
@@ -118,6 +161,50 @@ void float_bandwidth(
 #define FLOAT2_ELEMENTS_PER_THREAD 2
 #define FLOAT2_ELEMENTS_PER_BLOCK ((THREADS_PER_BLOCK) * (FLOAT2_ELEMENTS_PER_THREAD))
 
+
+__global__ void float2_empty_bandwidth_kernel(
+  const float* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+  int tid = blockIdx.x * FLOAT2_ELEMENTS_PER_BLOCK + (2 * threadIdx.x);
+
+
+  __shared__ float shared_accs[8];
+
+
+  float r = 0.f;
+
+  if (laneId == 0) {
+    shared_accs[warpId] = r;
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
+  }
+}
+
+void float2_empty_bandwidth(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(N, FLOAT2_ELEMENTS_PER_BLOCK);
+  float2_empty_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, N);
+}
+
 __global__ void float2_bandwidth_kernel(
   const float* __restrict__ A,
   bool* __restrict__ out_flag,
@@ -128,13 +215,8 @@ __global__ void float2_bandwidth_kernel(
   int laneId = threadIdx.x % warpSize;
   int tid = blockIdx.x * FLOAT2_ELEMENTS_PER_BLOCK + (2 * threadIdx.x);
 
-  __shared__ float shared_acc;
-  if (threadIdx.x == 0) {
-    shared_acc = 0.f;
-  }
-  if (THREADS_PER_BLOCK > warpSize) {
-    __syncthreads();
-  }
+
+  __shared__ float shared_accs[8];
 
 
   float r = 0.f;
@@ -146,7 +228,7 @@ __global__ void float2_bandwidth_kernel(
   r = warpReduce(r);
 
   if (laneId == 0) {
-    atomicAdd(&shared_acc, r);
+    shared_accs[warpId] = r;
   }
 
   if (THREADS_PER_BLOCK > warpSize) {
@@ -154,7 +236,11 @@ __global__ void float2_bandwidth_kernel(
   }
 
   if (threadIdx.x == 0) {
-    *out_flag = (shared_acc > 0.f);
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
   }
 }
 
@@ -172,6 +258,51 @@ void float2_bandwidth(
 #define FLOAT4_ELEMENTS_PER_THREAD 4
 #define FLOAT4_ELEMENTS_PER_BLOCK ((THREADS_PER_BLOCK) * (FLOAT4_ELEMENTS_PER_THREAD))
 
+
+__global__ void float4_empty_bandwidth_kernel(
+  const float* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+  int tid = blockIdx.x * FLOAT4_ELEMENTS_PER_BLOCK + (4 * threadIdx.x);
+
+
+  __shared__ float shared_accs[8];
+
+  float r = 0.f;
+
+  r = warpReduce(r);
+
+  if (laneId == 0) {
+    shared_accs[warpId] = r;
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
+  }
+}
+
+void float4_empty_bandwidth(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(N, FLOAT4_ELEMENTS_PER_BLOCK);
+  float4_empty_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, N);
+}
+
 __global__ void float4_bandwidth_kernel(
   const float* __restrict__ A,
   bool* __restrict__ out_flag,
@@ -182,13 +313,8 @@ __global__ void float4_bandwidth_kernel(
   int laneId = threadIdx.x % warpSize;
   int tid = blockIdx.x * FLOAT4_ELEMENTS_PER_BLOCK + (4 * threadIdx.x);
 
-  __shared__ float shared_acc;
-  if (threadIdx.x == 0) {
-    shared_acc = 0.f;
-  }
-  if (THREADS_PER_BLOCK > warpSize) {
-    __syncthreads();
-  }
+
+  __shared__ float shared_accs[8];
 
 
   float r = 0.f;
@@ -202,7 +328,7 @@ __global__ void float4_bandwidth_kernel(
   r = warpReduce(r);
 
   if (laneId == 0) {
-    atomicAdd(&shared_acc, r);
+    shared_accs[warpId] = r;
   }
 
   if (THREADS_PER_BLOCK > warpSize) {
@@ -210,7 +336,11 @@ __global__ void float4_bandwidth_kernel(
   }
 
   if (threadIdx.x == 0) {
-    *out_flag = (shared_acc > 0.f);
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
   }
 }
 
@@ -226,7 +356,54 @@ void float4_bandwidth(
 
 
 #define FLOAT8_ELEMENTS_PER_THREAD 8
+#define FLOAT8_ELEMENTS_PER_WARP (FLOAT8_ELEMENTS_PER_THREAD * warpSize)
 #define FLOAT8_ELEMENTS_PER_BLOCK ((THREADS_PER_BLOCK) * (FLOAT8_ELEMENTS_PER_THREAD))
+
+
+__global__ void float8_empty_bandwidth_kernel(
+  const float* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+  int tid = blockIdx.x * FLOAT8_ELEMENTS_PER_BLOCK + (4 * threadIdx.x);
+
+
+  __shared__ float shared_accs[8];
+
+
+  float r = 0.f;
+
+  r = warpReduce(r);
+
+  if (laneId == 0) {
+    shared_accs[warpId] = r;
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
+  }
+}
+
+void float8_empty_bandwidth(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(N, FLOAT8_ELEMENTS_PER_BLOCK);
+  float8_empty_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, N);
+}
 
 __global__ void float8_bandwidth_kernel(
   const float* __restrict__ A,
@@ -238,13 +415,8 @@ __global__ void float8_bandwidth_kernel(
   int laneId = threadIdx.x % warpSize;
   int tid = blockIdx.x * FLOAT8_ELEMENTS_PER_BLOCK + (4 * threadIdx.x);
 
-  __shared__ float shared_acc;
-  if (threadIdx.x == 0) {
-    shared_acc = 0.f;
-  }
-  if (THREADS_PER_BLOCK > warpSize) {
-    __syncthreads();
-  }
+
+  __shared__ float shared_accs[8];
 
 
   float r = 0.f;
@@ -262,7 +434,7 @@ __global__ void float8_bandwidth_kernel(
   r = warpReduce(r);
 
   if (laneId == 0) {
-    atomicAdd(&shared_acc, r);
+    shared_accs[warpId] = r;
   }
 
   if (THREADS_PER_BLOCK > warpSize) {
@@ -270,7 +442,11 @@ __global__ void float8_bandwidth_kernel(
   }
 
   if (threadIdx.x == 0) {
-    *out_flag = (shared_acc > 0.f);
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
   }
 }
 
@@ -282,6 +458,59 @@ void float8_bandwidth(
   const int threads_per_blocks = THREADS_PER_BLOCK;
   const int num_blocks = DIV_ROUND_UP(N, FLOAT8_ELEMENTS_PER_BLOCK);
   float8_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, N);
+}
+
+__global__ void float8_clause_bandwidth_kernel(
+  const float* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+  unsigned off = (blockIdx.x * FLOAT8_ELEMENTS_PER_BLOCK) + (FLOAT8_ELEMENTS_PER_WARP * warpId) + (4 * laneId);
+
+
+  __shared__ float shared_accs[8];
+
+
+  float r = 0.f;
+  if ((blockIdx.x + 1) * FLOAT8_ELEMENTS_PER_BLOCK <= N) {
+    float4 v0 = *reinterpret_cast<const float4*>(addr(A, off));
+    float4 v1 = *reinterpret_cast<const float4*>(addr(A, off + 4 * warpSize));
+
+    float4 v01 = v0 + v1;
+
+    r = v01.x + v01.y + v01.z + v01.w;
+  }
+
+  r = warpReduce(r);
+
+  if (laneId == 0) {
+    shared_accs[warpId] = r;
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
+  }
+}
+
+void float8_clause_bandwidth(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(N, FLOAT8_ELEMENTS_PER_BLOCK);
+  float8_clause_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, N);
 }
 
 typedef float mui_float4 __attribute__((vector_size(4)));
@@ -306,13 +535,8 @@ __global__ void float8_nt_bandwidth_kernel(
   int laneId = threadIdx.x % warpSize;
   int tid = blockIdx.x * FLOAT8_ELEMENTS_PER_BLOCK + (4 * threadIdx.x);
 
-  __shared__ float shared_acc;
-  if (threadIdx.x == 0) {
-    shared_acc = 0.f;
-  }
-  if (THREADS_PER_BLOCK > warpSize) {
-    __syncthreads();
-  }
+
+  __shared__ float shared_accs[8];
 
 
   float r = 0.f;
@@ -330,7 +554,7 @@ __global__ void float8_nt_bandwidth_kernel(
   r = warpReduce(r);
 
   if (laneId == 0) {
-    atomicAdd(&shared_acc, r);
+    shared_accs[warpId] = r;
   }
 
   if (THREADS_PER_BLOCK > warpSize) {
@@ -338,7 +562,11 @@ __global__ void float8_nt_bandwidth_kernel(
   }
 
   if (threadIdx.x == 0) {
-    *out_flag = (shared_acc > 0.f);
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
   }
 }
 
@@ -355,6 +583,52 @@ void float8_nt_bandwidth(
 #define FLOAT16_ELEMENTS_PER_THREAD 16
 #define FLOAT16_ELEMENTS_PER_BLOCK ((THREADS_PER_BLOCK) * (FLOAT16_ELEMENTS_PER_THREAD))
 
+
+__global__ void float16_empty_bandwidth_kernel(
+  const float* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+  int tid = blockIdx.x * FLOAT16_ELEMENTS_PER_BLOCK + (4 * threadIdx.x);
+
+
+  __shared__ float shared_accs[8];
+
+
+  float r = 0.f;
+
+  r = warpReduce(r);
+
+  if (laneId == 0) {
+    shared_accs[warpId] = r;
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
+  }
+}
+
+void float16_empty_bandwidth(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(N, FLOAT16_ELEMENTS_PER_BLOCK);
+  float16_empty_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, N);
+}
+
 __global__ void float16_bandwidth_kernel(
   const float* __restrict__ A,
   bool* __restrict__ out_flag,
@@ -365,13 +639,8 @@ __global__ void float16_bandwidth_kernel(
   int laneId = threadIdx.x % warpSize;
   int tid = blockIdx.x * FLOAT16_ELEMENTS_PER_BLOCK + (4 * threadIdx.x);
 
-  __shared__ float shared_acc;
-  if (threadIdx.x == 0) {
-    shared_acc = 0.f;
-  }
-  if (THREADS_PER_BLOCK > warpSize) {
-    __syncthreads();
-  }
+
+  __shared__ float shared_accs[8];
 
 
   float r = 0.f;
@@ -401,7 +670,7 @@ __global__ void float16_bandwidth_kernel(
   r = warpReduce(r);
 
   if (laneId == 0) {
-    atomicAdd(&shared_acc, r);
+    shared_accs[warpId] = r;
   }
 
   if (THREADS_PER_BLOCK > warpSize) {
@@ -409,7 +678,11 @@ __global__ void float16_bandwidth_kernel(
   }
 
   if (threadIdx.x == 0) {
-    *out_flag = (shared_acc > 0.f);
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
   }
 }
 
@@ -437,13 +710,8 @@ __global__ void float32_bandwidth_kernel(
   int laneId = threadIdx.x % warpSize;
   int tid = blockIdx.x * FLOAT32_ELEMENTS_PER_BLOCK + (4 * threadIdx.x);
 
-  __shared__ float shared_acc;
-  if (threadIdx.x == 0) {
-    shared_acc = 0.f;
-  }
-  if (THREADS_PER_BLOCK > warpSize) {
-    __syncthreads();
-  }
+
+  __shared__ float shared_accs[8];
 
 
   float r = 0.f;
@@ -492,7 +760,7 @@ __global__ void float32_bandwidth_kernel(
   r = warpReduce(r);
 
   if (laneId == 0) {
-    atomicAdd(&shared_acc, r);
+    shared_accs[warpId] = r;
   }
 
   if (THREADS_PER_BLOCK > warpSize) {
@@ -500,7 +768,11 @@ __global__ void float32_bandwidth_kernel(
   }
 
   if (threadIdx.x == 0) {
-    *out_flag = (shared_acc > 0.f);
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
   }
 }
 
@@ -571,17 +843,23 @@ int main(int argc, char** argv) {
   // Executing kernels
  
   std::vector<NamedKernel> kernels = {
+    KERNEL_WITH_NAME(float_empty_bandwidth),
     KERNEL_WITH_NAME(float_bandwidth),
+    KERNEL_WITH_NAME(float2_empty_bandwidth),
     KERNEL_WITH_NAME(float2_bandwidth),
+    KERNEL_WITH_NAME(float4_empty_bandwidth),
     KERNEL_WITH_NAME(float4_bandwidth),
+    KERNEL_WITH_NAME(float8_empty_bandwidth),
     KERNEL_WITH_NAME(float8_bandwidth),
+    KERNEL_WITH_NAME(float8_clause_bandwidth),
     KERNEL_WITH_NAME(float8_nt_bandwidth),
+    KERNEL_WITH_NAME(float16_empty_bandwidth),
     KERNEL_WITH_NAME(float16_bandwidth),
     KERNEL_WITH_NAME(float32_bandwidth)
   };
 
 
-  int warmup_reps = 10;
+  int warmup_reps = 100;
   int bench_reps = 10000;
 
   for (NamedKernel named_kernel: kernels) {
