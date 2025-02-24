@@ -117,37 +117,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
 
 #include "rmsnorm_kernels.cuh"
 
-std::vector<at::Tensor> muillm_rope_forward_no_cache(
-    torch::Tensor& position_ids,
-    torch::Tensor& cos_cached,
-    torch::Tensor& sin_cached,
-    torch::Tensor& q_in,
-    torch::Tensor& k_in
-);
-
-std::vector<at::Tensor> muillm_rope_forward_dynamic_cache(
-    torch::Tensor& position_ids,
-    torch::Tensor& cos_cached,
-    torch::Tensor& sin_cached,
-    torch::Tensor& q_in,
-    torch::Tensor& k_in,
-    torch::Tensor& v_in,
-    torch::Tensor& prev_k_cache,
-    torch::Tensor& prev_v_cache
-);
-
-std::vector<at::Tensor> muillm_rope_forward_static_cache(
-    torch::Tensor& position_ids,
-    torch::Tensor& cos_cached,
-    torch::Tensor& sin_cached,
-    torch::Tensor& q_in,
-    torch::Tensor& k_in,
-    torch::Tensor& v_in,
-    torch::Tensor& k_cache,
-    torch::Tensor& v_cache,
-    torch::Tensor& cache_position,
-    uint64_t seen_tokens
-);
+#include "rotary_kernels.h"
 
 #include "causal_transformer_decoding.cuh"
 
@@ -291,6 +261,11 @@ at::Tensor muillm_parallel_gateupsilu_split_forward_trampoline(
   );
 }
 
+#include "modules/kvcache.h"
+#include "modules/static_kvcache.h"
+#include "modules/dynamic_kvcache.h"
+
+#include "modules/rotary_module.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("engine"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none());
@@ -340,6 +315,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_broadcast", &muillm_broadcast_trampoline, "muillm broadcast");
 
   // modules
+
+  // parallel linear
   pybind11::class_<muillm_parallel_linear_module_ptr_t> cl_parallel_linear_module(m, "muillm_parallel_linear_module_ptr");
   cl_parallel_linear_module.def(pybind11::init<>());
 
@@ -347,11 +324,36 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_parallel_linear_module_deinit", &muillm_parallel_linear_module_deinit_trampoline, "muillm parallel linear module deinit", py::arg("module"));
   m.def("muillm_parallel_linear_module_forward", &muillm_parallel_linear_module_forward_trampoline, "muillm parallel linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("reduce") = false);
 
+  // KV cache
+  pybind11::class_<muillm_kvcache_module_ptr_t> cl_kvcache_module(m, "muillm_kvcache_module_ptr");
+  cl_kvcache_module.def(pybind11::init<>());
 
+  m.def("muillm_kvcache_module_get_seen_tokens", &muillm_kvcache_module_get_seen_tokens_trampoline, "muillm kvcache module get seen tokens", py::arg("module"));
+  
+  // static KV cache
+  m.def("muillm_static_kvcache_module_init", &muillm_static_kvcache_module_init_trampoline, "muillm static kvcache module init", py::arg("engine"), py::arg("key_cache"), py::arg("value_cache"), py::arg("seen_tokens"));
+  m.def("muillm_static_kvcache_module_deinit", &muillm_static_kvcache_module_deinit_trampoline, "muillm static kvcache module deinit", py::arg("module"));
+  m.def("muillm_static_kvcache_module_sync_back", &muillm_static_kvcache_module_sync_back_trampoline, "muillm static kvcache module sync back", py::arg("module"));
+
+  // dynamic KV cache
+  m.def("muillm_dynamic_kvcache_module_init", &muillm_dynamic_kvcache_module_init_trampoline, "muillm dynamic kvcache module init", py::arg("engine"), py::arg("key_cache"), py::arg("value_cache"), py::arg("seen_tokens"));
+  m.def("muillm_dynamic_kvcache_module_deinit", &muillm_dynamic_kvcache_module_deinit_trampoline, "muillm dynamic kvcache module deinit", py::arg("module"));
+  m.def("muillm_dynamic_kvcache_module_sync_back", &muillm_dynamic_kvcache_module_sync_back_trampoline, "muillm dynamic kvcache module sync back", py::arg("module"));
+
+  // rotary embedding
+  pybind11::class_<muillm_rotary_embedding_module_ptr_t> cl_rotary_embedding_module(m, "muillm_rotary_embedding_module_ptr");
+  cl_rotary_embedding_module.def(pybind11::init<>());
+
+  m.def("muillm_rotary_embedding_module_init", &muillm_rotary_embedding_module_init_trampoline, "muillm rotary embedding module init", py::arg("engine"), py::arg("layer_idx"), py::arg("cos_cached"), py::arg("sin_cached"));
+  m.def("muillm_rotary_embedding_module_deinit", &muillm_rotary_embedding_module_deinit_trampoline, "muillm rotary embedding module deinit", py::arg("module"));
+  m.def("muillm_rotary_embedding_module_forward", &muillm_rotary_embedding_module_forward_trampoline, "muillm rotary embedding module forward", py::arg("module"), py::arg("cache"), py::arg("q_in"), py::arg("k_in"), py::arg("v_in"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+
+  // parallel attention
   pybind11::class_<muillm_parallel_attention_module_ptr_t> cl_parallel_attention_module(m, "muillm_parallel_attention_module_ptr");
   cl_parallel_attention_module.def(pybind11::init<>());
 
-  m.def("muillm_parallel_attention_module_init", &muillm_parallel_attention_module_init_trampoline, "muillm parallel attention module init", py::arg("engine"), py::arg("comm"), py::arg("o_proj"));
+  m.def("muillm_parallel_attention_module_init", &muillm_parallel_attention_module_init_trampoline, "muillm parallel attention module init", py::arg("engine"), py::arg("comm"), py::arg("rotary"), py::arg("o_proj"), py::arg("num_tp_heads"), py::arg("num_tp_key_value_heads"), py::arg("head_dim"));
   m.def("muillm_parallel_attention_module_deinit", &muillm_parallel_attention_module_deinit_trampoline, "muillm parallel attention module deinit", py::arg("module"));
   m.def("muillm_parallel_attention_module_forward", &muillm_parallel_attention_module_forward_trampoline, "muillm parallel attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none(), py::arg("residual") = py::none());
+  m.def("muillm_parallel_attention_module_rope_forward", &muillm_parallel_attention_module_rope_forward_trampoline, "muillm parallel attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
 }

@@ -84,6 +84,9 @@ class MuiParallelLinear(MuiModule):
             self.sharding_dim
         )
 
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
     def _check_dispatchable(self):
         self.dtype = self.weights[0].dtype
         dispatchable_type = (self.dtype == torch.float16)

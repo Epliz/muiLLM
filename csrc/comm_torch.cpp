@@ -65,6 +65,7 @@ muillm_comm_error_t muillm_all_reduce_sum(
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+  // TODO: is numel slow?
   auto count = tensor.numel();
 
   muillm_comm_datatype_t datatype;
@@ -95,6 +96,7 @@ CHECK_INPUT(tensor);
 
 cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+  // TODO: is numel slow?
 auto count = tensor.numel();
 
 muillm_comm_datatype_t datatype;

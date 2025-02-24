@@ -1,6 +1,7 @@
 import math
 from typing import List, Optional, Tuple, Union
 import warnings
+from muillm.modules.kvcache.cache_utils import MuiCache
 from muillm.modules.multilinear import MuiMultiLinear
 from muillm.modules.parallellinear import MuiParallelLinear
 from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
@@ -24,6 +25,30 @@ from muillm.modules.linear import MuiLinear
 import muillm_ext
 
 logger = logging.get_logger(__name__)
+
+class _MuiParallelAttentionRope(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, module, cache_module, q, k, v, m, residual, position_ids, position_embeddings, cache_positions):
+        output = muillm_ext.muillm_parallel_attention_module_rope_forward(
+            module,
+            cache_module,
+            q,
+            k,
+            v,
+            m,
+            residual,
+            position_ids,
+            position_embeddings,
+            cache_positions
+        )
+
+        ctx.save_for_backward(q, k, v, m)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
 
 class _MuiParallelAttention(torch.autograd.Function):
     @staticmethod
@@ -97,6 +122,12 @@ class MuiParallelBaseAttention(MuiModule):
         # the cpp module will be created at the end of all layer replacements
         self.cpp_module = None
 
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+    def _check_dispatchable(self):
+        self.dispatchable = self.rotary_emb.dispatchable
+
     def finalize_init(self):
         if self.cpp_module is not None:
             muillm_ext.muillm_parallel_attention_module_deinit(self.cpp_module)
@@ -104,7 +135,11 @@ class MuiParallelBaseAttention(MuiModule):
         self.cpp_module = muillm_ext.muillm_parallel_attention_module_init(
             self.cpp_engine,
             self.comms.comms,
-            self.o_proj.cpp_module
+            self.rotary_emb.cpp_module,
+            self.o_proj.cpp_module,
+            self.num_tp_heads,
+            self.num_tp_key_value_heads,
+            self.head_dim,
         )
 
     staticmethod
@@ -173,25 +208,6 @@ class MuiParallelBaseAttention(MuiModule):
 
         bsz, q_len, _ = query_states.size()
 
-        if (q_len == 1):
-            # as q_len is 1, we can avoid the transpose
-            query_states = query_states.view(bsz, self.num_tp_heads, q_len, self.head_dim)
-            key_states = key_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
-            value_states = value_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
-        else:
-            query_states = query_states.view(bsz, q_len, self.num_tp_heads, self.head_dim).transpose(1, 2)
-            key_states = key_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
-            value_states = value_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
-
-        query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
-            query_states,
-            key_states,
-            position_ids,
-            position_embeddings,
-            value_states,
-            past_key_value,
-            cache_position
-        )
         # at this point, we have the following shapes:
         #  q: [B, num_q_heads, T, embed_dim]
         #  k: [B, num_k_heads, S, embed_dim]
@@ -212,8 +228,58 @@ class MuiParallelBaseAttention(MuiModule):
 
             # The mask has shape:
             # M: [B, 1, S, T]
-            attn_output = _MuiParallelAttention.apply(self.cpp_module, query_states, key_states, value_states, attention_mask, residual)
+            
+            if self.dispatchable and isinstance(past_key_value, MuiCache):
+                # can use the C++ module for doing rope + cache write + attention
+                attn_output = _MuiParallelAttentionRope.apply(
+                    self.cpp_module,
+                    past_key_value.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    residual,
+                    position_ids,
+                    position_embeddings,
+                    cache_position,
+                )
+            else:
+                # as q_len is 1, we can avoid the transpose
+                query_states = query_states.view(bsz, self.num_tp_heads, q_len, self.head_dim)
+                key_states = key_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
+                value_states = value_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
+
+                query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                    query_states,
+                    key_states,
+                    position_ids,
+                    position_embeddings,
+                    value_states,
+                    past_key_value,
+                    cache_position
+                )
+                attn_output = _MuiParallelAttention.apply(self.cpp_module, query_states, key_states, value_states, attention_mask, residual)
         else:
+            if (q_len == 1):
+                # as q_len is 1, we can avoid the transpose
+                query_states = query_states.view(bsz, self.num_tp_heads, q_len, self.head_dim)
+                key_states = key_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
+                value_states = value_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
+            else:
+                query_states = query_states.view(bsz, q_len, self.num_tp_heads, self.head_dim).transpose(1, 2)
+                key_states = key_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
+                value_states = value_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
+
+            query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                query_states,
+                key_states,
+                position_ids,
+                position_embeddings,
+                value_states,
+                past_key_value,
+                cache_position
+            )
+
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 

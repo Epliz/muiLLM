@@ -1,11 +1,9 @@
+#include "rotary_kernels.h"
+
 #include <ATen/cuda/CUDAContext.h>
-#include <torch/extension.h>
 
 #include <cuda_fp16.h>
 
-
-#include <stdint.h>
-#include <vector>
 #include <algorithm>
 
 #include <iostream>
@@ -173,7 +171,7 @@ void __global__ apply_rope_kernel_no_cache(
     }
 }
 
-std::vector<at::Tensor> muillm_rope_forward_no_cache(
+std::tuple<at::Tensor, at::Tensor> muillm_rope_forward_no_cache(
     torch::Tensor& position_ids,
     torch::Tensor& cos_cached,
     torch::Tensor& sin_cached,
@@ -265,7 +263,7 @@ std::vector<at::Tensor> muillm_rope_forward_no_cache(
     cache_layout
   );
 
-  return {q_out, k_out};
+  return std::make_tuple(q_out, k_out);
 }
 
 
@@ -487,7 +485,7 @@ void __global__ apply_rope_kernel_write_dynamic_cache(
     }
 }
 
-std::vector<at::Tensor> muillm_rope_forward_dynamic_cache(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> muillm_rope_forward_dynamic_cache(
     torch::Tensor& position_ids,
     torch::Tensor& cos_cached,
     torch::Tensor& sin_cached,
@@ -527,6 +525,7 @@ std::vector<at::Tensor> muillm_rope_forward_dynamic_cache(
 
   auto k_sizes = k_in.sizes().vec();
   auto k_strides = k_in.strides().vec();
+  // TODO: remove this, it is not needed
   auto k_out = torch::empty(k_sizes, output_options);
 
   auto v_sizes = v_in.sizes().vec();
@@ -619,7 +618,7 @@ std::vector<at::Tensor> muillm_rope_forward_dynamic_cache(
     cache_layout
   );
 
-  return {q_out, k_out, k_cache_out, v_cache_out};
+  return std::make_tuple(q_out, k_cache_out, v_cache_out);
 }
 
 
@@ -816,7 +815,7 @@ void __global__ apply_rope_kernel_write_static_cache(
     }
 }
 
-std::vector<at::Tensor> muillm_rope_forward_static_cache(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> muillm_rope_forward_static_cache(
     torch::Tensor& position_ids,
     torch::Tensor& cos_cached,
     torch::Tensor& sin_cached,
@@ -942,5 +941,5 @@ std::vector<at::Tensor> muillm_rope_forward_static_cache(
   auto key_states = k_cache.narrow(/* dim */ 2, /* start */0, /* length */ seen_tokens);
   auto value_states = v_cache.narrow(/* dim */ 2, /* start */ 0, /* length */ seen_tokens);
 
-  return {q_out, key_states, value_states};
+  return std::make_tuple(q_out, key_states, value_states);
 }

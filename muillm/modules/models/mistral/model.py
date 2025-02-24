@@ -3,7 +3,7 @@
 
 from typing import List, Optional, Tuple, Union
 from muillm.modules.attention.sdpaattention import _ignore_causal_mask_sdpa
-from muillm.modules.kvcache.cache_utils import MuiStaticCache, create_static_cache, grow_static_cache_if_needed
+from muillm.modules.kvcache.cache_utils import MuiCache, MuiDynamicCache, MuiStaticCache, create_static_cache, grow_static_cache_if_needed
 import torch
 import torch.nn as nn
 
@@ -211,6 +211,10 @@ class MuiMistralModel(MistralPreTrainedModel):
 
         next_cache = None
         if use_cache:
+            if isinstance(next_decoder_cache, MuiCache):
+                # the C++ module increase the seen tokens counts, and we need the python part to see it too
+                next_decoder_cache.sync_back()
+
             next_cache = next_decoder_cache.to_legacy_cache() if use_legacy_cache else next_decoder_cache
 
         if not return_dict:

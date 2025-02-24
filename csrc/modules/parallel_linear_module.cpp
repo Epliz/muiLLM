@@ -99,6 +99,7 @@ torch::Tensor MuiLLMParallelLinear::forward(
     torch::Tensor& residual,
     bool collect_outputs
 ) {
+  // TODO: is numel slow?
   auto num_elements = inputs.numel();
   if (this->dispatchable && num_elements == inputs.size(inputs.dim() - 1)) {
     return muillm_parallel_linear_activ_forward(

@@ -135,8 +135,10 @@ static at::Tensor muillm_rmsnorm_forward_cuda(
   auto device = x.device();
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
+  // TODO: is numel slow?
   const auto K = weights.numel();
   // batch size
+  // TODO: is numel slow?
   const auto B = x.numel() / K;
 
   auto output_sizes = x.sizes().vec();
