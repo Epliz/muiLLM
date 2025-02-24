@@ -58,6 +58,16 @@ static inline const T* __device__ addr(const T* p, unsigned index) {
   return (const T*) (p8 + byte_offset);
 }
 
+__device__ float4 load_nontemporal_float4(const float* p) {
+  float x = __builtin_nontemporal_load(p);
+  float y = __builtin_nontemporal_load(p + 1);
+  float z = __builtin_nontemporal_load(p + 2);
+  float w = __builtin_nontemporal_load(p + 3);
+
+  float4 v = make_float4(x, y, z, w);
+  return v;
+}
+
 #define DIV_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 #define ALIGN_UP(a, b) (DIV_ROUND_UP((a), (b)) * (b))
 
@@ -355,6 +365,57 @@ void float4_bandwidth(
 }
 
 
+__global__ void float4_nt_bandwidth_kernel(
+  const float* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+  int tid = blockIdx.x * FLOAT4_ELEMENTS_PER_BLOCK + (4 * threadIdx.x);
+
+
+  __shared__ float shared_accs[8];
+
+
+  float r = 0.f;
+  if (tid + 3 < N) {
+    float4 v = load_nontemporal_float4(&A[tid]);
+    float vxy = (v.x + v.y);
+    float vzw = (v.z + v.w);
+    r = vxy + vzw;
+  }
+
+  r = warpReduce(r);
+
+  if (laneId == 0) {
+    shared_accs[warpId] = r;
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
+  }
+}
+
+void float4_nt_bandwidth(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(N, FLOAT4_ELEMENTS_PER_BLOCK);
+  float4_nt_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, N);
+}
+
 #define FLOAT8_ELEMENTS_PER_THREAD 8
 #define FLOAT8_ELEMENTS_PER_WARP (FLOAT8_ELEMENTS_PER_THREAD * warpSize)
 #define FLOAT8_ELEMENTS_PER_BLOCK ((THREADS_PER_BLOCK) * (FLOAT8_ELEMENTS_PER_THREAD))
@@ -511,18 +572,6 @@ void float8_clause_bandwidth(
   const int threads_per_blocks = THREADS_PER_BLOCK;
   const int num_blocks = DIV_ROUND_UP(N, FLOAT8_ELEMENTS_PER_BLOCK);
   float8_clause_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, N);
-}
-
-typedef float mui_float4 __attribute__((vector_size(4)));
-
-__device__ float4 load_nontemporal_float4(const float* p) {
-  float x = __builtin_nontemporal_load(p);
-  float y = __builtin_nontemporal_load(p + 1);
-  float z = __builtin_nontemporal_load(p + 2);
-  float w = __builtin_nontemporal_load(p + 3);
-
-  float4 v = make_float4(x, y, z, w);
-  return v;
 }
 
 __global__ void float8_nt_bandwidth_kernel(
@@ -849,6 +898,7 @@ int main(int argc, char** argv) {
     KERNEL_WITH_NAME(float2_bandwidth),
     KERNEL_WITH_NAME(float4_empty_bandwidth),
     KERNEL_WITH_NAME(float4_bandwidth),
+    KERNEL_WITH_NAME(float4_nt_bandwidth),
     KERNEL_WITH_NAME(float8_empty_bandwidth),
     KERNEL_WITH_NAME(float8_bandwidth),
     KERNEL_WITH_NAME(float8_clause_bandwidth),

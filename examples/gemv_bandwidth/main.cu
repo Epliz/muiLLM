@@ -58,6 +58,16 @@ static inline const T* __device__ addr(const T* p, unsigned index) {
   return (const T*) (p8 + byte_offset);
 }
 
+__device__ float4 load_nontemporal_float4(const float* p) {
+  float x = __builtin_nontemporal_load(p);
+  float y = __builtin_nontemporal_load(p + 1);
+  float z = __builtin_nontemporal_load(p + 2);
+  float w = __builtin_nontemporal_load(p + 3);
+
+  float4 v = make_float4(x, y, z, w);
+  return v;
+}
+
 #define DIV_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 #define ALIGN_UP(a, b) (DIV_ROUND_UP((a), (b)) * (b))
 
@@ -172,6 +182,62 @@ void float8_bandwidth(
   float8_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, 2* N * M);
 }
 
+__global__ void float8_nt_bandwidth_kernel(
+  const float* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+  int tid = blockIdx.x * FLOAT8_ELEMENTS_PER_BLOCK + (4 * threadIdx.x);
+
+
+  __shared__ float shared_accs[8];
+
+
+  float r = 0.f;
+  if ((blockIdx.x + 1) * FLOAT8_ELEMENTS_PER_BLOCK <= N) {
+    unsigned off = tid;
+    float4 v0 = load_nontemporal_float4(addr(A, off));
+    off += 4 * THREADS_PER_BLOCK;
+    float4 v1 = load_nontemporal_float4(addr(A, off));
+
+    float4 v01 = v0 + v1;
+
+    r = v01.x + v01.y + v01.z + v01.w;
+  }
+
+  r = warpReduce(r);
+
+  if (laneId == 0) {
+    shared_accs[warpId] = r;
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    float v = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs[0] + shared_accs[1]) + (shared_accs[2] + shared_accs[3]);
+    }
+    *out_flag = (v > 0.f);
+  }
+}
+
+void float8_nt_bandwidth(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N,
+  unsigned M
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(2 * N * M, FLOAT8_ELEMENTS_PER_BLOCK);
+  float8_nt_bandwidth_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (bool*)out_flag, 2* N * M);
+}
+
 // GEMV 
 #define ROWS_PER_BLOCK 4
 
@@ -280,6 +346,111 @@ void float4_gemv(
   float4_gemv_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (const float*) A + (N * M), (bool*)out_flag, M);
 }
 
+
+__global__ void float4_nt_gemv_kernel(
+  const float* __restrict__ A,
+  const float* __restrict__ B,
+  bool* __restrict__ out_flag,
+  unsigned M // number of columns
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+
+  int row = blockIdx.x * ROWS_PER_BLOCK;
+
+  const float* __restrict__ A0 = &A[(row + 0) * M];
+  const float* __restrict__ A1 = &A[(row + 1) * M];
+  const float* __restrict__ A2 = &A[(row + 2) * M];
+  const float* __restrict__ A3 = &A[(row + 3) * M];
+
+  const float* __restrict__ B0 = &B[(row + 0) * M];
+  const float* __restrict__ B1 = &B[(row + 1) * M];
+  const float* __restrict__ B2 = &B[(row + 2) * M];
+  const float* __restrict__ B3 = &B[(row + 3) * M];
+
+  __shared__ float shared_accs_a[8][ROWS_PER_BLOCK];
+  __shared__ float shared_accs_b[8][ROWS_PER_BLOCK];
+
+  float a0 = 0.f;
+  float a1 = 0.f;
+  float a2 = 0.f;
+  float a3 = 0.f;
+
+  float b0 = 0.f;
+  float b1 = 0.f;
+  float b2 = 0.f;
+  float b3 = 0.f;
+  for (int off = (4 * threadIdx.x); off + 3 < M; off += 4 * THREADS_PER_BLOCK) {
+    float4 v0 = load_nontemporal_float4(addr(A0, off));
+    float4 p0 = load_nontemporal_float4(addr(B0, off));
+
+    float4 v1 = load_nontemporal_float4(addr(A1, off));
+    float4 p1 = load_nontemporal_float4(addr(B1, off));
+
+    float4 v2 = load_nontemporal_float4(addr(A2, off));
+    float4 p2 = load_nontemporal_float4(addr(B2, off));
+
+    float4 v3 = load_nontemporal_float4(addr(A3, off));
+    float4 p3 = load_nontemporal_float4(addr(B3, off));
+
+    a0 += (v0.x + v0.z) + (v0.y + v0.w);
+    a1 += (v1.x + v1.z) + (v1.y + v1.w);
+    a2 += (v2.x + v2.z) + (v2.y + v2.w);
+    a3 += (v3.x + v3.z) + (v3.y + v3.w);
+
+    b0 += (p0.x + p0.z) + (p0.y + p0.w);
+    b1 += (p1.x + p1.z) + (p1.y + p1.w);
+    b2 += (p2.x + p2.z) + (p2.y + p2.w);
+    b3 += (p3.x + p3.z) + (p3.y + p3.w);
+  }
+
+  a0 = warpReduce(a0);
+  a1 = warpReduce(a1);
+  a2 = warpReduce(a2);
+  a3 = warpReduce(a3);
+
+  b0 = warpReduce(b0);
+  b1 = warpReduce(b1);
+  b2 = warpReduce(b2);
+  b3 = warpReduce(b3);
+
+  if (laneId == 0) {
+    shared_accs_a[warpId][0] = a0;
+    shared_accs_a[warpId][1] = a1;
+    shared_accs_a[warpId][2] = a2;
+    shared_accs_a[warpId][3] = a3;
+    shared_accs_b[warpId][0] = b0;
+    shared_accs_b[warpId][1] = b1;
+    shared_accs_b[warpId][2] = b2;
+    shared_accs_b[warpId][3] = b3;
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x < ROWS_PER_BLOCK) {
+    float v = 0.f;
+    float p = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs_a[0][threadIdx.x] + shared_accs_a[1][threadIdx.x]) + (shared_accs_a[2][threadIdx.x] + shared_accs_a[3][threadIdx.x]);
+      p = (shared_accs_b[0][threadIdx.x] + shared_accs_b[1][threadIdx.x]) + (shared_accs_b[2][threadIdx.x] + shared_accs_b[3][threadIdx.x]);
+    }
+    *out_flag = (v * p > 0.f);
+  }
+}
+
+void float4_nt_gemv(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N,
+  unsigned M
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(N, ROWS_PER_BLOCK);
+  float4_nt_gemv_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (const float*) A + (N * M), (bool*)out_flag, M);
+}
 
 __global__ void float8_gemv_kernel(
   const float* __restrict__ A,
@@ -429,6 +600,153 @@ void float8_gemv(
 }
 
 
+__global__ void float8_nt_gemv_kernel(
+  const float* __restrict__ A,
+  const float* __restrict__ B,
+  bool* __restrict__ out_flag,
+  unsigned M // number of columns
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+
+  int row = blockIdx.x * ROWS_PER_BLOCK;
+
+  const float* __restrict__ A0 = &A[(row + 0) * M];
+  const float* __restrict__ A1 = &A[(row + 1) * M];
+  const float* __restrict__ A2 = &A[(row + 2) * M];
+  const float* __restrict__ A3 = &A[(row + 3) * M];
+
+  const float* __restrict__ B0 = &B[(row + 0) * M];
+  const float* __restrict__ B1 = &B[(row + 1) * M];
+  const float* __restrict__ B2 = &B[(row + 2) * M];
+  const float* __restrict__ B3 = &B[(row + 3) * M];
+
+  __shared__ float shared_accs_a[8][ROWS_PER_BLOCK];
+  __shared__ float shared_accs_b[8][ROWS_PER_BLOCK];
+
+  float a0 = 0.f;
+  float a1 = 0.f;
+  float a2 = 0.f;
+  float a3 = 0.f;
+
+  float b0 = 0.f;
+  float b1 = 0.f;
+  float b2 = 0.f;
+  float b3 = 0.f;
+
+  int off = (4 * threadIdx.x);
+  for (; off + 4 * THREADS_PER_BLOCK + 3 < M; off += 8 * THREADS_PER_BLOCK) {
+    float4 v0_0 = load_nontemporal_float4(addr(A0, off));
+    float4 v0_1 = load_nontemporal_float4(addr(A0, off + 4 * THREADS_PER_BLOCK));
+    float4 v0 = v0_0 + v0_1;
+    float4 p0_0 = load_nontemporal_float4(addr(B0, off));
+    float4 p0_1 = load_nontemporal_float4(addr(B0, off + 4 * THREADS_PER_BLOCK));
+    float4 p0 = p0_0 + p0_1;
+
+    float4 v1_0 = load_nontemporal_float4(addr(A1, off));
+    float4 v1_1 = load_nontemporal_float4(addr(A1, off + 4 * THREADS_PER_BLOCK));
+    float4 v1 = v1_0 + v1_1;
+    float4 p1_0 = load_nontemporal_float4(addr(B1, off));
+    float4 p1_1 = load_nontemporal_float4(addr(B1, off + 4 * THREADS_PER_BLOCK));
+    float4 p1 = p1_0 + p1_1;
+
+    float4 v2_0 = load_nontemporal_float4(addr(A2, off));
+    float4 v2_1 = load_nontemporal_float4(addr(A2, off + 4 * THREADS_PER_BLOCK));
+    float4 v2 = v2_0 + v2_1;
+    float4 p2_0 = load_nontemporal_float4(addr(B2, off));
+    float4 p2_1 = load_nontemporal_float4(addr(B2, off + 4 * THREADS_PER_BLOCK));
+    float4 p2 = p2_0 + p2_1;
+
+    float4 v3_0 = load_nontemporal_float4(addr(A3, off));
+    float4 v3_1 = load_nontemporal_float4(addr(A3, off + 4 * THREADS_PER_BLOCK));
+    float4 v3 = v3_0 + v3_1;
+    float4 p3_0 = load_nontemporal_float4(addr(B3, off));
+    float4 p3_1 = load_nontemporal_float4(addr(B3, off + 4 * THREADS_PER_BLOCK));
+    float4 p3 = p3_0 + p3_1;
+
+    a0 += (v0.x + v0.z) + (v0.y + v0.w);
+    a1 += (v1.x + v1.z) + (v1.y + v1.w);
+    a2 += (v2.x + v2.z) + (v2.y + v2.w);
+    a3 += (v3.x + v3.z) + (v3.y + v3.w);
+
+    b0 += (p0.x + p0.z) + (p0.y + p0.w);
+    b1 += (p1.x + p1.z) + (p1.y + p1.w);
+    b2 += (p2.x + p2.z) + (p2.y + p2.w);
+    b3 += (p3.x + p3.z) + (p3.y + p3.w);
+  }
+
+  if (off + 3 < M) {
+    float4 v0 = load_nontemporal_float4(addr(A0, off));
+    float4 p0 = load_nontemporal_float4(addr(B0, off));
+
+    float4 v1 = load_nontemporal_float4(addr(A1, off));
+    float4 p1 = load_nontemporal_float4(addr(B1, off));
+
+    float4 v2 = load_nontemporal_float4(addr(A2, off));
+    float4 p2 = load_nontemporal_float4(addr(B2, off));
+
+    float4 v3 = load_nontemporal_float4(addr(A3, off));
+    float4 p3 = load_nontemporal_float4(addr(B3, off));
+
+    a0 += (v0.x + v0.z) + (v0.y + v0.w);
+    a1 += (v1.x + v1.z) + (v1.y + v1.w);
+    a2 += (v2.x + v2.z) + (v2.y + v2.w);
+    a3 += (v3.x + v3.z) + (v3.y + v3.w);
+
+    b0 += (p0.x + p0.z) + (p0.y + p0.w);
+    b1 += (p1.x + p1.z) + (p1.y + p1.w);
+    b2 += (p2.x + p2.z) + (p2.y + p2.w);
+    b3 += (p3.x + p3.z) + (p3.y + p3.w);
+  }
+
+  a0 = warpReduce(a0);
+  a1 = warpReduce(a1);
+  a2 = warpReduce(a2);
+  a3 = warpReduce(a3);
+
+  b0 = warpReduce(b0);
+  b1 = warpReduce(b1);
+  b2 = warpReduce(b2);
+  b3 = warpReduce(b3);
+
+  if (laneId == 0) {
+    shared_accs_a[warpId][0] = a0;
+    shared_accs_a[warpId][1] = a1;
+    shared_accs_a[warpId][2] = a2;
+    shared_accs_a[warpId][3] = a3;
+    shared_accs_b[warpId][0] = b0;
+    shared_accs_b[warpId][1] = b1;
+    shared_accs_b[warpId][2] = b2;
+    shared_accs_b[warpId][3] = b3;
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x < ROWS_PER_BLOCK) {
+    float v = 0.f;
+    float p = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs_a[0][threadIdx.x] + shared_accs_a[1][threadIdx.x]) + (shared_accs_a[2][threadIdx.x] + shared_accs_a[3][threadIdx.x]);
+      p = (shared_accs_b[0][threadIdx.x] + shared_accs_b[1][threadIdx.x]) + (shared_accs_b[2][threadIdx.x] + shared_accs_b[3][threadIdx.x]);
+    }
+    *out_flag = (v * p > 0.f);
+  }
+}
+
+void float8_nt_gemv(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N,
+  unsigned M
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(N, ROWS_PER_BLOCK);
+  float8_nt_gemv_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (const float*) A + (N * M), (bool*)out_flag, M);
+}
+
 __global__ void float8_r1_gemv_kernel(
   const float* __restrict__ A,
   const float* __restrict__ B,
@@ -511,6 +829,88 @@ void float8_r1_gemv(
   float8_r1_gemv_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (const float*) A + (N * M), (bool*)out_flag, M);
 }
 
+__global__ void float8_r1_nt_gemv_kernel(
+  const float* __restrict__ A,
+  const float* __restrict__ B,
+  bool* __restrict__ out_flag,
+  unsigned M // number of columns
+) {
+  int warpCounts = THREADS_PER_BLOCK / warpSize;
+  int warpId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+
+  int row = blockIdx.x;
+
+  const float* __restrict__ A0 = &A[(row + 0) * M];
+  const float* __restrict__ B0 = &B[(row + 0) * M];
+
+  __shared__ float shared_accs_a[8][1];
+  __shared__ float shared_accs_b[8][1];
+
+  float a0 = 0.f;
+  float b0 = 0.f;
+
+  int off = (4 * threadIdx.x);
+  for (; off + 4 * THREADS_PER_BLOCK + 3 < M; off += 8 * THREADS_PER_BLOCK) {
+    float4 v0_0 = load_nontemporal_float4(addr(A0, off));
+    float4 v0_1 = load_nontemporal_float4(addr(A0, off + 4 * THREADS_PER_BLOCK));
+
+    float4 v0 = v0_0 + v0_1;
+
+    a0 += (v0.x + v0.z) + (v0.y + v0.w);
+
+
+    float4 p0_0 = load_nontemporal_float4(addr(B0, off));
+    float4 p0_1 = load_nontemporal_float4(addr(B0, off + 4 * THREADS_PER_BLOCK));
+
+    float4 p0 = p0_0 + p0_1;
+
+    b0 += (p0.x + p0.z) + (p0.y + p0.w);
+  }
+
+  if (off + 3 < M) {
+    float4 v0 = load_nontemporal_float4(addr(A0, off));
+
+    float4 p0 = load_nontemporal_float4(addr(B0, off));
+
+    a0 += (v0.x + v0.z) + (v0.y + v0.w);
+    b0 += (p0.x + p0.z) + (p0.y + p0.w);
+  }
+
+  a0 = warpReduce(a0);
+  b0 = warpReduce(b0);
+
+  if (laneId == 0) {
+    shared_accs_a[warpId][0] = a0;
+    shared_accs_b[warpId][0] = b0;
+  }
+
+  if (THREADS_PER_BLOCK > warpSize) {
+    __syncthreads();
+  }
+
+  if (threadIdx.x < 1) {
+    float v = 0.f;
+    float p = 0.f;
+    if ((THREADS_PER_BLOCK / warpSize) == 4) {
+      v = (shared_accs_a[0][threadIdx.x] + shared_accs_a[1][threadIdx.x]) + (shared_accs_a[2][threadIdx.x] + shared_accs_a[3][threadIdx.x]);
+      p = (shared_accs_b[0][threadIdx.x] + shared_accs_b[1][threadIdx.x]) + (shared_accs_b[2][threadIdx.x] + shared_accs_b[3][threadIdx.x]);
+    }
+    *out_flag = (v * p > 0.f);
+  }
+}
+
+void float8_r1_nt_gemv(
+  const void* __restrict__ A,
+  bool* __restrict__ out_flag,
+  unsigned N,
+  unsigned M
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = N;
+  float8_r1_nt_gemv_kernel<<<num_blocks, threads_per_blocks>>>((const float*)A, (const float*) A + (N * M), (bool*)out_flag, M);
+}
+
 typedef void (*KERNEL_FUNC_PTR)(
   const void* __restrict__ A,
   bool* __restrict__ out_flag,
@@ -574,9 +974,13 @@ int main(int argc, char** argv) {
   std::vector<NamedKernel> kernels = {
     KERNEL_WITH_NAME(float8_empty_bandwidth),
     KERNEL_WITH_NAME(float8_bandwidth),
+    KERNEL_WITH_NAME(float8_nt_bandwidth),
     KERNEL_WITH_NAME(float4_gemv),
+    KERNEL_WITH_NAME(float4_nt_gemv),
     KERNEL_WITH_NAME(float8_gemv),
-    KERNEL_WITH_NAME(float8_r1_gemv)
+    KERNEL_WITH_NAME(float8_nt_gemv),
+    KERNEL_WITH_NAME(float8_r1_gemv),
+    KERNEL_WITH_NAME(float8_r1_nt_gemv)
   };
 
 
