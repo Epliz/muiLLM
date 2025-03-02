@@ -191,6 +191,7 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "modules/parallel_linear_module.h"
 #include "modules/parallel_gateup_module.h"
 #include "modules/parallel_attention_module.h"
+#include "modules/parallel_decoder_module.h"
 
 #include "parallel_gateup_kernels.cuh"
 
@@ -295,4 +296,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_parallel_attention_module_deinit", &muillm_parallel_attention_module_deinit_trampoline, "muillm parallel attention module deinit", py::arg("module"));
   m.def("muillm_parallel_attention_module_forward", &muillm_parallel_attention_module_forward_trampoline, "muillm parallel attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none(), py::arg("residual") = py::none());
   m.def("muillm_parallel_attention_module_rope_forward", &muillm_parallel_attention_module_rope_forward_trampoline, "muillm parallel attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+
+  // parallel decoder
+  pybind11::class_<muillm_parallel_decoder_module_ptr_t> cl_parallel_decoder_module(m, "muillm_parallel_decoder_module_ptr");
+  cl_parallel_decoder_module.def(pybind11::init<>());
+
+  m.def("muillm_parallel_decoder_module_init", &muillm_parallel_decoder_module_init_trampoline, "muillm parallel decoder module init", py::arg("engine"), py::arg("comm"), py::arg("attention"), py::arg("mlp"));
+  m.def("muillm_parallel_decoder_module_deinit", &muillm_parallel_decoder_module_deinit_trampoline, "muillm parallel decoder module deinit", py::arg("module"));
+  m.def("muillm_parallel_decoder_module_forward", &muillm_parallel_decoder_module_forward, "muillm parallel decoder module forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
 }
