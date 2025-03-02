@@ -95,7 +95,7 @@ at::Tensor muillm_parallel_attention_module_rope_forward_trampoline(
   torch::Tensor& q,
   torch::Tensor& k,
   torch::Tensor& v,
-  torch::Tensor& m,
+  std::optional<torch::Tensor>& m,
   torch::Tensor& residual,
   torch::Tensor& position_ids,
   std::optional<std::tuple<torch::Tensor, torch::Tensor>>& cos_sin,
