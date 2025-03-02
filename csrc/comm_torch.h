@@ -18,9 +18,9 @@ muillm_comm_error_t muillm_broadcast(
 
 
 // needed because Pybind11 can't seem to be able to deal with opaque pointers
-struct muillm_comm_ptr {
+typedef struct muillm_comm_ptr {
     muillm_comm_t* comm_ptr;
-  };
+} muillm_comm_ptr_t;
   
 muillm_comm_ptr muillm_comm_init_trampoline(
     muillm_engine_ptr engine,

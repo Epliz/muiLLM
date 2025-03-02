@@ -189,77 +189,10 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "parallel_linear_kernels.cuh"
 
 #include "modules/parallel_linear_module.h"
-
+#include "modules/parallel_gateup_module.h"
 #include "modules/parallel_attention_module.h"
 
-// parallel Gate/Up Silu (FFN)
-at::Tensor muillm_parallel_gateupsilu_forward(
-    muillm_engine_t* engine,
-    muillm_comm_t* comm,
-    torch::Tensor& norm_weights,
-    float epsilon,
-    torch::Tensor& gate_weights,
-    torch::Tensor& up_weights,
-    torch::Tensor& down_weights,
-    torch::Tensor& residual,
-    torch::Tensor& x);
-
-at::Tensor muillm_parallel_gateupsilu_split_forward(
-    muillm_engine_t* engine,
-    muillm_comm_t* comm,
-    torch::Tensor& norm_weights,
-    float epsilon,
-    torch::Tensor& gate_weights,
-    torch::Tensor& up_weights,
-    torch::Tensor& down_weights,
-    torch::Tensor& residual,
-    torch::Tensor& x);
-
-at::Tensor muillm_parallel_gateupsilu_forward_trampoline(
-    muillm_engine_ptr engine,
-    muillm_comm_ptr comm,
-    torch::Tensor norm_weights,
-    float epsilon,
-    torch::Tensor gate_weights,
-    torch::Tensor up_weights,
-    torch::Tensor down_weights,
-    torch::Tensor residual,
-    torch::Tensor x) {
-  return muillm_parallel_gateupsilu_forward(
-    engine.engine_ptr,
-    comm.comm_ptr,
-    norm_weights,
-    epsilon,
-    gate_weights,
-    up_weights,
-    down_weights,
-    residual,
-    x
-  );
-}
-
-at::Tensor muillm_parallel_gateupsilu_split_forward_trampoline(
-    muillm_engine_ptr engine,
-    muillm_comm_ptr comm,
-    torch::Tensor norm_weights,
-    float epsilon,
-    torch::Tensor gate_weights,
-    torch::Tensor up_weights,
-    torch::Tensor down_weights,
-    torch::Tensor residual,
-    torch::Tensor x) {
-  return muillm_parallel_gateupsilu_split_forward(
-    engine.engine_ptr,
-    comm.comm_ptr,
-    norm_weights,
-    epsilon,
-    gate_weights,
-    up_weights,
-    down_weights,
-    residual,
-    x
-  );
-}
+#include "parallel_gateup_kernels.cuh"
 
 #include "modules/kvcache.h"
 #include "modules/static_kvcache.h"
@@ -323,6 +256,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_parallel_linear_module_init", &muillm_parallel_linear_module_init_trampoline, "muillm parallel linear module init", py::arg("engine"), py::arg("comm"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("sharding_dim") = 1);
   m.def("muillm_parallel_linear_module_deinit", &muillm_parallel_linear_module_deinit_trampoline, "muillm parallel linear module deinit", py::arg("module"));
   m.def("muillm_parallel_linear_module_forward", &muillm_parallel_linear_module_forward_trampoline, "muillm parallel linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("reduce") = false);
+
+  // parallel gateup/down mlp
+  pybind11::class_<muillm_parallel_gateupdownmlp_module_ptr_t> cl_parallel_gateupdownmlp_module(m, "muillm_parallel_gateupdownmlp_module_ptr");
+  m.def("muillm_parallel_gateupdownmlp_module_init", &muillm_parallel_gateupdownmlp_module_init_trampoline, "muillm parallel gateupdown mlp module init", py::arg("engine"), py::arg("comm"), py::arg("method"), py::arg("norm_weights"), py::arg("gate_weights"), py::arg("up_weights"), py::arg("down_weights"), py::arg("variance_epsilon"));
+  m.def("muillm_parallel_gateupdownmlp_module_deinit", &muillm_parallel_gateupdownmlp_module_deinit_trampoline, "muillm parallel gateupdown mlp module deinit", py::arg("module"));
+  m.def("muillm_parallel_gateupdownmlp_module_forward", &muillm_parallel_gateupdownmlp_module_forward_trampoline, "muillm parallel gateupdown mlp module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none());
 
   // KV cache
   pybind11::class_<muillm_kvcache_module_ptr_t> cl_kvcache_module(m, "muillm_kvcache_module_ptr");

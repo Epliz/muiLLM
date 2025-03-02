@@ -1,9 +1,7 @@
+#include "parallel_gateup_kernels.cuh"
 #include "parallel_linear_kernels.cuh"
-#include "comm.h"
 
 #include <ATen/cuda/CUDAContext.h>
-
-#include <iostream>
 
 //
 // Python trampolines

@@ -71,7 +71,9 @@ setup(
             'csrc/modules/rotary_module.cpp',
             # parallel modules
             'csrc/modules/parallel_linear_module.cpp',
+            'csrc/modules/parallel_gateup_module.cpp',
             'csrc/modules/parallel_attention_module.cpp',
+            'csrc/modules/parallel_decoder_module.cpp',
             # other
             'csrc/engine.cpp',
             'csrc/gpu_info.cpp',
