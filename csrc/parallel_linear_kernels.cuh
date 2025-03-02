@@ -1,11 +1,13 @@
 #ifndef __MUILLM_PARALLEL_LINEAR_KERNELS_CUH__
 #define __MUILLM_PARALLEL_LINEAR_KERNELS_CUH__
 
-#include "linear_kernels.cuh"
 #include "engine.h"
 #include "comm_torch.h"
+#include "linear_kernels.cuh" // for activation enum
 
-#include <vector>
+#include <optional>
+
+#include <torch/extension.h>
 
 at::Tensor muillm_parallel_linear_activ_forward(
     muillm_engine_t* engine,

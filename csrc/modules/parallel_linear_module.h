@@ -4,6 +4,7 @@
 #include "../engine.h"
 #include "../comm_torch.h"
 
+#include <optional>
 
 #include <torch/torch.h>
 

@@ -1,4 +1,4 @@
-from enum import Enum
+from enum import IntEnum
 import math
 from typing import List, Optional, Union
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
@@ -16,7 +16,7 @@ from transformers.models.llama.modeling_llama import LlamaMLP, LlamaRMSNorm
 from muillm.modules.rmsnorm import _MuiRMSNorm
 import muillm_ext
 
-class _MuiParallelGateUpSiLUMethod(Enum):
+class _MuiParallelGateUpSiLUMethod(IntEnum):
     # Basic method where Gate/Up projections + mul are done distinctly
     GATEUPSILU_UNFUSED = 0
     # Method where the Gate/Up projections + mul are all fused
@@ -28,29 +28,16 @@ class _MuiParallelGateUpSiLUMethod(Enum):
 
 class _MuiParallelGateUpSiLU(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, engine, comm, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
-        output = muillm_ext.muillm_parallel_gateupsilu_forward(engine, comm.comms, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
+    def forward(ctx, module, inputs, residual):
+        output = muillm_ext.muillm_parallel_gateupdownmlp_module_forward(module, inputs, residual)
 
-        ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual)
+        ctx.save_for_backward(inputs, residual)
 
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         raise NotImplementedError("GateUpSiLU backward is not implemented")
-
-class _MuiParallelGateUpSiLUSplit(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, engine, comm, inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual):
-        output = muillm_ext.muillm_parallel_gateupsilu_split_forward(engine, comm.comms, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual, inputs)
-
-        ctx.save_for_backward(inputs, norm_weights, variance_epsilon, gate_weights, up_weights, down_weights, residual)
-
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        raise NotImplementedError("GateUpSiLU split K backward is not implemented")
 
 class MuiParallelGateUpDownMLP(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, hidden_size: int, intermediate_size: int, activation_function: nn.Module, variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
@@ -75,8 +62,31 @@ class MuiParallelGateUpDownMLP(MuiModule):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
+        # the cpp module will be created at the end of all layer replacements
+        self.cpp_module = None
+
         # TODO: improve method selection
         self.method = _MuiParallelGateUpSiLUMethod.GATEUPSILU_FUSED
+
+    def finalize_init(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_gateupdownmlp_module_deinit(self.cpp_module)
+
+        norm_weights = self.norm_weights[0] if self.norm_weights is not None else None
+
+        self.cpp_module = muillm_ext.muillm_parallel_gateupdownmlp_module_init(
+            self.cpp_engine,
+            self.comms.comms,
+            int(self.method),
+            norm_weights,
+            self.gate_proj.weights[0],
+            self.up_proj.weights[0],
+            self.down_proj.weights[0],
+            self.variance_epsilon,
+        )
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
 
     def _check_dispatchable(self):
         wdtype = self.gate_proj.dtype
@@ -152,17 +162,12 @@ class MuiParallelGateUpDownMLP(MuiModule):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
+        self.finalize_init()
+
     def __collect_outputs(self, tensor: Tensor) -> Tensor:
         return MuiParallelLinear._collect_outputs(self.engine_config, tensor, sharding_dim=1)
 
-    def _parallel_forward_unfused(self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None) -> List[Tensor]:
-        sharded_inputs = isinstance(inputs, list)
-        if sharded_inputs:
-            inputs = inputs[0]
-        else:
-            raise ValueError("not implemented")
-
-        # else: # not dispatchable or not MuiLinear
+    def _parallel_forward_unfused(self, inputs: Tensor, residual: Optional[Tensor] = None) -> List[Tensor]:
         if self.normalize:
             norm_weights = self.norm_weights[0] if self.norm_weights is not None else None
             inputs = _MuiRMSNorm.apply(inputs, norm_weights, self.variance_epsilon)
@@ -176,63 +181,18 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
         return outputs
 
-    def _parallel_forward_fused(self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None) -> List[Tensor]:
-        sharded_inputs = isinstance(inputs, list)
-        if sharded_inputs:
-            inputs = inputs[0]
-        else:
-            raise ValueError("not implemented")
-
-        if self.dispatchable and (inputs.numel() == inputs.shape[-1]):
-            # input is effectively 1D, and we support the type
-
-            # Also check that we don't have quantized linear
-            if isinstance(self.gate_proj, MuiParallelLinear) and isinstance(self.up_proj, MuiParallelLinear):
-                norm_weights = self.norm_weights[0] if self.norm_weights is not None else None
-                # the kernel handles residual or not
-                output = _MuiParallelGateUpSiLU.apply(self.cpp_engine, self.comms, inputs, norm_weights, self.variance_epsilon, self.gate_proj.weights[0], self.up_proj.weights[0], self.down_proj.weights[0], residual)
-
-                return [output]
-
-        # else: # not dispatchable or not MuiLinear
-        return self._parallel_forward_unfused(inputs=[inputs], residual=residual)
-
-    def _parallel_forward_split(self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None) -> List[Tensor]:
-        sharded_inputs = isinstance(inputs, list)
-        if sharded_inputs:
-            inputs = inputs[0]
-        else:
-            raise ValueError("not implemented")
-
-        if self.dispatchable and (inputs.numel() == inputs.shape[-1]):
-            # input is effectively 1D, and we support the type
-
-            # Also check that we don't have quantized linear
-            if isinstance(self.gate_proj, MuiParallelLinear) and isinstance(self.up_proj, MuiParallelLinear):
-                # we shard gate/up by rows so that we can still use the fused kernel and
-                # the all_reduce from the gate/up linears can be avoided
-
-                # as we shard gate/up by rows, we don't need to shard the input and we
-                # still can use the fused RMSNorm
-                norm_weights = self.norm_weights[0] if self.norm_weights is not None else None
-                # the kernel handles residual or not
-                output = _MuiParallelGateUpSiLUSplit.apply(self.cpp_engine, self.comms, inputs, norm_weights, self.variance_epsilon, self.gate_proj.weights[0], self.up_proj.weights[0], self.down_proj.weights[0], residual)
-
-                return [output]
-
-        # else: # not dispatchable or not MuiLinear
-        return self._parallel_forward_unfused(inputs=[inputs], residual=residual)
-
-
     def parallel_forward(self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None) -> List[Tensor]:
-        if self.method == _MuiParallelGateUpSiLUMethod.GATEUPSILU_FUSED:
-            return self._parallel_forward_fused(inputs=inputs, residual=residual)
-        elif self.method == _MuiParallelGateUpSiLUMethod.GATEUPSILU_UNFUSED:
-            return self._parallel_forward_unfused(inputs=inputs, residual=residual)
-        elif self.method == _MuiParallelGateUpSiLUMethod.GATEUPSILU_SPLIT:
-            return self._parallel_forward_split(inputs=inputs, residual=residual)
+        sharded_inputs = isinstance(inputs, list)
+        if sharded_inputs:
+            inputs = inputs[0]
         else:
-            raise ValueError("Unsupported Gate/Up Silu method")
+            raise ValueError("not implemented")
+            
+        if self.dispatchable and (inputs.numel() == inputs.shape[-1]):
+            output = _MuiParallelGateUpSiLU.apply(self.cpp_module, inputs, residual)
+            return [output]
+        else:
+            return self._parallel_forward_unfused(inputs=inputs, residual=residual)
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.tensor_parallelism > 1:

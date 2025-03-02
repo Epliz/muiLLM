@@ -1,5 +1,5 @@
 #include "gateup_kernels.cuh"
-#include "comm.h"
+#include "comm_torch.h"
 
 #include <ATen/cuda/CUDAContext.h>
 
@@ -162,4 +162,50 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
   }
 
   return output;
+}
+
+at::Tensor muillm_parallel_gateupsilu_forward_trampoline(
+  muillm_engine_ptr engine,
+  muillm_comm_ptr comm,
+  torch::Tensor norm_weights,
+  float epsilon,
+  torch::Tensor gate_weights,
+  torch::Tensor up_weights,
+  torch::Tensor down_weights,
+  torch::Tensor residual,
+  torch::Tensor x) {
+  return muillm_parallel_gateupsilu_forward(
+    engine.engine_ptr,
+    comm.comm_ptr,
+    norm_weights,
+    epsilon,
+    gate_weights,
+    up_weights,
+    down_weights,
+    residual,
+    x
+  );
+}
+
+at::Tensor muillm_parallel_gateupsilu_split_forward_trampoline(
+  muillm_engine_ptr engine,
+  muillm_comm_ptr comm,
+  torch::Tensor norm_weights,
+  float epsilon,
+  torch::Tensor gate_weights,
+  torch::Tensor up_weights,
+  torch::Tensor down_weights,
+  torch::Tensor residual,
+  torch::Tensor x) {
+  return muillm_parallel_gateupsilu_split_forward(
+    engine.engine_ptr,
+    comm.comm_ptr,
+    norm_weights,
+    epsilon,
+    gate_weights,
+    up_weights,
+    down_weights,
+    residual,
+    x
+  );
 }
