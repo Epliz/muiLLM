@@ -36,10 +36,18 @@ struct MuiLLMParallelLinear: torch::nn::Module {
     int sharding_dim
   );
 
+  virtual ~MuiLLMParallelLinear();
+
   torch::Tensor forward(
     torch::Tensor& inputs,
     torch::Tensor& residual,
     bool collect_outputs
+  );
+
+  static torch::Tensor collect_output(
+    muillm_comm_t* comm,
+    torch::Tensor& output,
+    int sharding_dim
   );
 };
 

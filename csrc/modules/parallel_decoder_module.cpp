@@ -3,12 +3,14 @@
 MuiLLMParallelDecoder::MuiLLMParallelDecoder(
   muillm_engine_t* engine,
   muillm_comm_t* comm,
+  MuiLLMParallelMultiLinear* multilinear,
   MuiLLMParallelAttention* attention,
   MuiLLMParallelGateUpDownMLP* mlp
 ) {
   this->engine = engine;
   this->comm = comm;
 
+  this->multilinear = multilinear;
   this->attention = attention;
   this->mlp = mlp;
 }
@@ -19,15 +21,23 @@ MuiLLMParallelDecoder::~MuiLLMParallelDecoder() {
 
 torch::Tensor MuiLLMParallelDecoder::forward(
   MuillmKVCache* cache,
-  torch::Tensor& q,
-  torch::Tensor& k,
-  torch::Tensor& v,
+  torch::Tensor& h,
   torch::Tensor& m,
-  torch::Tensor& residual,
   torch::Tensor& position_ids,
   std::optional<std::tuple<torch::Tensor, torch::Tensor>>& cos_sin,
   torch::Tensor& cache_positions
 ) {
+  auto residual = h;
+
+  auto qkv = this->multilinear->forward(
+    h,
+    /* collect */ false
+  );
+
+  auto q = qkv[0];
+  auto k = qkv[1];
+  auto v = qkv[2];
+
   auto attention_out = this->attention->rope_forward(
     cache,
     q,
@@ -53,12 +63,14 @@ torch::Tensor MuiLLMParallelDecoder::forward(
 muillm_parallel_decoder_module_ptr_t muillm_parallel_decoder_module_init_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
+  muillm_parallel_multilinear_module_ptr_t multilinear,
   muillm_parallel_attention_module_ptr_t attention,
   muillm_parallel_gateupdownmlp_module_ptr_t mlp
 ) {
   MuiLLMParallelDecoder* decoder_module = new MuiLLMParallelDecoder(
     engine.engine_ptr,
     comm.comm_ptr,
+    multilinear.ptr,
     attention.ptr,
     mlp.ptr
   );
@@ -78,11 +90,8 @@ void muillm_parallel_decoder_module_deinit_trampoline(
 at::Tensor muillm_parallel_decoder_module_forward(
   muillm_parallel_decoder_module_ptr_t module_ptr,
   muillm_kvcache_module_ptr_t cache_ptr,
-  torch::Tensor& q,
-  torch::Tensor& k,
-  torch::Tensor& v,
+  torch::Tensor& h,
   std::optional<torch::Tensor>& mask_,
-  torch::Tensor& residual,
   torch::Tensor& position_ids,
   std::optional<std::tuple<torch::Tensor, torch::Tensor>>& cos_sin,
   torch::Tensor& cache_positions
@@ -97,11 +106,8 @@ at::Tensor muillm_parallel_decoder_module_forward(
 
   return decoder_module->forward(
     cache,
-    q,
-    k,
-    v,
+    h,
     mask,
-    residual,
     position_ids,
     cos_sin,
     cache_positions

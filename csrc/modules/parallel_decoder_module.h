@@ -5,6 +5,7 @@
 #include "../engine.h"
 #include "../comm_torch.h"
 
+#include "parallel_multilinear_module.h"
 #include "parallel_attention_module.h"
 #include "parallel_gateup_module.h"
 #include "kvcache.h"
@@ -19,6 +20,7 @@ struct MuiLLMParallelDecoder: torch::nn::Module {
   muillm_engine_t* engine;
   muillm_comm_t* comm;
 
+  MuiLLMParallelMultiLinear* multilinear;
   MuiLLMParallelAttention* attention;
   MuiLLMParallelGateUpDownMLP* mlp;
 
@@ -26,6 +28,7 @@ struct MuiLLMParallelDecoder: torch::nn::Module {
   MuiLLMParallelDecoder(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
+    MuiLLMParallelMultiLinear* multilinear,
     MuiLLMParallelAttention* attention,
     MuiLLMParallelGateUpDownMLP* mlp
   );
@@ -34,11 +37,8 @@ struct MuiLLMParallelDecoder: torch::nn::Module {
 
   torch::Tensor forward(
     MuillmKVCache* cache,
-    torch::Tensor& q,
-    torch::Tensor& k,
-    torch::Tensor& v,
+    torch::Tensor& h,
     torch::Tensor& m,
-    torch::Tensor& residual,
     torch::Tensor& position_ids,
     std::optional<std::tuple<torch::Tensor, torch::Tensor>>& cos_sin,
     torch::Tensor& cache_positions
@@ -53,6 +53,7 @@ typedef struct muillm_parallel_decoder_module_ptr {
 muillm_parallel_decoder_module_ptr_t muillm_parallel_decoder_module_init_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
+  muillm_parallel_multilinear_module_ptr_t multilinear,
   muillm_parallel_attention_module_ptr_t attention,
   muillm_parallel_gateupdownmlp_module_ptr_t mlp
 );
@@ -64,11 +65,8 @@ void muillm_parallel_decoder_module_deinit_trampoline(
 at::Tensor muillm_parallel_decoder_module_forward(
   muillm_parallel_decoder_module_ptr_t module_ptr,
   muillm_kvcache_module_ptr_t cache_ptr,
-  torch::Tensor& q,
-  torch::Tensor& k,
-  torch::Tensor& v,
+  torch::Tensor& h,
   std::optional<torch::Tensor>& m,
-  torch::Tensor& residual,
   torch::Tensor& position_ids,
   std::optional<std::tuple<torch::Tensor, torch::Tensor>>& cos_sin,
   torch::Tensor& cache_positions

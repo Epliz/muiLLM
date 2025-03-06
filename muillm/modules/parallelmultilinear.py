@@ -12,6 +12,21 @@ from muillm.modules.linear import MuiLinear
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
+import muillm_ext
+
+class _MuiParallelMultiLinear(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, module, x, collect_outputs):
+        output = muillm_ext.muillm_parallel_multilinear_module_forward(module, x, collect_outputs)
+
+        ctx.save_for_backward(x)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
+
 def _all_or_none(it: Iterable[bool], exception_message) -> bool:
     has_all = all([i for i in it])
     has_any = not all([not i for i in it])
@@ -24,6 +39,9 @@ class MuiParallelMultiLinear(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, in_features: int, out_features: List[int], bias: bool = True,
                  variance_epsilon:float = 0.0, normalize:bool = False, sharding_dim: int = 0, device=None, dtype=None) -> None:
         super().__init__(engine_config=engine_config)
+
+        self.cpp_engine = engine_config.cpp_engine
+        self.comms = engine_config.comms
 
         self.tensor_parallelism = engine_config.tensor_parallelism
         self.sharding_dim = sharding_dim if sharding_dim >= 0 else sharding_dim + 2
@@ -49,9 +67,35 @@ class MuiParallelMultiLinear(MuiModule):
 
         self.slices = list(zip(self.slice_starts, self.slice_ends))
 
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+        # the cpp module will be created at the end of all layer replacements
+        self.cpp_module = None
+
         # Need to synchronize after copying the tensors to make sure the transfers
         # completed
         self.__sync_all()
+
+    def finalize_init(self):
+        self.linear.finalize_init()
+
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_multilinear_module_deinit(self.cpp_module)
+
+        self.cpp_module = muillm_ext.muillm_parallel_multilinear_module_init(
+            self.cpp_engine,
+            self.comms.comms,
+            self.linear.cpp_module,
+            self.slices,
+            self.sharding_dim
+        )
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+    def _check_dispatchable(self):
+        self.dispatchable = self.linear.dispatchable
 
     def _safe_div(self, a, b):
         if a % b != 0:
@@ -147,13 +191,20 @@ class MuiParallelMultiLinear(MuiModule):
             # the rescaling weights are not fused in the matrices due to instabilities
             self.linear._set_norm_weights(norm_weights)
 
+        self.finalize_init()
+
         # Need to synchronize after copying the tensors to make sure the transfers
         # completed
         self.__sync_all()
 
+
     def __sync_all(self):
         MuiParallelLinear._sync_all(engine_config=self.engine_config)
     
+
+    def _shard_inputs_if_needed(self, tensors: Union[Tensor, List[Tensor]]) -> List[Tensor]:
+        return self.linear._shard_inputs_if_needed(tensors)
+
     def __slice_outputs(self, all_outputs: torch.Tensor) -> List[torch.Tensor]:
         return [all_outputs[..., slice_start:slice_end] for slice_start, slice_end in self.slices]
 
@@ -161,6 +212,13 @@ class MuiParallelMultiLinear(MuiModule):
         return MuiParallelLinear._collect_outputs(self.engine_config, tensor, sharding_dim=self.sharding_dim)
 
     def parallel_forward(self, input: Union[Tensor, List[Tensor]], collect_outputs: bool = True) -> List[Tuple[Tensor, ...]]:
+
+        if self.dispatchable:
+            input = self._shard_inputs_if_needed(input)
+            output = _MuiParallelMultiLinear.apply(self.cpp_module, input, collect_outputs)
+            return [tuple(output)]
+
+        # not dispatchable
         num_slices = len(self.slice_starts)
 
         # if we are sharding by columns, we can let MuiParallelLinear collect the results

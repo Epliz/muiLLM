@@ -24,21 +24,18 @@ from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, Mi
 
 class _MuiParallelDecoder(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, module, cache_module, q, k, v, m, residual, position_ids, position_embeddings, cache_positions):
+    def forward(ctx, module, cache_module, h, m, position_ids, position_embeddings, cache_positions):
         output = muillm_ext.muillm_parallel_decoder_module_forward(
             module,
             cache_module,
-            q,
-            k,
-            v,
+            h,
             m,
-            residual,
             position_ids,
             position_embeddings,
             cache_positions
         )
 
-        ctx.save_for_backward(q, k, v, m)
+        ctx.save_for_backward(h, m)
 
         return output
 
@@ -74,6 +71,7 @@ class MuiParallelDecoderLayer(MuiModule):
         self.cpp_module = muillm_ext.muillm_parallel_decoder_module_init(
             self.cpp_engine,
             self.comms.comms,
+            self.qkv_proj.cpp_module,
             self.self_attn.cpp_module,
             self.mlp.cpp_module
         )
@@ -164,26 +162,23 @@ class MuiParallelDecoderLayer(MuiModule):
         if all_ones_mask:
             attention_mask = None
 
-        residual = hidden_states
-
-        # mark the inputs as already sharding by wrapping them in list
-        query_states, key_states, value_states = self.qkv_proj.parallel_forward([hidden_states], collect_outputs=False)[0]
-
-        bsz, q_len, _ = query_states.size()
+        bsz, q_len, _ = hidden_states.size()
         if self.dispatchable and (bsz == 1) and (q_len == 1) and isinstance(past_key_value, MuiCache):
             hidden_states = _MuiParallelDecoder.apply(
                 self.cpp_module,
                 past_key_value.cpp_module,
-                query_states,
-                key_states,
-                value_states,
+                hidden_states,
                 attention_mask,
-                residual,
                 position_ids,
                 position_embeddings,
                 cache_position,
             )
         else:
+            residual = hidden_states
+
+            # mark the inputs as already sharding by wrapping them in list
+            query_states, key_states, value_states = self.qkv_proj.parallel_forward([hidden_states], collect_outputs=False)[0]
+
             # Self Attention
             hidden_states = self.self_attn.parallel_forward(
                 query_states=[query_states],

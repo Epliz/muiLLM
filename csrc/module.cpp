@@ -189,6 +189,7 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "parallel_linear_kernels.cuh"
 
 #include "modules/parallel_linear_module.h"
+#include "modules/parallel_multilinear_module.h"
 #include "modules/parallel_gateup_module.h"
 #include "modules/parallel_attention_module.h"
 #include "modules/parallel_decoder_module.h"
@@ -258,6 +259,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_parallel_linear_module_deinit", &muillm_parallel_linear_module_deinit_trampoline, "muillm parallel linear module deinit", py::arg("module"));
   m.def("muillm_parallel_linear_module_forward", &muillm_parallel_linear_module_forward_trampoline, "muillm parallel linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("reduce") = false);
 
+  // parallel multilinear
+  pybind11::class_<muillm_parallel_multilinear_module_ptr_t> cl_parallel_multilinear_module(m, "muillm_parallel_multilinear_module_ptr");
+  cl_parallel_multilinear_module.def(pybind11::init<>());
+
+  m.def("muillm_parallel_multilinear_module_init", &muillm_parallel_multilinear_module_init_trampoline, "muillm parallel multilinear module init", py::arg("engine"), py::arg("comm"), py::arg("linear"), py::arg("slices"), py::arg("sharding_dim"));
+  m.def("muillm_parallel_multilinear_module_deinit", &muillm_parallel_multilinear_module_deinit_trampoline, "muillm parallel multilinear module deinit", py::arg("module"));
+  m.def("muillm_parallel_multilinear_module_forward", &muillm_parallel_multilinear_module_forward_trampoline, "muillm parallel multilinear module forward", py::arg("module"), py::arg("input"), py::arg("collect_outputs"));
+
   // parallel gateup/down mlp
   pybind11::class_<muillm_parallel_gateupdownmlp_module_ptr_t> cl_parallel_gateupdownmlp_module(m, "muillm_parallel_gateupdownmlp_module_ptr");
   m.def("muillm_parallel_gateupdownmlp_module_init", &muillm_parallel_gateupdownmlp_module_init_trampoline, "muillm parallel gateupdown mlp module init", py::arg("engine"), py::arg("comm"), py::arg("method"), py::arg("norm_weights"), py::arg("gate_weights"), py::arg("up_weights"), py::arg("down_weights"), py::arg("variance_epsilon"));
@@ -301,7 +310,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<muillm_parallel_decoder_module_ptr_t> cl_parallel_decoder_module(m, "muillm_parallel_decoder_module_ptr");
   cl_parallel_decoder_module.def(pybind11::init<>());
 
-  m.def("muillm_parallel_decoder_module_init", &muillm_parallel_decoder_module_init_trampoline, "muillm parallel decoder module init", py::arg("engine"), py::arg("comm"), py::arg("attention"), py::arg("mlp"));
+  m.def("muillm_parallel_decoder_module_init", &muillm_parallel_decoder_module_init_trampoline, "muillm parallel decoder module init", py::arg("engine"), py::arg("comm"), py::arg("multilinear"), py::arg("attention"), py::arg("mlp"));
   m.def("muillm_parallel_decoder_module_deinit", &muillm_parallel_decoder_module_deinit_trampoline, "muillm parallel decoder module deinit", py::arg("module"));
-  m.def("muillm_parallel_decoder_module_forward", &muillm_parallel_decoder_module_forward, "muillm parallel decoder module forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+  m.def("muillm_parallel_decoder_module_forward", &muillm_parallel_decoder_module_forward, "muillm parallel decoder module forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("m"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
 }
