@@ -75,6 +75,7 @@ setup(
             'csrc/modules/parallel_gateup_module.cpp',
             'csrc/modules/parallel_attention_module.cpp',
             'csrc/modules/parallel_decoder_module.cpp',
+            'csrc/modules/parallel_decoder_stack.cpp',
             # other
             'csrc/engine.cpp',
             'csrc/gpu_info.cpp',

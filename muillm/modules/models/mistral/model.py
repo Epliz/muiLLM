@@ -3,7 +3,12 @@
 
 from typing import List, Optional, Tuple, Union
 from muillm.modules.attention.sdpaattention import _ignore_causal_mask_sdpa
+from muillm.modules.decoder.paralleldecoderstack import _MuiParallelDecoderStack
 from muillm.modules.kvcache.cache_utils import MuiCache, MuiDynamicCache, MuiStaticCache, create_static_cache, grow_static_cache_if_needed
+from muillm.modules.module import MuiModule
+
+import muillm_ext
+
 import torch
 import torch.nn as nn
 
@@ -35,7 +40,7 @@ _CONFIG_FOR_DOC = "MistralConfig"
     "The bare Mistral Model outputting raw hidden-states without any specific head on top.",
     MISTRAL_START_DOCSTRING,
 )
-class MuiMistralModel(MistralPreTrainedModel):
+class MuiMistralModel(MistralPreTrainedModel, MuiModule):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`MistralDecoderLayer`]
 
@@ -44,8 +49,11 @@ class MuiMistralModel(MistralPreTrainedModel):
     """
 
     def __init__(self, engine_config: MuiEngineConfig, prev_model: Union["MuiMistralModel", MistralModel]):
-        super().__init__(prev_model.config)
-        self.engine_config = engine_config
+        MistralPreTrainedModel.__init__(self, prev_model.config)
+        MuiModule.__init__(self, engine_config)
+
+        self.cpp_engine = engine_config.cpp_engine
+        self.comms = engine_config.comms
 
         self.padding_idx = prev_model.padding_idx
         self.vocab_size = prev_model.vocab_size
@@ -56,8 +64,22 @@ class MuiMistralModel(MistralPreTrainedModel):
         self.norm = prev_model.norm
 
         self.gradient_checkpointing = False
+
+        # the cpp module will be created at the end of all layer replacements
+        self.cpp_module = None
+
         # Initialize weights and apply final processing
         self.post_init()
+
+    def finalize_init(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_decoder_stack_deinit(self.cpp_module)
+
+        self.cpp_module = muillm_ext.muillm_parallel_decoder_stack_init(
+            self.cpp_engine,
+            self.comms.comms,
+            [layer.cpp_module for layer in self.layers],
+        )
 
     def replace(prev_model: Union["MuiMistralModel", MistralModel], engine_config: MuiEngineConfig) -> "MuiMistralModel":
         return MuiMistralModel(engine_config=engine_config, prev_model=prev_model)
@@ -151,6 +173,12 @@ class MuiMistralModel(MistralPreTrainedModel):
         if causal_mask is not None:
             causal_mask = causal_mask[:, :, :, : tot_seq_len]
 
+        if all_ones_mask is None:
+            # if not specified, assume it might not have just ones
+            all_ones_mask = False
+        if all_ones_mask:
+            causal_mask = None
+
         position_ids = position_ids.contiguous()
 
         # get the rotary embedding module of the first layer
@@ -165,43 +193,65 @@ class MuiMistralModel(MistralPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+        # determine if we can use the decoder stack
+        bsz, q_len, _ = hidden_states.size()
+        dispatchable_dtype = (hidden_states.dtype == torch.float16)
+        dispatchable_input = (bsz == 1) and (q_len == 1) and dispatchable_dtype
+        grad_checkpointing = self.gradient_checkpointing and self.training
+        mui_cache = isinstance(past_key_values, MuiCache)
+        no_outputs = (not output_hidden_states) and (not output_attentions)
+        dispatchable_to_stack = no_outputs and (not grad_checkpointing) and mui_cache and dispatchable_input
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    causal_mask,
-                    position_ids,
-                    past_key_values,
-                    output_attentions,
-                    use_cache,
-                    cache_position,
-                    position_embeddings,
-                    all_ones_mask,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states=hidden_states,
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                    position_embeddings=position_embeddings,
-                    all_ones_mask=all_ones_mask,
-                )
+        if dispatchable_to_stack:
+            hidden_states = _MuiParallelDecoderStack.apply(
+                self.cpp_module,
+                past_key_values.cpp_module,
+                hidden_states,
+                causal_mask,
+                position_ids,
+                position_embeddings,
+                cache_position,
+            )
 
-            hidden_states = layer_outputs[0]
+            next_decoder_cache = past_key_values
+        else:
+            for decoder_layer in self.layers:
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
 
-            if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+                if self.gradient_checkpointing and self.training:
+                    layer_outputs = self._gradient_checkpointing_func(
+                        decoder_layer.__call__,
+                        hidden_states,
+                        causal_mask,
+                        position_ids,
+                        past_key_values,
+                        output_attentions,
+                        use_cache,
+                        cache_position,
+                        position_embeddings,
+                        all_ones_mask,
+                    )
+                else:
+                    layer_outputs = decoder_layer(
+                        hidden_states=hidden_states,
+                        attention_mask=causal_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_values,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        position_embeddings=position_embeddings,
+                        all_ones_mask=all_ones_mask,
+                    )
 
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+                hidden_states = layer_outputs[0]
+
+                if use_cache:
+                    next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+
+                if output_attentions:
+                    all_self_attns += (layer_outputs[1],)
 
         hidden_states = self.norm(hidden_states)
 
