@@ -123,4 +123,4 @@ print("[Optimized] Time: ", time)
 print(f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})")
 
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, 50)), trace_path="trace_mistral_muillm_unbatched.json")
+text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, num_output_tokens)), trace_path="trace_mistral_muillm_unbatched.json")

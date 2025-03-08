@@ -170,4 +170,4 @@ for prompts in all_prompts:
     print(f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})")
 
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-text, time = profile_func(lambda: time_func(lambda: generate(model, batched_prompts, 50)), trace_path="trace_llama_muillm_batched.json")
+text, time = profile_func(lambda: time_func(lambda: generate(model, batched_prompts, num_output_tokens)), trace_path="trace_llama_muillm_batched.json")

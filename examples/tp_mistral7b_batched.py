@@ -147,7 +147,7 @@ def run(rank, size):
             print(f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})")
 
     # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-    text, time = profile_func(lambda: time_func(lambda: generate(model, tokenizer, batched_prompts, 50)), trace_path=f"trace_mistral_muillm_tp{size}_batched_rank{rank}.json")
+    text, time = profile_func(lambda: time_func(lambda: generate(model, tokenizer, batched_prompts, num_output_tokens)), trace_path=f"trace_mistral_muillm_tp{size}_batched_rank{rank}.json")
 
 def init_process(rank, size, fn, backend='nccl'):
     """ Initialize the distributed environment. """
