@@ -26,4 +26,4 @@ at::Tensor muillm_causal_transformer_decoding_masked(
     torch::Tensor& m  // [B, 1, NEW_T, T]
 );
 
-#endif // __MUILLM_CAUSAL_TRANSFORMER_DECODING_KERNELS_CUH__
+#endif /* __MUILLM_CAUSAL_TRANSFORMER_DECODING_KERNELS_CUH__ */
