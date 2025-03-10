@@ -53,6 +53,8 @@ setup(
             'csrc/rmsnorm_kernels.cu',
             'csrc/rotary_kernels.cu',
             'csrc/causal_transformer_decoding.cu',
+            'csrc/half_fused_decoding.cu',
+            'csrc/flash_decoding.cu',
             'csrc/sync.cu',
             'csrc/sync_torch.cpp',
             # comms

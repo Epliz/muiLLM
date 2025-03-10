@@ -220,8 +220,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_rope_forward_dynamic_cache", &muillm_rope_forward_dynamic_cache, "muillm rotary forward dynamic cache");
   m.def("muillm_rope_forward_static_cache", &muillm_rope_forward_static_cache, "muillm rotary forward static cache");
   // causal transformer decoding
-  m.def("muillm_causal_transformer_compute_softmax_scores_no_mask", &muillm_causal_transformer_compute_softmax_scores_no_mask, "muillm causal transformer compute softmax scores no mask");
-  m.def("muillm_causal_transformer_apply_softmax_scores", &muillm_causal_transformer_apply_softmax_scores, "muillm causal transformer apply softmax scores");
   m.def("muillm_causal_transformer_decoding_no_mask", &muillm_causal_transformer_decoding_no_mask, "muillm causal transformer decoding no mask");
   m.def("muillm_causal_transformer_decoding_masked", &muillm_causal_transformer_decoding_masked, "muillm causal transformer decoding masked");
 
