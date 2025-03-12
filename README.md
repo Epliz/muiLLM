@@ -30,29 +30,27 @@ The following optimizations are already implemented:
 * fused RMSNorm in linear layers
 * fused ROPE with write out in static/dynamic cache
 * experimental support for int8 RTN
-* basic semi-fused attention
+* flash decoding for attention computations
 * reduced CPU/GPU synchronizations due to attention mask checks
 * reduced CPU/GPU synchronizations during sampling
 * static cache support
+* reduced CPU overhead by using C++ modules instead of Python
 
 * tensor parallelism support (still being improved):
     * sharded linear, mlp, attention layers
-    * custom low-latency fused GEMV-all-reduce: ~18us latency for 2 MI100 GPUs
+    * custom low-latency fused GEMV-all-reduce: ~8us latency for 2 MI300x GPUs
 
 Future optimizations (by order of likely implementation):
 * fp8 support
 * further improvements to linear/fused MLP to reach higher memory bandwidth
-* use Python less to be less CPU limited
-* better attention implementation (flash decoding)
 * layer interleaving
 
 ## Performance numbers
 
 The numbers are changing at every commit, try it out by yourself!
 
-But if you can't, here is the (outdated) approximate performance on a small prompt, generating 50 tokens, for a single GPU:
-* fp16 on MI300x: 17ms token-prefill, 354ms generation (146 tokens/s)
-* int8 RTN on MI300x: 19ms token-prefill, ~250ms generation (~200 tokens/s)
+But if you can't, here is the (outdated) approximate performance on a small prompt, generating 256 tokens, for a single GPU:
+* fp16 on MI300x: 210 tokens/s average tokens/s
 
 TODO: MI100 results, tensor parallelism results, comparison to Nvidia TensorRT, HuggingFace stock + compiled stock performance
 
