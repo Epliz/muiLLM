@@ -72,6 +72,11 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         self.post_init()
 
     def finalize_init(self):
+        if self.comms == None:
+            # in the single GPU case we don't have comms, and we can't use the parallel decoder stack
+            self.cpp_module = None
+            return
+
         if self.cpp_module is not None:
             muillm_ext.muillm_parallel_decoder_stack_deinit(self.cpp_module)
 
@@ -200,7 +205,7 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         grad_checkpointing = self.gradient_checkpointing and self.training
         mui_cache = isinstance(past_key_values, MuiCache)
         no_outputs = (not output_hidden_states) and (not output_attentions)
-        dispatchable_to_stack = no_outputs and (not grad_checkpointing) and mui_cache and dispatchable_input
+        dispatchable_to_stack = (self.cpp_module is not None) and no_outputs and (not grad_checkpointing) and mui_cache and dispatchable_input
 
         if dispatchable_to_stack:
             hidden_states = _MuiParallelDecoderStack.apply(
