@@ -550,6 +550,69 @@ static muillm_comm_error_t __muillm_gpu_copy(void* dst, const void* src, size_t 
   return MUILLM_COMM_SUCCESS;
 }
 
+#define ELEMENTS_PER_THREAD_FP16 8
+#define ELEMENTS_PER_BLOCK_FP16 (ELEMENTS_PER_THREAD_FP16 * THREADS_PER_BLOCK)
+
+#define ELEMENTS_PER_THREAD_FP32 4
+#define ELEMENTS_PER_BLOCK_FP32 (ELEMENTS_PER_THREAD_FP32 * THREADS_PER_BLOCK)
+
+struct __align__(8) half4 {
+  half x;
+  half y;
+  half z;
+  half w;
+};
+
+struct __align__(8) half8 {
+  half x;
+  half y;
+  half z;
+  half w;
+  half a;
+  half b;
+  half c;
+  half d;
+};
+
+struct __align__(8) float8 {
+  float x;
+  float y;
+  float z;
+  float w;
+  float a;
+  float b;
+  float c;
+  float d;
+};
+
+static inline __device__ half8 __hadd(half8 a, half8 b) {
+  half8 res;
+  res.x = __hadd(a.x, b.x);
+  res.y = __hadd(a.y, b.y);
+  res.z = __hadd(a.z, b.z);
+  res.w = __hadd(a.w, b.w);
+  res.a = __hadd(a.a, b.a);
+  res.b = __hadd(a.b, b.b);
+  res.c = __hadd(a.c, b.c);
+  res.d = __hadd(a.d, b.d);
+  return res;
+}
+
+static inline  __device__ half4 __hadd(half4 a, half4 b) {
+  half4 res;
+  res.x = __hadd(a.x, b.x);
+  res.y = __hadd(a.y, b.y);
+  res.z = __hadd(a.z, b.z);
+  res.w = __hadd(a.w, b.w);
+  return res;
+}
+
+static inline __device__ half2 __hadd(half2 a, half2 b) {
+  half2 res;
+  res.x = __hadd(a.x, b.x);
+  res.y = __hadd(a.y, b.y);
+  return res;
+}
 
 // TP2 kernels
 
@@ -559,10 +622,45 @@ __global__ void __all_reduce_fp16_tp2_p2p_kernel(
   half* y,
   unsigned N
 ) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    half res = __hadd(x1[i], x2[i]);
-    y[i] = res;
+  unsigned i = blockIdx.x * ELEMENTS_PER_BLOCK_FP16 + ELEMENTS_PER_THREAD_FP16 * threadIdx.x;
+
+  if (i + 7 < N) {
+    // full block
+    // no remainder after that due to the block size being 8 * THREADS_PER_BLOCK
+
+    half8 x1x8 = *((half8*) &x1[i]);
+    half8 x2x8 = *((half8*) &x2[i]);
+
+    half8 res = __hadd(x1x8, x2x8);
+
+    *((half8*) &y[i]) = res;
+  } else {
+    // partial block
+    if (i + 3 < N) {
+      half4 x1x4 = *((half4*) &x1[i]);
+      half4 x2x4 = *((half4*) &x2[i]);
+  
+      half4 res = __hadd(x1x4, x2x4);
+
+      *((half4*) &y[i]) = res;
+
+      i += 4;
+    }
+    if (i + 1 < N) {
+      half2 x1x2 = *((half2*) &x1[i]);
+      half2 x2x2 = *((half2*) &x2[i]);
+
+      half2 res = __hadd(x1x2, x2x2);
+
+      *((half2*) &y[i]) = res;
+
+      i += 2;
+    }
+    if (i < N) {
+      half res = __hadd(x1[i], x2[i]);
+
+      y[i] = res;
+    }
   }
 }
 
@@ -572,10 +670,35 @@ __global__ void __all_reduce_fp32_tp2_p2p_kernel(
   float* y,
   unsigned N
 ) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    float res = x1[i] + x2[i];
-    y[i] = res;
+  unsigned i = blockIdx.x * ELEMENTS_PER_BLOCK_FP32 + ELEMENTS_PER_THREAD_FP32 * threadIdx.x;
+
+  if (i + 3 < N) {
+    // full block
+    // no remainder after that due to the block size being 4 * THREADS_PER_BLOCK
+
+    float4 x1x4 = *((float4*) &x1[i]);
+    float4 x2x4 = *((float4*) &x2[i]);
+
+    float4 res = x1x4 + x2x4;
+
+    *((float4*) &y[i]) = res;
+
+  } else {
+    // partial block
+    if (i + 1 < N) {
+      float2 x1x2 = *((float2*) &x1[i]);
+      float2 x2x2 = *((float2*) &x2[i]);
+
+      float2 res = x1x2 + x2x2;
+
+      *((float2*) &y[i]) = res;
+
+      i += 2;
+    }
+    if (i < N) {
+      float res = x1[i] + x2[i];
+      y[i] = res;
+    }
   }
 }
 
@@ -589,10 +712,51 @@ __global__ void __all_reduce_fp16_tp4_p2p_kernel(
   half* y,
   unsigned N
 ) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    half res = __hadd(__hadd(x1[i], x2[i]), __hadd(x3[i], x4[i]));
-    y[i] = res;
+  unsigned i = blockIdx.x * ELEMENTS_PER_BLOCK_FP16 + ELEMENTS_PER_THREAD_FP16 * threadIdx.x;
+
+
+  if (i + 7 < N) {
+    // full block
+    // no remainder after that due to the block size being 8 * THREADS_PER_BLOCK
+
+    half8 x1x8 = *((half8*) &x1[i]);
+    half8 x2x8 = *((half8*) &x2[i]);
+    half8 x3x8 = *((half8*) &x3[i]);
+    half8 x4x8 = *((half8*) &x4[i]);
+
+    half8 res = __hadd(__hadd(x1x8, x2x8), __hadd(x3x8, x4x8));
+
+    *((half8*) &y[i]) = res;
+  } else {
+    // partial block
+    if (i + 3 < N) {
+      half4 x1x4 = *((half4*) &x1[i]);
+      half4 x2x4 = *((half4*) &x2[i]);
+      half4 x3x4 = *((half4*) &x3[i]);
+      half4 x4x4 = *((half4*) &x4[i]);
+
+      half4 res = __hadd(__hadd(x1x4, x2x4), __hadd(x3x4, x4x4));
+
+      *((half4*) &y[i]) = res;
+
+      i += 4;
+    }
+    if (i + 1 < N) {
+      half2 x1x2 = *((half2*) &x1[i]);
+      half2 x2x2 = *((half2*) &x2[i]);
+      half2 x3x2 = *((half2*) &x3[i]);
+      half2 x4x2 = *((half2*) &x4[i]);
+
+      half2 res = __hadd(__hadd(x1x2, x2x2), __hadd(x3x2, x4x2));
+
+      *((half2*) &y[i]) = res;
+
+      i += 2;
+    }
+    if (i < N) {
+      half res = __hadd(__hadd(x1[i], x2[i]), __hadd(x3[i], x4[i]));
+      y[i] = res;
+    }
   }
 }
 
@@ -604,10 +768,36 @@ __global__ void __all_reduce_fp32_tp4_p2p_kernel(
   float* y,
   unsigned N
 ) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    float res = x1[i] + x2[i] + x3[i] + x4[i];
-    y[i] = res;
+  unsigned i = blockIdx.x * ELEMENTS_PER_BLOCK_FP32 + ELEMENTS_PER_THREAD_FP32 * threadIdx.x;
+
+  if (i + 3 < N) {
+    // full block
+    // no remainder after that due to the block size being 4 * THREADS_PER_BLOCK
+
+    float4 x1x4 = *((float4*) &x1[i]);
+    float4 x2x4 = *((float4*) &x2[i]);
+    float4 x3x4 = *((float4*) &x3[i]);
+    float4 x4x4 = *((float4*) &x4[i]);
+
+    float4 res = (x1x4 + x2x4) + (x3x4 + x4x4);
+    *((float4*) &y[i]) = res;
+  } else {
+    // partial block
+    if (i + 1 < N) {
+      float2 x1x2 = *((float2*) &x1[i]);
+      float2 x2x2 = *((float2*) &x2[i]);
+      float2 x3x2 = *((float2*) &x3[i]);
+      float2 x4x2 = *((float2*) &x4[i]);
+
+      float2 res = (x1x2 + x2x2) + (x3x2 + x4x2);
+      *((float2*) &y[i]) = res;
+
+      i += 2;
+    }
+    if (i < N) {
+      float res = x1[i] + x2[i] + x3[i] + x4[i];
+      y[i] = res;
+    }
   }
 }
 
@@ -625,16 +815,91 @@ __global__ void __all_reduce_fp16_tp8_p2p_kernel(
   half* y,
   unsigned N
 ) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    half x1x2 = __hadd(x1[i], x2[i]);
-    half x3x4 = __hadd(x3[i], x4[i]);
-    half x1x4 = __hadd(x1x2, x3x4);
-    half x5x6 = __hadd(x5[i], x6[i]);
-    half x7x8 = __hadd(x7[i], x8[i]);
-    half x5x8 = __hadd(x5x6, x7x8);
-    half res = __hadd(x1x4, x5x8);
-    y[i] = res;
+  unsigned i = blockIdx.x * ELEMENTS_PER_BLOCK_FP16 + ELEMENTS_PER_THREAD_FP16 * threadIdx.x;
+
+  if (i + 7 < N) {
+    // full block
+    // no remainder after that due to the block size being 8 * THREADS_PER_BLOCK
+    half8 x1x8 = *((half8*) &x1[i]);
+    half8 x2x8 = *((half8*) &x2[i]);
+    half8 x3x8 = *((half8*) &x3[i]);
+    half8 x4x8 = *((half8*) &x4[i]);
+    half8 x5x8 = *((half8*) &x5[i]);
+    half8 x6x8 = *((half8*) &x6[i]);
+    half8 x7x8 = *((half8*) &x7[i]);
+    half8 x8x8 = *((half8*) &x8[i]);
+
+    half8 x1x2x8 = __hadd(x1x8, x2x8);
+    half8 x3x4x8 = __hadd(x3x8, x4x8);
+    half8 x1x4x8 = __hadd(x1x2x8, x3x4x8);
+
+    half8 x5x6x8 = __hadd(x5x8, x6x8);
+    half8 x7x8x8 = __hadd(x7x8, x8x8);
+    half8 x5x8x8 = __hadd(x5x6x8, x7x8x8);
+
+    half8 res = __hadd(x1x4x8, x5x8x8);
+
+    *((half8*) &y[i]) = res;
+
+  } else {
+    // partial block
+    if (i + 3 < N) {
+      half4 x1x4 = *((half4*) &x1[i]);
+      half4 x2x4 = *((half4*) &x2[i]);
+      half4 x3x4 = *((half4*) &x3[i]);
+      half4 x4x4 = *((half4*) &x4[i]);
+      half4 x5x4 = *((half4*) &x5[i]);
+      half4 x6x4 = *((half4*) &x6[i]);
+      half4 x7x4 = *((half4*) &x7[i]);
+      half4 x8x4 = *((half4*) &x8[i]);
+
+      half4 x1x2x4 = __hadd(x1x4, x2x4);
+      half4 x3x4x4 = __hadd(x3x4, x4x4);
+      half4 x1x4x4 = __hadd(x1x2x4, x3x4x4);
+
+      half4 x5x6x4 = __hadd(x5x4, x6x4);
+      half4 x7x8x4 = __hadd(x7x4, x8x4);
+      half4 x5x8x4 = __hadd(x5x6x4, x7x8x4);
+
+      half4 res = __hadd(x1x4x4, x5x8x4);
+
+      *((half4*) &y[i]) = res;
+
+      i += 4;
+    }
+    if (i + 1 < N) {
+      half2 x1x2 = *((half2*) &x1[i]);
+      half2 x2x2 = *((half2*) &x2[i]);
+      half2 x3x2 = *((half2*) &x3[i]);
+      half2 x4x2 = *((half2*) &x4[i]);
+      half2 x5x2 = *((half2*) &x5[i]);
+      half2 x6x2 = *((half2*) &x6[i]);
+      half2 x7x2 = *((half2*) &x7[i]);
+      half2 x8x2 = *((half2*) &x8[i]);
+
+      half2 x1x2x2 = __hadd(x1x2, x2x2);
+      half2 x3x4x2 = __hadd(x3x2, x4x2);
+      half2 x1x4x2 = __hadd(x1x2x2, x3x4x2);
+
+      half2 x5x6x2 = __hadd(x5x2, x6x2);
+      half2 x7x8x2 = __hadd(x7x2, x8x2);
+      half2 x5x8x2 = __hadd(x5x6x2, x7x8x2);
+
+      half2 res = __hadd(x1x4x2, x5x8x2);
+      *((half2*) &y[i]) = res;
+
+      i += 2;
+    }
+    if (i < N) {
+      half x1x2 = __hadd(x1[i], x2[i]);
+      half x3x4 = __hadd(x3[i], x4[i]);
+      half x1x4 = __hadd(x1x2, x3x4);
+      half x5x6 = __hadd(x5[i], x6[i]);
+      half x7x8 = __hadd(x7[i], x8[i]);
+      half x5x8 = __hadd(x5x6, x7x8);
+      half res = __hadd(x1x4, x5x8);
+      y[i] = res;
+    }
   }
 }
 
@@ -650,16 +915,63 @@ __global__ void __all_reduce_fp32_tp8_p2p_kernel(
   float* y,
   unsigned N
 ) {
-  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
-  if (i < N) {
-    float x1x2 = (x1[i] + x2[i]);
-    float x3x4 = (x3[i] + x4[i]);
-    float x1x4 = x1x2 + x3x4;
-    float x5x6 = (x5[i] + x6[i]);
-    float x7x8 = (x7[i] + x8[i]);
-    float x5x8 = x5x6 + x7x8;
-    float res = x1x4 + x5x8;
-    y[i] = res;
+  unsigned i = blockIdx.x * ELEMENTS_PER_BLOCK_FP32 + ELEMENTS_PER_THREAD_FP32 * threadIdx.x;
+
+  if (i + 3 < N) {
+    float4 x1x4 = *((float4*) &x1[i]);
+    float4 x2x4 = *((float4*) &x2[i]);
+    float4 x3x4 = *((float4*) &x3[i]);
+    float4 x4x4 = *((float4*) &x4[i]);
+    float4 x5x4 = *((float4*) &x5[i]);
+    float4 x6x4 = *((float4*) &x6[i]);
+    float4 x7x4 = *((float4*) &x7[i]);
+    float4 x8x4 = *((float4*) &x8[i]);
+
+    float4 x1x2x4 = x1x4 + x2x4;
+    float4 x3x4x4 = x3x4 + x4x4;
+    float4 x1x4x4 = x1x2x4 + x3x4x4;
+
+    float4 x5x6x4 = x5x4 + x6x4;
+    float4 x7x8x4 = x7x4 + x8x4;
+    float4 x5x8x4 = x5x6x4 + x7x8x4;
+
+    float4 res = x1x4x4 + x5x8x4;
+    *((float4*) &y[i]) = res;
+  } else {
+    // partial block
+    if (i + 1 < N) {
+      float2 x1x2 = *((float2*) &x1[i]);
+      float2 x2x2 = *((float2*) &x2[i]);
+      float2 x3x2 = *((float2*) &x3[i]);
+      float2 x4x2 = *((float2*) &x4[i]);
+      float2 x5x2 = *((float2*) &x5[i]);
+      float2 x6x2 = *((float2*) &x6[i]);
+      float2 x7x2 = *((float2*) &x7[i]);
+      float2 x8x2 = *((float2*) &x8[i]);
+
+      float2 x1x2x2 = x1x2 + x2x2;
+      float2 x3x4x2 = x3x2 + x4x2;
+      float2 x1x4x2 = x1x2x2 + x3x4x2;
+
+      float2 x5x6x2 = x5x2 + x6x2;
+      float2 x7x8x2 = x7x2 + x8x2;
+      float2 x5x8x2 = x5x6x2 + x7x8x2;
+
+      float2 res = x1x4x2 + x5x8x2;
+      *((float2*) &y[i]) = res;
+      i += 2;
+    }
+
+    if (i < N) {
+      float x1x2 = (x1[i] + x2[i]);
+      float x3x4 = (x3[i] + x4[i]);
+      float x1x4 = x1x2 + x3x4;
+      float x5x6 = (x5[i] + x6[i]);
+      float x7x8 = (x7[i] + x8[i]);
+      float x5x8 = x5x6 + x7x8;
+      float res = x1x4 + x5x8;
+      y[i] = res;
+    }
   }
 }
 
@@ -686,9 +998,9 @@ muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum(
 
   // do the reduction
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(count, THREADS_PER_BLOCK);
 
   if (datatype == MUILLM_COMM_FP16) {
+    const int num_blocks = DIV_ROUND_UP(count, ELEMENTS_PER_BLOCK_FP16);
     if (local_size == 8) {
       __all_reduce_fp16_tp8_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
         (const half*) src_ptrs[0],
@@ -723,6 +1035,7 @@ muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum(
       return MUILLM_COMM_UNKNOWN_ERROR;
     }
   } else if (datatype == MUILLM_COMM_FP32) {
+    const int num_blocks = DIV_ROUND_UP(count, ELEMENTS_PER_BLOCK_FP32);
     if (local_size == 8) {
       __all_reduce_fp32_tp8_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
         (const float*) src_ptrs[0],
