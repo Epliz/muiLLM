@@ -126,6 +126,7 @@ class MuiCommunicator(TorchCommunicator):
 
     # Override
     def all_reduce_sum(self, tensor:torch.Tensor) -> torch.Tensor:
+        print("all_reduce_sum: ", tensor.shape)
         _MuiCommAllReduceSum.apply(self.comms, tensor)
         return tensor
     

@@ -4,6 +4,8 @@
 #include "../rmsnorm_kernels.cuh"
 #include "../comm_torch.h"
 
+#include <iostream>
+
 //
 // actual module
 //
@@ -105,6 +107,7 @@ torch::Tensor MuiLLMParallelLinear::collect_output(
     // need an all gather
     TORCH_CHECK(false, "all_gather is not implemented");
   } else if (sharding_dim == 1) {
+    std::cout << "all reduce" << output.numel()<<std::endl;
     // need an all-reduce
     muillm_comm_error_t muillm_error;
     if ((muillm_error = muillm_all_reduce_sum(
