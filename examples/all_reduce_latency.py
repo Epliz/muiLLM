@@ -60,22 +60,19 @@ def run(rank, world_size):
     sizes = [1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216]
 
     r = 4
-    # Pytorch all-reduce
-    for s in sizes:
-        tensor = torch.zeros(s, dtype=torch.float16, device="cuda")
-
-        # Warmup
-        repeat(r, lambda: dist.all_reduce(tensor))
-
-        # profile
-        profile_func(lambda: repeat(r, lambda: dist.all_reduce(tensor)), trace_path=f"trace_rccl_all_reduce_tp{world_size}_size{s}_rank{rank}.json")
-
-        torch.cuda.synchronize()
-    
 
     # tensor_parallelism=None indicates to use all GPUs
     engine_config = MuiEngineConfig(tensor_parallelism=None)
     comms = engine_config.comms
+
+    # # basic tests first
+    # tensor = torch.arange(1, 7, dtype=torch.float16, device="cuda").reshape(2,3)
+    # print(f"input (rank {rank}): ", tensor)
+
+    # tensor = comms.all_reduce_sum(tensor)
+    # print(f"result (rank {rank}): ", tensor)
+
+    # exit()
 
     # muillm all-reduce
     for s in sizes:
@@ -86,6 +83,18 @@ def run(rank, world_size):
     
         # profile
         profile_func(lambda: repeat(r, lambda: comms.all_reduce_sum(tensor)), trace_path=f"trace_mui_all_reduce_tp{world_size}_size{s}_rank{rank}.json")
+
+        torch.cuda.synchronize()
+
+    # Pytorch all-reduce
+    for s in sizes:
+        tensor = torch.zeros(s, dtype=torch.float16, device="cuda")
+
+        # Warmup
+        repeat(r, lambda: dist.all_reduce(tensor))
+
+        # profile
+        profile_func(lambda: repeat(r, lambda: dist.all_reduce(tensor)), trace_path=f"trace_rccl_all_reduce_tp{world_size}_size{s}_rank{rank}.json")
 
         torch.cuda.synchronize()
 
