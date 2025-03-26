@@ -427,20 +427,6 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   return MUILLM_COMM_SUCCESS;
 }
 
-__global__ void __muillm_inc_value_p2p_kernel(
-  uint32_t* signal
-) {
-  if (threadIdx.x == 0) {
-    atomicAdd_system(signal, 1);
-    __threadfence_system();
-  }
-}
-
-static muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal) {
-  __muillm_inc_value_p2p_kernel<<<1, 1, 0, stream>>>(signal);
-  return MUILLM_COMM_SUCCESS;
-}
-
 __global__ void __muillm_inc_wait_value_p2p_kernel(
   volatile uint32_t* signal,
   uint32_t seq_no
@@ -448,12 +434,15 @@ __global__ void __muillm_inc_wait_value_p2p_kernel(
   if (threadIdx.x == 0) {
     // increment the value
     atomicAdd_system((uint32_t*) signal, 1);
+
     __threadfence_system();
 
     // wait for the other ranks
     // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
     // have seen the previous one
-    while (*signal < seq_no) __threadfence_system();
+    while (*signal < seq_no) {
+      __builtin_amdgcn_s_sleep(2);
+    }
   }
 }
 
