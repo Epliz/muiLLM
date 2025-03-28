@@ -26,9 +26,87 @@ static muillm_comm_error_t __mui_gpu_barrier(
 
 #define MUILLM_COMM_INITIAL_BUFFER_CAPACITY (1024 * 1024) // 1MiB
 
-static muillm_comm_error_t __free_buffer_set(
+static muillm_comm_error_t __allocate_shared_gpu_memory(
   muillm_comm_p2p_t* comm,
-  muillm_comm_p2p_buffer_set_t* buffer_set
+  size_t capacity,
+  void** ptrs,
+  bool zero_memory = false,
+  bool uncached_memory = false
+) {
+
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  muillm_comm_error_t error;
+
+  int allocation_flags = 0;
+  if (uncached_memory) {
+    std::cout<<"Allocating uncached memory"<<std::endl;
+    allocation_flags = hipDeviceMallocUncached;
+  }
+
+  void* ptr = nullptr;
+  if (hipExtMallocWithFlags((void**)&ptr, capacity, allocation_flags) != hipSuccess || ptr == nullptr) {
+    std::cout<<"Allocation of buffer "<<local_rank<<" failed"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  if (zero_memory) {
+    if (hipMemset(ptr, 0, capacity) != hipSuccess) {
+      std::cout<<"Zeroing of buffer "<<local_rank<<" failed"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  }
+  
+  if (hipDeviceSynchronize() != hipSuccess) {
+    std::cerr << "Failed to synchronize device " << local_rank << std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  ptrs[local_rank] = ptr;
+
+  // get the memory pointers from other processes
+
+  hipIpcMemHandle_t ipcHandle;
+  if (hipIpcGetMemHandle(&ipcHandle, ptr) != hipSuccess) {
+    printf("(rank %d) Failed to get mem handle\n", local_rank);
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  hipIpcMemHandle_t* allMemHandles = new hipIpcMemHandle_t[local_size];
+
+  // gather all memory handles
+  __local_socket_all_gather(comm, &ipcHandle, sizeof(hipIpcMemHandle_t), allMemHandles);
+
+  // get the remote pointers
+  for (int d = 0; d < local_size; d++) {
+    if (d != local_rank) {
+      // need to open the memory handle
+      void* ext_ptr = nullptr;
+      // import the memory mapping on the current GPU
+      if (hipIpcOpenMemHandle(&ext_ptr, allMemHandles[d], hipIpcMemLazyEnablePeerAccess) != hipSuccess) {
+        // failed
+        printf("(rank %d) Failed to open memory handle %d\n", local_rank, d);
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+      if (ext_ptr == nullptr) {
+        printf("(rank %d) Null pointer out of mem handle\n", local_rank);
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+      ptrs[d] = ext_ptr;
+    }
+  }
+
+  // we don't need this array anymore
+  delete[] allMemHandles;
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+
+static muillm_comm_error_t __free_shared_gpu_memory(
+  muillm_comm_p2p_t* comm,
+  void** ptrs
 ) {
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
@@ -52,9 +130,9 @@ static muillm_comm_error_t __free_buffer_set(
   // close all the previous mappings
   for (int d = 0; d < local_size; d++) {
     if (d == local_rank) continue;
-    if (buffer_set->buffers[d] == nullptr) continue;
+    if (ptrs[d] == nullptr) continue;
 
-    if (hipIpcCloseMemHandle(buffer_set->buffers[d]) != hipSuccess) {
+    if (hipIpcCloseMemHandle(ptrs[d]) != hipSuccess) {
       // failed
       printf("(rank %d) Failed to close memory handle %d\n", local_rank, d);
       return MUILLM_COMM_UNKNOWN_ERROR;
@@ -67,14 +145,21 @@ static muillm_comm_error_t __free_buffer_set(
   }
 
   // deallocate the previous memory
-  if (buffer_set->buffers[local_rank] != nullptr) {
-    if (hipFree(buffer_set->buffers[local_rank]) != hipSuccess) {
+  if (ptrs[local_rank] != nullptr) {
+    if (hipFree(ptrs[local_rank]) != hipSuccess) {
       printf("(rank %d) Error while freeing recv_buffers\n", local_rank);
       return MUILLM_COMM_UNKNOWN_ERROR;
     }
   }
 
   return MUILLM_COMM_SUCCESS;
+}
+
+static muillm_comm_error_t __free_buffer_set(
+  muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_buffer_set_t* buffer_set
+) {
+  return __free_shared_gpu_memory(comm, buffer_set->buffers);
 }
 
 static muillm_comm_error_t __ensure_buffer_set_capacity(
@@ -107,48 +192,10 @@ static muillm_comm_error_t __ensure_buffer_set_capacity(
   // allocate new buffers
   capacity = __next_power_of_2(capacity);
 
-  void* ptr = nullptr;
-  if (hipMalloc((void**)&ptr, capacity) != hipSuccess || ptr == nullptr) {
-    std::cout<<"Allocation of buffer "<<local_rank<<" failed"<<std::endl;
-    return MUILLM_COMM_UNKNOWN_ERROR;
+  // allocate shared gpu memory
+  if ((error = __allocate_shared_gpu_memory(comm, capacity, buffer_set->buffers, /*zero_memory*/ false)) != MUILLM_COMM_SUCCESS) {
+    return error;
   }
-  
-  buffer_set->buffers[local_rank] = ptr;
-
-  // get the memory pointers from other processes
-
-  hipIpcMemHandle_t ipcHandle;
-  if (hipIpcGetMemHandle(&ipcHandle, ptr) != hipSuccess) {
-    printf("(rank %d) Failed to get mem handle\n", local_rank);
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
-
-  hipIpcMemHandle_t* allMemHandles = new hipIpcMemHandle_t[local_size];
-
-  // gather all memory handles
-  __local_socket_all_gather(comm, &ipcHandle, sizeof(hipIpcMemHandle_t), allMemHandles);
-
-  // get the remote pointers
-  for (int d = 0; d < local_size; d++) {
-    if (d != local_rank) {
-      // need to open the memory handle
-      void* recv_ptr = nullptr;
-      // import the memory mapping on the current GPU
-      if (hipIpcOpenMemHandle(&recv_ptr, allMemHandles[d], hipIpcMemLazyEnablePeerAccess) != hipSuccess) {
-        // failed
-        printf("(rank %d) Failed to open memory handle %d\n", local_rank, d);
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-      if (recv_ptr == nullptr) {
-        printf("(rank %d) Null pointer out of mem handle\n", local_rank);
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
-      buffer_set->buffers[d] = recv_ptr;
-    }
-  }
-
-  // we don't need this array anymore
-  delete[] allMemHandles;
 
   // all buffer allocations suceeded
   buffer_set->capacity = capacity;
@@ -315,8 +362,6 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   comm->rank = rank;
   comm->local_rank = local_rank;
 
-  comm->signal_host = nullptr;
-  comm->signal = nullptr;
   comm->signal_seq_no = 0;
 
   // merge in local socket
@@ -333,18 +378,6 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   // get the gpu info from the engine
   comm->gpu_info = engine->gpu_infos[local_rank];
 
-  // check that signal memory is supported
-  int signals_supported;
-  if (hipDeviceGetAttribute(&signals_supported, hipDeviceAttributeCanUseStreamWaitValue, 0) != hipSuccess) {
-    std::cout<<"Error getting the the property"<<std::endl;
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
-
-  if (!signals_supported) {
-    std::cout<<"Signal memory is not supported"<<std::endl;
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
-
   // setup p2p 
   __init_p2p_recv(comm);
 
@@ -359,20 +392,14 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   }
 
   // allocate signal memory
-  __allocate_locked_shared_cpu_mem(
+  // needs to be uncached so that the spinning on local GPU memory works
+  if ((muillm_error = __allocate_shared_gpu_memory(
     comm,
-    sizeof(uint64_t), // alloc 8 bytese even though we use only 4
-    (void**) &comm->signal_host,
-    (void**) &comm->signal
-  );
-
-  // initialize to 0
-  if (hipMemset(comm->signal, 0, sizeof(uint64_t)) != hipSuccess) {
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
-
-  if (comm->signal_host == nullptr || comm->signal == nullptr) {
-    return MUILLM_COMM_UNKNOWN_ERROR;
+    sizeof(int),
+    (void**)comm->signals,
+    /*zero_memory*/ true,
+    /*uncached_memory*/ true)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
   }
 
   // initialize buffer sets
@@ -398,7 +425,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
     __free_buffer_set(comm, comm->second_buffers);
 
     // free the signal memory
-    __deallocate_locked_shared_cpu_mem(comm, comm->signal_host);
+    __free_shared_gpu_memory(comm, (void**)comm->signals);
 
     // set the device before exiting
     if (hipSetDevice(local_rank) != hipSuccess) {
@@ -427,28 +454,86 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   return MUILLM_COMM_SUCCESS;
 }
 
-__global__ void __muillm_inc_wait_value_p2p_kernel(
-  volatile uint32_t* signal,
-  uint32_t seq_no
+__global__ void __muillm_inc_wait_value_p2p_tp2_kernel(
+  int* remote_signal0,
+  int* local_signal,
+  int seq_no
 ) {
   if (threadIdx.x == 0) {
     // increment the value
-    atomicAdd_system((uint32_t*) signal, 1);
+    atomicAdd_system(remote_signal0, 1);
 
     __threadfence_system();
 
-    // wait for the other ranks
+    // wait for all the other ranks to increment our value
+    // we spin on it, it won't generate PCIe traffic as it is local memory
     // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
     // have seen the previous one
-    while (*signal < seq_no) {
+    while (atomicAdd_system(local_signal, 0) < seq_no) {
       __builtin_amdgcn_s_sleep(2);
+      __threadfence_system();
     }
   }
 }
 
-static muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
-  __muillm_inc_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
-  return MUILLM_COMM_SUCCESS;
+__global__ void __muillm_inc_wait_value_p2p_tp4_kernel(
+  int* remote_signal0,
+  int* remote_signal1,
+  int* remote_signal2,
+  int* local_signal,
+  int seq_no
+) {
+  if (threadIdx.x == 0) {
+    // increment the value
+    atomicAdd_system(remote_signal0, 1);
+    atomicAdd_system(remote_signal1, 1);
+    atomicAdd_system(remote_signal2, 1);
+
+    __threadfence_system();
+
+    // wait for all the other ranks to increment our value
+    // we spin on it, it won't generate PCIe traffic as it is local memory
+    // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
+    // have seen the previous one
+    while (atomicAdd_system(local_signal, 0) < seq_no) {
+      __builtin_amdgcn_s_sleep(2);
+      __threadfence_system();
+    }
+  }
+}
+
+__global__ void __muillm_inc_wait_value_p2p_tp8_kernel(
+  int* remote_signal0,
+  int* remote_signal1,
+  int* remote_signal2,
+  int* remote_signal3,
+  int* remote_signal4,
+  int* remote_signal5,
+  int* remote_signal6,
+  int* local_signal,
+  int seq_no
+) {
+  if (threadIdx.x == 0) {
+    // increment the value
+    atomicAdd_system(remote_signal0, 1);
+    atomicAdd_system(remote_signal1, 1);
+    atomicAdd_system(remote_signal2, 1);
+    atomicAdd_system(remote_signal3, 1);
+    atomicAdd_system(remote_signal4, 1);
+    atomicAdd_system(remote_signal5, 1);
+    atomicAdd_system(remote_signal6, 1);
+
+    __threadfence_system();
+
+    // wait for all the other ranks to increment our value
+    // we spin on it, it won't generate PCIe traffic as it is local memory
+    // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
+    // have seen the previous one
+    while (atomicAdd_system(local_signal, 0) < seq_no) {
+      __builtin_amdgcn_s_sleep(2);
+      __threadfence_system();
+    }
+  }
 }
 
 static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_t stream) {
@@ -458,27 +543,60 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
   hipError_t hip_error;
   muillm_comm_error_t muillm_error;
 
-  if (comm->signal != nullptr) {
-    comm->signal_seq_no += local_size;
-    uint64_t seq_no = comm->signal_seq_no;
+  // all other GPUs will increase the counter but ourselves
+  // so we need to wait for an increment of K-1
+  comm->signal_seq_no += (local_size - 1);
+  uint64_t seq_no = comm->signal_seq_no;
 
-    // GPU barrier: all GPUs wait on each other
-    if (comm->cant_skip_cache_flush_event) {
-      // on MI100, we get a crash if not putting this event here
-      // record an event to flush caches
-      if (hipEventRecord(comm->cache_flush_event, stream) != hipSuccess) {
-        std::cout<<"Failed to record event "<<local_rank<<std::endl;
-        return MUILLM_COMM_UNKNOWN_ERROR;
-      }
+  // GPU barrier: all GPUs wait on each other
+  if (comm->cant_skip_cache_flush_event) {
+    // on MI100, we get a crash if not putting this event here
+    // record an event to flush caches
+    if (hipEventRecord(comm->cache_flush_event, stream) != hipSuccess) {
+      std::cout<<"Failed to record event "<<local_rank<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
     }
+  }
 
-    // write the values
-    if ((muillm_error = __mui_stream_inc_wait_value(stream, comm->signal, seq_no)) != MUILLM_COMM_SUCCESS) {
-      std::cout<<"inc value failed"<<std::endl;
-      return muillm_error;
-    }
+  // pack the remote counter pointers
+  int* remote_signals[MUILLM_COMM_MAX_GPUS];
+  int p = 0;
+  for (int d = 0; d < local_size; d++) {
+    if (d == local_rank) continue;
+    remote_signals[p] = comm->signals[d];
+    p++;
+  }
+
+  // write the values
+  if (local_size == 8) {
+    __muillm_inc_wait_value_p2p_tp8_kernel<<<1, 1, 0, stream>>>(
+      remote_signals[0],
+      remote_signals[1],
+      remote_signals[2],
+      remote_signals[3],
+      remote_signals[4],
+      remote_signals[5],
+      remote_signals[6],
+      comm->signals[local_rank],
+      seq_no
+    );
+  } else if (local_size == 4) {
+    __muillm_inc_wait_value_p2p_tp4_kernel<<<1, 1, 0, stream>>>(
+      remote_signals[0],
+      remote_signals[1],
+      remote_signals[2],
+      comm->signals[local_rank],
+      seq_no
+    );
+
+  } else if (local_size == 2) {
+    __muillm_inc_wait_value_p2p_tp2_kernel<<<1, 1, 0, stream>>>(
+      remote_signals[0],
+      comm->signals[local_rank],
+      seq_no
+    );
   } else {
-    return MUILLM_COMM_UNKNOWN_ERROR;
+    return MUILLM_COMM_UNSUPPORTED_SIZE;
   }
 
   return MUILLM_COMM_SUCCESS;
