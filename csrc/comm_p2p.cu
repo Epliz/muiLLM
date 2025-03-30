@@ -1481,7 +1481,8 @@ muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum(
   hipStream_t stream
 ) {
   int local_size = comm->local_size;
-  if (local_size <= 2 || count < LOW_LATENCY_THRESHOLD) {
+  if (false) {
+  //if (local_size <= 2 || count < LOW_LATENCY_THRESHOLD) {
     // the one step algorithm is good for small sizes
     // of for tp2
     return muillm_comm_p2p_one_step_placed_all_reduce_sum(
