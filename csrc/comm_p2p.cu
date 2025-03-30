@@ -19,6 +19,136 @@
 
 #include <iostream>
 
+
+struct __align__(8) half4 {
+  half x;
+  half y;
+  half z;
+  half w;
+};
+
+struct __align__(8) half8 {
+  half x;
+  half y;
+  half z;
+  half w;
+  half a;
+  half b;
+  half c;
+  half d;
+};
+
+struct __align__(8) float8 {
+  float x;
+  float y;
+  float z;
+  float w;
+  float a;
+  float b;
+  float c;
+  float d;
+};
+
+static inline __device__ half8 __hadd(half8 a, half8 b) {
+  half8 res;
+  res.x = __hadd(a.x, b.x);
+  res.y = __hadd(a.y, b.y);
+  res.z = __hadd(a.z, b.z);
+  res.w = __hadd(a.w, b.w);
+  res.a = __hadd(a.a, b.a);
+  res.b = __hadd(a.b, b.b);
+  res.c = __hadd(a.c, b.c);
+  res.d = __hadd(a.d, b.d);
+  return res;
+}
+
+static inline  __device__ half4 __hadd(half4 a, half4 b) {
+  half4 res;
+  res.x = __hadd(a.x, b.x);
+  res.y = __hadd(a.y, b.y);
+  res.z = __hadd(a.z, b.z);
+  res.w = __hadd(a.w, b.w);
+  return res;
+}
+
+static inline __device__ half2 __hadd(half2 a, half2 b) {
+  half2 res;
+  res.x = __hadd(a.x, b.x);
+  res.y = __hadd(a.y, b.y);
+  return res;
+}
+
+__device__ half2 load_nontemporal_half2(const half* p) {
+  float _v = __builtin_nontemporal_load((const float*)p);
+  return *((half2*)&_v);
+}
+
+__device__ half4 load_nontemporal_half4(const half* p) {
+  float _v0 = __builtin_nontemporal_load(((const float*)p));
+  float _v1 = __builtin_nontemporal_load(((const float*)p) + 1);
+
+  half2 _hv0 = *((half2*)&_v0);
+  half2 _hv1 = *((half2*)&_v1);
+
+  half4 v;
+  v.x = _hv0.x;
+  v.y = _hv0.y;
+  v.z = _hv1.x;
+  v.w = _hv1.y;
+
+  return v;
+}
+
+__device__ half8 load_nontemporal_half8(const half* p) {
+  float _v0 = __builtin_nontemporal_load(((const float*)p));
+  float _v1 = __builtin_nontemporal_load(((const float*)p) + 1);
+  float _v2 = __builtin_nontemporal_load(((const float*)p) + 2);
+  float _v3 = __builtin_nontemporal_load(((const float*)p) + 3);
+
+  half2 _hv0 = *((half2*)&_v0);
+  half2 _hv1 = *((half2*)&_v1);
+  half2 _hv2 = *((half2*)&_v2);
+  half2 _hv3 = *((half2*)&_v3);
+
+  half8 v;
+  v.x = _hv0.x;
+  v.y = _hv0.y;
+  v.z = _hv1.x;
+  v.w = _hv1.y;
+  v.a = _hv2.x;
+  v.b = _hv2.y;
+  v.c = _hv3.x;
+  v.d = _hv3.y;
+
+  return v;
+}
+
+__device__ float2 load_nontemporal_float2(const float* p) {
+  float _v0 = __builtin_nontemporal_load(((const float*)p));
+  float _v1 = __builtin_nontemporal_load(((const float*)p) + 1);
+
+  float2 v;
+  v.x = _v0;
+  v.y = _v1;
+
+  return v;
+}
+
+__device__ float4 load_nontemporal_float4(const float* p) {
+  float _v0 = __builtin_nontemporal_load(((const float*)p));
+  float _v1 = __builtin_nontemporal_load(((const float*)p) + 1);
+  float _v2 = __builtin_nontemporal_load(((const float*)p) + 2);
+  float _v3 = __builtin_nontemporal_load(((const float*)p) + 3);
+
+  float4 v;
+  v.x = _v0;
+  v.y = _v1;
+  v.z = _v2;
+  v.w = _v3;
+
+  return v;
+}
+
 static muillm_comm_error_t __mui_gpu_barrier(
   muillm_comm_p2p_t* comm,
   hipStream_t stream
@@ -616,6 +746,21 @@ typedef struct uint32x4{
 uint32_t x, y, z, w;
 } uint32x4_t;
 
+__device__ uint32x4_t load_nontemporal_uint4(const uint32_t* p) {
+  uint32_t _v0 = __builtin_nontemporal_load(((const uint32_t*)p));
+  uint32_t _v1 = __builtin_nontemporal_load(((const uint32_t*)p) + 1);
+  uint32_t _v2 = __builtin_nontemporal_load(((const uint32_t*)p) + 2);
+  uint32_t _v3 = __builtin_nontemporal_load(((const uint32_t*)p) + 3);
+
+  uint32x4_t v;
+  v.x = _v0;
+  v.y = _v1;
+  v.z = _v2;
+  v.w = _v3;
+
+  return v;
+}
+
 // copy one chunk of data from src to dst
 // (potentially the pointers have been adjusted by the caller)
 __device__ void __muillm_do_copy_p2p(
@@ -628,9 +773,9 @@ __device__ void __muillm_do_copy_p2p(
   if (i + (COPY_BYTES_PER_THREAD - 1) < N) {
     // can copy 16 bytes
 
-    const uint32x4_t* src_x16_ptr = (const uint32x4_t*)(&src_ptr[i]);
+    const uint32_t* src_u32_ptr = (const uint32_t*)(&src_ptr[i]);
     uint32x4_t* dst_x16_ptr = (uint32x4_t*)(&dst_ptr[i]);
-    *dst_x16_ptr = *src_x16_ptr;
+    *dst_x16_ptr = load_nontemporal_uint4(src_u32_ptr);
 
     i += COPY_BYTES_PER_THREAD;
   } else {
@@ -677,69 +822,11 @@ static muillm_comm_error_t __muillm_gpu_copy(void* dst, const void* src, size_t 
 #define ELEMENTS_PER_THREAD_FP32 4
 #define ELEMENTS_PER_BLOCK_FP32 (ELEMENTS_PER_THREAD_FP32 * THREADS_PER_BLOCK)
 
-struct __align__(8) half4 {
-  half x;
-  half y;
-  half z;
-  half w;
-};
-
-struct __align__(8) half8 {
-  half x;
-  half y;
-  half z;
-  half w;
-  half a;
-  half b;
-  half c;
-  half d;
-};
-
-struct __align__(8) float8 {
-  float x;
-  float y;
-  float z;
-  float w;
-  float a;
-  float b;
-  float c;
-  float d;
-};
-
-static inline __device__ half8 __hadd(half8 a, half8 b) {
-  half8 res;
-  res.x = __hadd(a.x, b.x);
-  res.y = __hadd(a.y, b.y);
-  res.z = __hadd(a.z, b.z);
-  res.w = __hadd(a.w, b.w);
-  res.a = __hadd(a.a, b.a);
-  res.b = __hadd(a.b, b.b);
-  res.c = __hadd(a.c, b.c);
-  res.d = __hadd(a.d, b.d);
-  return res;
-}
-
-static inline  __device__ half4 __hadd(half4 a, half4 b) {
-  half4 res;
-  res.x = __hadd(a.x, b.x);
-  res.y = __hadd(a.y, b.y);
-  res.z = __hadd(a.z, b.z);
-  res.w = __hadd(a.w, b.w);
-  return res;
-}
-
-static inline __device__ half2 __hadd(half2 a, half2 b) {
-  half2 res;
-  res.x = __hadd(a.x, b.x);
-  res.y = __hadd(a.y, b.y);
-  return res;
-}
-
 // TP2 kernels
 
 __global__ void __all_reduce_fp16_tp2_p2p_kernel(
   const half* x1,
-  const half* x2,
+  const half* local_x,
   half* y,
   unsigned N
 ) {
@@ -749,8 +836,8 @@ __global__ void __all_reduce_fp16_tp2_p2p_kernel(
     // full block
     // no remainder after that due to the block size being 8 * THREADS_PER_BLOCK
 
-    half8 x1x8 = *((half8*) &x1[i]);
-    half8 x2x8 = *((half8*) &x2[i]);
+    half8 x1x8 = load_nontemporal_half8(&x1[i]);
+    half8 x2x8 = *(const half8*)(&local_x[i]);
 
     half8 res = __hadd(x1x8, x2x8);
 
@@ -758,8 +845,8 @@ __global__ void __all_reduce_fp16_tp2_p2p_kernel(
   } else {
     // partial block
     if (i + 3 < N) {
-      half4 x1x4 = *((half4*) &x1[i]);
-      half4 x2x4 = *((half4*) &x2[i]);
+      half4 x1x4 = load_nontemporal_half4(&x1[i]);
+      half4 x2x4 = *(const half4*)(&local_x[i]);
   
       half4 res = __hadd(x1x4, x2x4);
 
@@ -768,8 +855,8 @@ __global__ void __all_reduce_fp16_tp2_p2p_kernel(
       i += 4;
     }
     if (i + 1 < N) {
-      half2 x1x2 = *((half2*) &x1[i]);
-      half2 x2x2 = *((half2*) &x2[i]);
+      half2 x1x2 = load_nontemporal_half2(&x1[i]);
+      half2 x2x2 = *(const half2*)(&local_x[i]);
 
       half2 res = __hadd(x1x2, x2x2);
 
@@ -778,7 +865,7 @@ __global__ void __all_reduce_fp16_tp2_p2p_kernel(
       i += 2;
     }
     if (i < N) {
-      half res = __hadd(x1[i], x2[i]);
+      half res = __hadd(x1[i], local_x[i]);
 
       y[i] = res;
     }
@@ -787,7 +874,7 @@ __global__ void __all_reduce_fp16_tp2_p2p_kernel(
 
 __global__ void __all_reduce_fp32_tp2_p2p_kernel(
   const float* x1,
-  const float* x2,
+  const float* local_x,
   float* y,
   unsigned N
 ) {
@@ -797,8 +884,8 @@ __global__ void __all_reduce_fp32_tp2_p2p_kernel(
     // full block
     // no remainder after that due to the block size being 4 * THREADS_PER_BLOCK
 
-    float4 x1x4 = *((float4*) &x1[i]);
-    float4 x2x4 = *((float4*) &x2[i]);
+    float4 x1x4 = load_nontemporal_float4(&x1[i]);
+    float4 x2x4 = *(const float4*)(&local_x[i]);
 
     float4 res = x1x4 + x2x4;
 
@@ -807,8 +894,8 @@ __global__ void __all_reduce_fp32_tp2_p2p_kernel(
   } else {
     // partial block
     if (i + 1 < N) {
-      float2 x1x2 = *((float2*) &x1[i]);
-      float2 x2x2 = *((float2*) &x2[i]);
+      float2 x1x2 = load_nontemporal_float2(&x1[i]);
+      float2 x2x2 = *(const float2*)(&local_x[i]);
 
       float2 res = x1x2 + x2x2;
 
@@ -817,7 +904,7 @@ __global__ void __all_reduce_fp32_tp2_p2p_kernel(
       i += 2;
     }
     if (i < N) {
-      float res = x1[i] + x2[i];
+      float res = x1[i] + local_x[i];
       y[i] = res;
     }
   }
@@ -829,7 +916,7 @@ __global__ void __all_reduce_fp16_tp4_p2p_kernel(
   const half* x1,
   const half* x2,
   const half* x3,
-  const half* x4,
+  const half* local_x,
   half* y,
   unsigned N
 ) {
@@ -840,10 +927,10 @@ __global__ void __all_reduce_fp16_tp4_p2p_kernel(
     // full block
     // no remainder after that due to the block size being 8 * THREADS_PER_BLOCK
 
-    half8 x1x8 = *((half8*) &x1[i]);
-    half8 x2x8 = *((half8*) &x2[i]);
-    half8 x3x8 = *((half8*) &x3[i]);
-    half8 x4x8 = *((half8*) &x4[i]);
+    half8 x1x8 = load_nontemporal_half8(&x1[i]);
+    half8 x2x8 = load_nontemporal_half8(&x2[i]);
+    half8 x3x8 = load_nontemporal_half8(&x3[i]);
+    half8 x4x8 = *(const half8*)(&local_x[i]);
 
     half8 res = __hadd(__hadd(x1x8, x2x8), __hadd(x3x8, x4x8));
 
@@ -851,10 +938,10 @@ __global__ void __all_reduce_fp16_tp4_p2p_kernel(
   } else {
     // partial block
     if (i + 3 < N) {
-      half4 x1x4 = *((half4*) &x1[i]);
-      half4 x2x4 = *((half4*) &x2[i]);
-      half4 x3x4 = *((half4*) &x3[i]);
-      half4 x4x4 = *((half4*) &x4[i]);
+      half4 x1x4 = load_nontemporal_half4(&x1[i]);
+      half4 x2x4 = load_nontemporal_half4(&x2[i]);
+      half4 x3x4 = load_nontemporal_half4(&x3[i]);
+      half4 x4x4 = *(const half4*)(&local_x[i]);
 
       half4 res = __hadd(__hadd(x1x4, x2x4), __hadd(x3x4, x4x4));
 
@@ -863,10 +950,10 @@ __global__ void __all_reduce_fp16_tp4_p2p_kernel(
       i += 4;
     }
     if (i + 1 < N) {
-      half2 x1x2 = *((half2*) &x1[i]);
-      half2 x2x2 = *((half2*) &x2[i]);
-      half2 x3x2 = *((half2*) &x3[i]);
-      half2 x4x2 = *((half2*) &x4[i]);
+      half2 x1x2 = load_nontemporal_half2(&x1[i]);
+      half2 x2x2 = load_nontemporal_half2(&x2[i]);
+      half2 x3x2 = load_nontemporal_half2(&x3[i]);
+      half2 x4x2 = *(const half2*)(&local_x[i]);
 
       half2 res = __hadd(__hadd(x1x2, x2x2), __hadd(x3x2, x4x2));
 
@@ -875,7 +962,7 @@ __global__ void __all_reduce_fp16_tp4_p2p_kernel(
       i += 2;
     }
     if (i < N) {
-      half res = __hadd(__hadd(x1[i], x2[i]), __hadd(x3[i], x4[i]));
+      half res = __hadd(__hadd(x1[i], x2[i]), __hadd(x3[i], local_x[i]));
       y[i] = res;
     }
   }
@@ -885,7 +972,7 @@ __global__ void __all_reduce_fp32_tp4_p2p_kernel(
   const float* x1,
   const float* x2,
   const float* x3,
-  const float* x4,
+  const float* local_x,
   float* y,
   unsigned N
 ) {
@@ -895,20 +982,20 @@ __global__ void __all_reduce_fp32_tp4_p2p_kernel(
     // full block
     // no remainder after that due to the block size being 4 * THREADS_PER_BLOCK
 
-    float4 x1x4 = *((float4*) &x1[i]);
-    float4 x2x4 = *((float4*) &x2[i]);
-    float4 x3x4 = *((float4*) &x3[i]);
-    float4 x4x4 = *((float4*) &x4[i]);
+    float4 x1x4 = load_nontemporal_float4(&x1[i]);
+    float4 x2x4 = load_nontemporal_float4(&x2[i]);
+    float4 x3x4 = load_nontemporal_float4(&x3[i]);
+    float4 x4x4 = *(const float4*)(&local_x[i]);
 
     float4 res = (x1x4 + x2x4) + (x3x4 + x4x4);
     *((float4*) &y[i]) = res;
   } else {
     // partial block
     if (i + 1 < N) {
-      float2 x1x2 = *((float2*) &x1[i]);
-      float2 x2x2 = *((float2*) &x2[i]);
-      float2 x3x2 = *((float2*) &x3[i]);
-      float2 x4x2 = *((float2*) &x4[i]);
+      float2 x1x2 = load_nontemporal_float2(&x1[i]);
+      float2 x2x2 = load_nontemporal_float2(&x2[i]);
+      float2 x3x2 = load_nontemporal_float2(&x3[i]);
+      float2 x4x2 = *(const float2*)(&local_x[i]);
 
       float2 res = (x1x2 + x2x2) + (x3x2 + x4x2);
       *((float2*) &y[i]) = res;
@@ -916,7 +1003,7 @@ __global__ void __all_reduce_fp32_tp4_p2p_kernel(
       i += 2;
     }
     if (i < N) {
-      float res = x1[i] + x2[i] + x3[i] + x4[i];
+      float res = x1[i] + x2[i] + x3[i] + local_x[i];
       y[i] = res;
     }
   }
@@ -932,7 +1019,7 @@ __global__ void __all_reduce_fp16_tp8_p2p_kernel(
   const half* x5,
   const half* x6,
   const half* x7,
-  const half* x8,
+  const half* local_x,
   half* y,
   unsigned N
 ) {
@@ -941,14 +1028,14 @@ __global__ void __all_reduce_fp16_tp8_p2p_kernel(
   if (i + 7 < N) {
     // full block
     // no remainder after that due to the block size being 8 * THREADS_PER_BLOCK
-    half8 x1x8 = *((half8*) &x1[i]);
-    half8 x2x8 = *((half8*) &x2[i]);
-    half8 x3x8 = *((half8*) &x3[i]);
-    half8 x4x8 = *((half8*) &x4[i]);
-    half8 x5x8 = *((half8*) &x5[i]);
-    half8 x6x8 = *((half8*) &x6[i]);
-    half8 x7x8 = *((half8*) &x7[i]);
-    half8 x8x8 = *((half8*) &x8[i]);
+    half8 x1x8 = load_nontemporal_half8(&x1[i]);
+    half8 x2x8 = load_nontemporal_half8(&x2[i]);
+    half8 x3x8 = load_nontemporal_half8(&x3[i]);
+    half8 x4x8 = load_nontemporal_half8(&x4[i]);
+    half8 x5x8 = load_nontemporal_half8(&x5[i]);
+    half8 x6x8 = load_nontemporal_half8(&x6[i]);
+    half8 x7x8 = load_nontemporal_half8(&x7[i]);
+    half8 x8x8 = *(const half8*)(&local_x[i]);
 
     half8 x1x2x8 = __hadd(x1x8, x2x8);
     half8 x3x4x8 = __hadd(x3x8, x4x8);
@@ -965,14 +1052,14 @@ __global__ void __all_reduce_fp16_tp8_p2p_kernel(
   } else {
     // partial block
     if (i + 3 < N) {
-      half4 x1x4 = *((half4*) &x1[i]);
-      half4 x2x4 = *((half4*) &x2[i]);
-      half4 x3x4 = *((half4*) &x3[i]);
-      half4 x4x4 = *((half4*) &x4[i]);
-      half4 x5x4 = *((half4*) &x5[i]);
-      half4 x6x4 = *((half4*) &x6[i]);
-      half4 x7x4 = *((half4*) &x7[i]);
-      half4 x8x4 = *((half4*) &x8[i]);
+      half4 x1x4 = load_nontemporal_half4(&x1[i]);
+      half4 x2x4 = load_nontemporal_half4(&x2[i]);
+      half4 x3x4 = load_nontemporal_half4(&x3[i]);
+      half4 x4x4 = load_nontemporal_half4(&x4[i]);
+      half4 x5x4 = load_nontemporal_half4(&x5[i]);
+      half4 x6x4 = load_nontemporal_half4(&x6[i]);
+      half4 x7x4 = load_nontemporal_half4(&x7[i]);
+      half4 x8x4 = *(const half4*)(&local_x[i]);
 
       half4 x1x2x4 = __hadd(x1x4, x2x4);
       half4 x3x4x4 = __hadd(x3x4, x4x4);
@@ -989,14 +1076,14 @@ __global__ void __all_reduce_fp16_tp8_p2p_kernel(
       i += 4;
     }
     if (i + 1 < N) {
-      half2 x1x2 = *((half2*) &x1[i]);
-      half2 x2x2 = *((half2*) &x2[i]);
-      half2 x3x2 = *((half2*) &x3[i]);
-      half2 x4x2 = *((half2*) &x4[i]);
-      half2 x5x2 = *((half2*) &x5[i]);
-      half2 x6x2 = *((half2*) &x6[i]);
-      half2 x7x2 = *((half2*) &x7[i]);
-      half2 x8x2 = *((half2*) &x8[i]);
+      half2 x1x2 = load_nontemporal_half2(&x1[i]);
+      half2 x2x2 = load_nontemporal_half2(&x2[i]);
+      half2 x3x2 = load_nontemporal_half2(&x3[i]);
+      half2 x4x2 = load_nontemporal_half2(&x4[i]);
+      half2 x5x2 = load_nontemporal_half2(&x5[i]);
+      half2 x6x2 = load_nontemporal_half2(&x6[i]);
+      half2 x7x2 = load_nontemporal_half2(&x7[i]);
+      half2 x8x2 = *(const half2*)(&local_x[i]);
 
       half2 x1x2x2 = __hadd(x1x2, x2x2);
       half2 x3x4x2 = __hadd(x3x2, x4x2);
@@ -1016,7 +1103,7 @@ __global__ void __all_reduce_fp16_tp8_p2p_kernel(
       half x3x4 = __hadd(x3[i], x4[i]);
       half x1x4 = __hadd(x1x2, x3x4);
       half x5x6 = __hadd(x5[i], x6[i]);
-      half x7x8 = __hadd(x7[i], x8[i]);
+      half x7x8 = __hadd(x7[i], local_x[i]);
       half x5x8 = __hadd(x5x6, x7x8);
       half res = __hadd(x1x4, x5x8);
       y[i] = res;
@@ -1032,21 +1119,21 @@ __global__ void __all_reduce_fp32_tp8_p2p_kernel(
   const float* x5,
   const float* x6,
   const float* x7,
-  const float* x8,
+  const float* local_x,
   float* y,
   unsigned N
 ) {
   unsigned i = blockIdx.x * ELEMENTS_PER_BLOCK_FP32 + ELEMENTS_PER_THREAD_FP32 * threadIdx.x;
 
   if (i + 3 < N) {
-    float4 x1x4 = *((float4*) &x1[i]);
-    float4 x2x4 = *((float4*) &x2[i]);
-    float4 x3x4 = *((float4*) &x3[i]);
-    float4 x4x4 = *((float4*) &x4[i]);
-    float4 x5x4 = *((float4*) &x5[i]);
-    float4 x6x4 = *((float4*) &x6[i]);
-    float4 x7x4 = *((float4*) &x7[i]);
-    float4 x8x4 = *((float4*) &x8[i]);
+    float4 x1x4 = load_nontemporal_float4(&x1[i]);
+    float4 x2x4 = load_nontemporal_float4(&x2[i]);
+    float4 x3x4 = load_nontemporal_float4(&x3[i]);
+    float4 x4x4 = load_nontemporal_float4(&x4[i]);
+    float4 x5x4 = load_nontemporal_float4(&x5[i]);
+    float4 x6x4 = load_nontemporal_float4(&x6[i]);
+    float4 x7x4 = load_nontemporal_float4(&x7[i]);
+    float4 x8x4 = *(const float4*)(&local_x[i]);
 
     float4 x1x2x4 = x1x4 + x2x4;
     float4 x3x4x4 = x3x4 + x4x4;
@@ -1061,14 +1148,14 @@ __global__ void __all_reduce_fp32_tp8_p2p_kernel(
   } else {
     // partial block
     if (i + 1 < N) {
-      float2 x1x2 = *((float2*) &x1[i]);
-      float2 x2x2 = *((float2*) &x2[i]);
-      float2 x3x2 = *((float2*) &x3[i]);
-      float2 x4x2 = *((float2*) &x4[i]);
-      float2 x5x2 = *((float2*) &x5[i]);
-      float2 x6x2 = *((float2*) &x6[i]);
-      float2 x7x2 = *((float2*) &x7[i]);
-      float2 x8x2 = *((float2*) &x8[i]);
+      float2 x1x2 = load_nontemporal_float2(&x1[i]);
+      float2 x2x2 = load_nontemporal_float2(&x2[i]);
+      float2 x3x2 = load_nontemporal_float2(&x3[i]);
+      float2 x4x2 = load_nontemporal_float2(&x4[i]);
+      float2 x5x2 = load_nontemporal_float2(&x5[i]);
+      float2 x6x2 = load_nontemporal_float2(&x6[i]);
+      float2 x7x2 = load_nontemporal_float2(&x7[i]);
+      float2 x8x2 = *(const float2*)(&local_x[i]);
 
       float2 x1x2x2 = x1x2 + x2x2;
       float2 x3x4x2 = x3x2 + x4x2;
@@ -1088,7 +1175,7 @@ __global__ void __all_reduce_fp32_tp8_p2p_kernel(
       float x3x4 = (x3[i] + x4[i]);
       float x1x4 = x1x2 + x3x4;
       float x5x6 = (x5[i] + x6[i]);
-      float x7x8 = (x7[i] + x8[i]);
+      float x7x8 = (x7[i] + local_x[i]);
       float x5x8 = x5x6 + x7x8;
       float res = x1x4 + x5x8;
       y[i] = res;
@@ -1127,34 +1214,42 @@ static inline muillm_comm_error_t __muillm_reduce_chunk(
   // do the reduction
   const int threads_per_blocks = THREADS_PER_BLOCK;
 
+  const void* packed_src_ptrs[MUILLM_COMM_MAX_GPUS];
+  int p = 0;
+  for (int d = 0; d < local_size; d++) {
+    if (d == local_rank) continue;
+    packed_src_ptrs[p] = src_ptrs[d];
+    p++;
+  }
+
   if (datatype == MUILLM_COMM_FP16) {
     const int num_blocks = DIV_ROUND_UP(count, ELEMENTS_PER_BLOCK_FP16);
     if (local_size == 8) {
       __all_reduce_fp16_tp8_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        ((const half*) src_ptrs[0]) + offset,
-        ((const half*) src_ptrs[1]) + offset,
-        ((const half*) src_ptrs[2]) + offset,
-        ((const half*) src_ptrs[3]) + offset,
-        ((const half*) src_ptrs[4]) + offset,
-        ((const half*) src_ptrs[5]) + offset,
-        ((const half*) src_ptrs[6]) + offset,
-        ((const half*) src_ptrs[7]) + offset,
+        ((const half*) packed_src_ptrs[0]) + offset,
+        ((const half*) packed_src_ptrs[1]) + offset,
+        ((const half*) packed_src_ptrs[2]) + offset,
+        ((const half*) packed_src_ptrs[3]) + offset,
+        ((const half*) packed_src_ptrs[4]) + offset,
+        ((const half*) packed_src_ptrs[5]) + offset,
+        ((const half*) packed_src_ptrs[6]) + offset,
+        ((const half*) src_ptrs[local_rank]) + offset,
         ((half*) dst_ptr) + offset,
         count
       );
     } else if (local_size == 4) {
       __all_reduce_fp16_tp4_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        ((const half*) src_ptrs[0]) + offset,
-        ((const half*) src_ptrs[1]) + offset,
-        ((const half*) src_ptrs[2]) + offset,
-        ((const half*) src_ptrs[3]) + offset,
+        ((const half*) packed_src_ptrs[0]) + offset,
+        ((const half*) packed_src_ptrs[1]) + offset,
+        ((const half*) packed_src_ptrs[2]) + offset,
+        ((const half*) src_ptrs[local_rank]) + offset,
         ((half*) dst_ptr) + offset,
         count
       );
     } else if (local_size == 2) {
       __all_reduce_fp16_tp2_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        ((const half*) src_ptrs[0]) + offset,
-        ((const half*) src_ptrs[1]) + offset,
+        ((const half*) packed_src_ptrs[0]) + offset,
+        ((const half*) src_ptrs[local_rank]) + offset,
         ((half*) dst_ptr) + offset,
         count
       );
@@ -1166,30 +1261,30 @@ static inline muillm_comm_error_t __muillm_reduce_chunk(
     const int num_blocks = DIV_ROUND_UP(count, ELEMENTS_PER_BLOCK_FP32);
     if (local_size == 8) {
       __all_reduce_fp32_tp8_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        ((const float*) src_ptrs[0]) + offset,
-        ((const float*) src_ptrs[1]) + offset,
-        ((const float*) src_ptrs[2]) + offset,
-        ((const float*) src_ptrs[3]) + offset,
-        ((const float*) src_ptrs[4]) + offset,
-        ((const float*) src_ptrs[5]) + offset,
-        ((const float*) src_ptrs[6]) + offset,
-        ((const float*) src_ptrs[7]) + offset,
+        ((const float*) packed_src_ptrs[0]) + offset,
+        ((const float*) packed_src_ptrs[1]) + offset,
+        ((const float*) packed_src_ptrs[2]) + offset,
+        ((const float*) packed_src_ptrs[3]) + offset,
+        ((const float*) packed_src_ptrs[4]) + offset,
+        ((const float*) packed_src_ptrs[5]) + offset,
+        ((const float*) packed_src_ptrs[6]) + offset,
+        ((const float*) src_ptrs[local_rank]) + offset,
         ((float*) dst_ptr) + offset,
         count
       );
     } else if (local_size == 4) {
       __all_reduce_fp32_tp4_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        ((const float*) src_ptrs[0]) + offset,
-        ((const float*) src_ptrs[1]) + offset,
-        ((const float*) src_ptrs[2]) + offset,
-        ((const float*) src_ptrs[3]) + offset,
+        ((const float*) packed_src_ptrs[0]) + offset,
+        ((const float*) packed_src_ptrs[1]) + offset,
+        ((const float*) packed_src_ptrs[2]) + offset,
+        ((const float*) src_ptrs[local_rank]) + offset,
         ((float*) dst_ptr) + offset,
         count
       );
     } else if (local_size == 2) {
       __all_reduce_fp32_tp2_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-        ((const float*) src_ptrs[0]) + offset,
-        ((const float*) src_ptrs[1]) + offset,
+        ((const float*) packed_src_ptrs[0]) + offset,
+        ((const float*) src_ptrs[local_rank]) + offset,
         ((float*) dst_ptr) + offset,
         count
       );
