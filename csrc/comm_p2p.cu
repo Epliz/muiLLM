@@ -761,6 +761,8 @@ __device__ uint32x4_t load_nontemporal_uint4(const uint32_t* p) {
   return v;
 }
 
+// TODO: copy x2,x4 kernels where we copy more per block
+
 // copy one chunk of data from src to dst
 // (potentially the pointers have been adjusted by the caller)
 __device__ void __muillm_do_copy_p2p(
@@ -780,6 +782,42 @@ __device__ void __muillm_do_copy_p2p(
     i += COPY_BYTES_PER_THREAD;
   } else {
     // non vectorized copy
+    for (unsigned b = 0; b < COPY_BYTES_PER_THREAD; b++) {
+      if (i < N) {
+        dst_ptr[i] = src_ptr[i];
+        i++;
+      }
+    }
+  }
+}
+
+__device__ void __muillm_do_copyx2_p2p(
+  const uint8_t* src_ptr,
+  uint8_t* dst_ptr,
+  unsigned N
+) {
+  unsigned blockStart = blockIdx.x * (2 * COPY_BYTES_PER_BLOCK);
+  unsigned blockEnd = std::min(blockStart + (2 * COPY_BYTES_PER_BLOCK), N);
+  unsigned i = blockStart + (threadIdx.x * COPY_BYTES_PER_THREAD);
+
+  if (blockStart + (2 * COPY_BYTES_PER_BLOCK - 1) < blockEnd) {
+    // full block
+
+    uint32x4_t* dst_x16_ptr0 = (uint32x4_t*)(&dst_ptr[i]);
+    uint32x4_t* dst_x16_ptr1 = (uint32x4_t*)(&dst_ptr[i + COPY_BYTES_PER_BLOCK]);
+    *dst_x16_ptr0 = load_nontemporal_uint4((const uint32_t*)(&src_ptr[i + 0]));
+    *dst_x16_ptr1 = load_nontemporal_uint4((const uint32_t*)(&src_ptr[i + COPY_BYTES_PER_BLOCK]));
+
+    i += COPY_BYTES_PER_THREAD;
+  } else {
+    if (i + (COPY_BYTES_PER_THREAD - 1) < N) {
+      // can copy 16 bytes
+      uint32x4_t* dst_x16_ptr = (uint32x4_t*)(&dst_ptr[i]);
+      *dst_x16_ptr = load_nontemporal_uint4((const uint32_t*)(&src_ptr[i]));
+  
+      i += COPY_BYTES_PER_THREAD;
+    }
+    // non vectorized copy for remainder
     for (unsigned b = 0; b < COPY_BYTES_PER_THREAD; b++) {
       if (i < N) {
         dst_ptr[i] = src_ptr[i];
@@ -1331,6 +1369,7 @@ muillm_comm_error_t muillm_comm_p2p_one_step_placed_all_reduce_sum(
 }
 
 // TODO: for tp2 we could precompute the offsets and use the normal copy kernel
+template<bool x2_copy>
 __global__ void __muillm_chunk_copy_fp16_tp2_p2p_kernel(
   const half* src_ptr0,
   const half* src_ptr1,
@@ -1352,13 +1391,22 @@ __global__ void __muillm_chunk_copy_fp16_tp2_p2p_kernel(
   const half* src_ptrs[2] = {src_ptr0, src_ptr1};
 
   // copy the chunk
-  __muillm_do_copy_p2p(
-    (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
-    (uint8_t*) (dst_ptr + chunk_start),
-    actual_chunk_size * 2
-  );
+  if (x2_copy) {
+    __muillm_do_copyx2_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 2
+    );
+  } else {
+    __muillm_do_copy_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 2
+    );
+  }
 }
 
+template<bool x2_copy>
 __global__ void __muillm_chunk_copy_fp32_tp2_p2p_kernel(
   const float* src_ptr0,
   const float* src_ptr1,
@@ -1380,13 +1428,23 @@ __global__ void __muillm_chunk_copy_fp32_tp2_p2p_kernel(
   const float* src_ptrs[2] = {src_ptr0, src_ptr1};
 
   // copy the chunk
-  __muillm_do_copy_p2p(
-    (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
-    (uint8_t*) (dst_ptr + chunk_start),
-    actual_chunk_size * 4
-  );
+  if (x2_copy) {
+    // copy the chunk
+    __muillm_do_copyx2_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 4
+    );
+  } else {
+    __muillm_do_copy_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 4
+    );
+  }
 }
 
+template<bool x2_copy>
 __global__ void __muillm_chunk_copy_fp16_tp4_p2p_kernel(
   const half* src_ptr0,
   const half* src_ptr1,
@@ -1410,14 +1468,23 @@ __global__ void __muillm_chunk_copy_fp16_tp4_p2p_kernel(
   const half* src_ptrs[4] = {src_ptr0, src_ptr1, src_ptr2, src_ptr3};
 
   // copy the chunk
-  __muillm_do_copy_p2p(
-    (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
-    (uint8_t*) (dst_ptr + chunk_start),
-    actual_chunk_size * 2
-  );
+  if (x2_copy) {
+    // copy the chunk
+    __muillm_do_copyx2_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 2
+    );
+  } else {
+    __muillm_do_copy_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 2
+    );
+  }
 }
 
-
+template<bool x2_copy>
 __global__ void __muillm_chunk_copy_fp32_tp4_p2p_kernel(
   const float* src_ptr0,
   const float* src_ptr1,
@@ -1441,13 +1508,23 @@ __global__ void __muillm_chunk_copy_fp32_tp4_p2p_kernel(
   const float* src_ptrs[4] = {src_ptr0, src_ptr1, src_ptr2, src_ptr3};
 
   // copy the chunk
-  __muillm_do_copy_p2p(
-    (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
-    (uint8_t*) (dst_ptr + chunk_start),
-    actual_chunk_size * 4
-  );
+  if (x2_copy) {
+    // copy the chunk
+    __muillm_do_copyx2_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 4
+    );
+  } else {
+    __muillm_do_copy_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 4
+    );
+  }
 }
 
+template<bool x2_copy>
 __global__ void __muillm_chunk_copy_fp16_tp8_p2p_kernel(
   const half* src_ptr0,
   const half* src_ptr1,
@@ -1475,13 +1552,23 @@ __global__ void __muillm_chunk_copy_fp16_tp8_p2p_kernel(
   const half* src_ptrs[8] = {src_ptr0, src_ptr1, src_ptr2, src_ptr3, src_ptr4, src_ptr5, src_ptr6, src_ptr7};
 
   // copy the chunk
-  __muillm_do_copy_p2p(
-    (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
-    (uint8_t*) (dst_ptr + chunk_start),
-    actual_chunk_size * 2
-  );
+  if (x2_copy) {
+    // copy the chunk
+    __muillm_do_copyx2_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 2
+    );
+  } else {
+    __muillm_do_copy_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 2
+    );
+  }
 }
 
+template<bool x2_copy>
 __global__ void __muillm_chunk_copy_fp32_tp8_p2p_kernel(
   const float* src_ptr0,
   const float* src_ptr1,
@@ -1509,11 +1596,20 @@ __global__ void __muillm_chunk_copy_fp32_tp8_p2p_kernel(
   const float* src_ptrs[8] = {src_ptr0, src_ptr1, src_ptr2, src_ptr3, src_ptr4, src_ptr5, src_ptr6, src_ptr7};
 
   // copy the chunk
-  __muillm_do_copy_p2p(
-    (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
-    (uint8_t*) (dst_ptr + chunk_start),
-    actual_chunk_size * 4
-  );
+  if (x2_copy) {
+    // copy the chunk
+    __muillm_do_copyx2_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 4
+    );
+  } else {
+    __muillm_do_copy_p2p(
+      (const uint8_t*) (src_ptrs[chunk_idx] + chunk_start),
+      (uint8_t*) (dst_ptr + chunk_start),
+      actual_chunk_size * 4
+    );
+  }
 }
 
 // two step algorithm where
@@ -1580,47 +1676,99 @@ muillm_comm_error_t muillm_comm_p2p_two_steps_placed_all_reduce_sum(
   const int threads_per_blocks = THREADS_PER_BLOCK;
   int num_other_chunks = local_size - 1;
 
+  int num_simd_lanes = comm->gpu_info->simd_lanes;
+
   if (datatype == MUILLM_COMM_FP16) {
     const int num_blocks = DIV_ROUND_UP(max_chunk_size, COPY_FP16S_PER_BLOCK);
 
+    const int num_total_blocks = num_blocks * local_size;
+    const int num_total_threads = num_total_blocks * threads_per_blocks;
+
     if (local_size == 8) {
-      __muillm_chunk_copy_fp16_tp8_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
-        (const half*) src_ptrs[0],
-        (const half*) src_ptrs[1],
-        (const half*) src_ptrs[2],
-        (const half*) src_ptrs[3],
-        (const half*) src_ptrs[4],
-        (const half*) src_ptrs[5],
-        (const half*) src_ptrs[6],
-        (const half*) src_ptrs[7],
-        (half*) dst_ptr,
-        count,
-        chunk_size,
-        local_rank,
-        local_size
-      );
+      if (num_total_threads > 4 * num_simd_lanes) {
+        // use x2 copy
+        __muillm_chunk_copy_fp16_tp8_p2p_kernel</*x2_copy*/ true><<<dim3(num_blocks / 2, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const half*) src_ptrs[0],
+          (const half*) src_ptrs[1],
+          (const half*) src_ptrs[2],
+          (const half*) src_ptrs[3],
+          (const half*) src_ptrs[4],
+          (const half*) src_ptrs[5],
+          (const half*) src_ptrs[6],
+          (const half*) src_ptrs[7],
+          (half*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        );
+      } else {
+        __muillm_chunk_copy_fp16_tp8_p2p_kernel</*x2_copy*/ false><<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const half*) src_ptrs[0],
+          (const half*) src_ptrs[1],
+          (const half*) src_ptrs[2],
+          (const half*) src_ptrs[3],
+          (const half*) src_ptrs[4],
+          (const half*) src_ptrs[5],
+          (const half*) src_ptrs[6],
+          (const half*) src_ptrs[7],
+          (half*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        );
+      }
     } else if (local_size == 4) {
-      __muillm_chunk_copy_fp16_tp4_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
-        (const half*) src_ptrs[0],
-        (const half*) src_ptrs[1],
-        (const half*) src_ptrs[2],
-        (const half*) src_ptrs[3],
-        (half*) dst_ptr,
-        count,
-        chunk_size,
-        local_rank,
-        local_size
-      );
+      if (num_total_threads > 4 * num_simd_lanes) {
+        // use x2 copy
+        __muillm_chunk_copy_fp16_tp4_p2p_kernel</*x2_copy*/ true><<<dim3(num_blocks / 2, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const half*) src_ptrs[0],
+          (const half*) src_ptrs[1],
+          (const half*) src_ptrs[2],
+          (const half*) src_ptrs[3],
+          (half*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        );
+      } else {
+        __muillm_chunk_copy_fp16_tp4_p2p_kernel</*x2_copy*/ false><<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const half*) src_ptrs[0],
+          (const half*) src_ptrs[1],
+          (const half*) src_ptrs[2],
+          (const half*) src_ptrs[3],
+          (half*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        );
+      }
     } else if (local_size == 2) {
-      __muillm_chunk_copy_fp16_tp2_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
-        (const half*) src_ptrs[0],
-        (const half*) src_ptrs[1],
-        (half*) dst_ptr,
-        count,
-        chunk_size,
-        local_rank,
-        local_size
-      );
+      if (num_total_threads > 4 * num_simd_lanes) {
+        // use x2 copy
+        __muillm_chunk_copy_fp16_tp2_p2p_kernel</*x2_copy*/ true><<<dim3(num_blocks / 2, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const half*) src_ptrs[0],
+          (const half*) src_ptrs[1],
+          (half*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        );
+      } else {
+        __muillm_chunk_copy_fp16_tp2_p2p_kernel</*x2_copy*/ false><<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const half*) src_ptrs[0],
+          (const half*) src_ptrs[1],
+          (half*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        );
+      }
     } else {
       std::cout<<"reduction unsupported tp size"<<std::endl;
       return MUILLM_COMM_UNKNOWN_ERROR;
@@ -1628,44 +1776,94 @@ muillm_comm_error_t muillm_comm_p2p_two_steps_placed_all_reduce_sum(
   } else if (datatype == MUILLM_COMM_FP32) {
     const int num_blocks = DIV_ROUND_UP(max_chunk_size, COPY_FP32S_PER_BLOCK);
 
+    const int num_total_blocks = num_blocks * local_size;
+    const int num_total_threads = num_total_blocks * threads_per_blocks;
+
     if (local_size == 8) {
-      __muillm_chunk_copy_fp32_tp8_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
-        (const float*) src_ptrs[0],
-        (const float*) src_ptrs[1],
-        (const float*) src_ptrs[2],
-        (const float*) src_ptrs[3],
-        (const float*) src_ptrs[4],
-        (const float*) src_ptrs[5],
-        (const float*) src_ptrs[6],
-        (const float*) src_ptrs[7],
-        (float*) dst_ptr,
-        count,
-        chunk_size,
-        local_rank,
-        local_size
-      );
+      if (num_total_threads > 4 * num_simd_lanes) {
+        // use x2 copy
+        __muillm_chunk_copy_fp32_tp8_p2p_kernel</*x2_copy*/ true><<<dim3(num_blocks / 2, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const float*) src_ptrs[0],
+          (const float*) src_ptrs[1],
+          (const float*) src_ptrs[2],
+          (const float*) src_ptrs[3],
+          (const float*) src_ptrs[4],
+          (const float*) src_ptrs[5],
+          (const float*) src_ptrs[6],
+          (const float*) src_ptrs[7],
+          (float*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        );
+      } else {
+        __muillm_chunk_copy_fp32_tp8_p2p_kernel</*x2_copy*/ false><<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const float*) src_ptrs[0],
+          (const float*) src_ptrs[1],
+          (const float*) src_ptrs[2],
+          (const float*) src_ptrs[3],
+          (const float*) src_ptrs[4],
+          (const float*) src_ptrs[5],
+          (const float*) src_ptrs[6],
+          (const float*) src_ptrs[7],
+          (float*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        );
+      }
     } else if (local_size == 4) {
-      __muillm_chunk_copy_fp32_tp4_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
-        (const float*) src_ptrs[0],
-        (const float*) src_ptrs[1],
-        (const float*) src_ptrs[2],
-        (const float*) src_ptrs[3],
-        (float*) dst_ptr,
-        count,
-        chunk_size,
-        local_rank,
-        local_size
-      );
+      if (num_total_threads > 4 * num_simd_lanes) {
+        // use x2 copy
+        __muillm_chunk_copy_fp32_tp4_p2p_kernel</*x2_copy*/ true><<<dim3(num_blocks / 2, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const float*) src_ptrs[0],
+          (const float*) src_ptrs[1],
+          (const float*) src_ptrs[2],
+          (const float*) src_ptrs[3],
+          (float*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        ); 
+      } else {
+        __muillm_chunk_copy_fp32_tp4_p2p_kernel</*x2_copy*/ false><<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const float*) src_ptrs[0],
+          (const float*) src_ptrs[1],
+          (const float*) src_ptrs[2],
+          (const float*) src_ptrs[3],
+          (float*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        ); 
+      }
     } else if (local_size == 2) {
-      __muillm_chunk_copy_fp32_tp2_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
-        (const float*) src_ptrs[0],
-        (const float*) src_ptrs[1],
-        (float*) dst_ptr,
-        count,
-        chunk_size,
-        local_rank,
-        local_size
-      );
+      if (num_total_threads > 4 * num_simd_lanes) {
+        // use x2 copy
+        __muillm_chunk_copy_fp32_tp2_p2p_kernel</*x2_copy*/ true><<<dim3(num_blocks / 2, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const float*) src_ptrs[0],
+          (const float*) src_ptrs[1],
+          (float*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        );
+      } else {
+        __muillm_chunk_copy_fp32_tp2_p2p_kernel</*x2_copy*/ false><<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+          (const float*) src_ptrs[0],
+          (const float*) src_ptrs[1],
+          (float*) dst_ptr,
+          count,
+          chunk_size,
+          local_rank,
+          local_size
+        ); 
+      }
     } else {
       std::cout<<"reduction unsupported tp size"<<std::endl;
       return MUILLM_COMM_UNKNOWN_ERROR;
