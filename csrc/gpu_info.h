@@ -26,6 +26,8 @@ typedef struct muillm_gpu_info {
   muillm_gpu_family_t family;
   // number of threads in warp: 64 for gfx9, 32 for gfx10+
   int warp_size;
+  // number of compute units
+  int compute_units;
   // number of simd lanes on a device ("cuda cores")
   int simd_lanes;
 } muillm_gpu_info_t;

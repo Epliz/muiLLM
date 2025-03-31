@@ -60,6 +60,7 @@ muillm_error_t muillm_detect_gpu_properties(
   int simd_lanes_per_cu = gpu_info->family == MUILLM_GPU_FAMILY_RDNA ? 128 : 64;
 
   gpu_info->warp_size = properties.warpSize;
+  gpu_info->compute_units = cu_count;
   gpu_info->simd_lanes = cu_count * simd_lanes_per_cu;
 
   printf("detected CU count %d\n", cu_count);
