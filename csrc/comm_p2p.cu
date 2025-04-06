@@ -320,7 +320,13 @@ static muillm_comm_error_t __ensure_buffer_set_capacity(
   }
 
   // allocate new buffers
+
+  // use the next power of two to avoid frequent re-allocations
   capacity = __next_power_of_2(capacity);
+  // also align with the number of GPUs
+  // (so that reduction methods like two or three steps reductions are guaranteed to be able to hold
+  // all packed chunks in one temp buffer set)
+  capacity = ALIGN_UP(capacity, local_size);
 
   // allocate shared gpu memory
   if ((error = __allocate_shared_gpu_memory(comm, capacity, buffer_set->buffers, /*zero_memory*/ false)) != MUILLM_COMM_SUCCESS) {
@@ -1896,6 +1902,567 @@ muillm_comm_error_t muillm_comm_p2p_two_steps_placed_all_reduce_sum(
   return MUILLM_COMM_SUCCESS;
 }
 
+
+// TODO: for tp2 we could precompute the offsets and use the normal copy kernel
+__global__ void __muillm_chunk_broadcast_fp16_tp2_p2p_kernel(
+  const half* src_ptr,
+  half* dst_ptr0,
+  half* dst_ptr1,
+  unsigned N,
+  unsigned chunk_size,
+  unsigned block_chunk_size,
+  unsigned local_rank,
+  unsigned local_size
+) {
+  // we launch one series of blocks per other rank
+  // so we need to adjust the block index to get the right chunk
+  unsigned chunk_idx = blockIdx.y;
+
+  unsigned chunk_start = chunk_idx * chunk_size;
+  unsigned chunk_end = (chunk_idx == (local_size - 1)) ? N : (chunk_start + chunk_size);
+  unsigned actual_chunk_size = chunk_end - chunk_start;
+
+  half* dst_ptrs[2] = {dst_ptr0, dst_ptr1};
+
+  // copy the chunk
+  __muillm_do_copy_p2p(
+    (const uint8_t*) (src_ptr + chunk_start),
+    (uint8_t*) (dst_ptrs[chunk_idx] + local_rank * actual_chunk_size),
+    actual_chunk_size * 2,
+    block_chunk_size
+  );
+}
+
+__global__ void __muillm_chunk_broadcast_fp32_tp2_p2p_kernel(
+  const float* src_ptr,
+  float* dst_ptr0,
+  float* dst_ptr1,
+  unsigned N,
+  unsigned chunk_size,
+  unsigned block_chunk_size,
+  unsigned local_rank,
+  unsigned local_size
+) {
+  // we launch one series of blocks per other rank
+  // so we need to adjust the block index to get the right chunk
+  unsigned chunk_idx = blockIdx.y;
+
+  unsigned chunk_start = chunk_idx * chunk_size;
+  unsigned chunk_end = (chunk_idx == (local_size - 1)) ? N : (chunk_start + chunk_size);
+  unsigned actual_chunk_size = chunk_end - chunk_start;
+
+  float* dst_ptrs[2] = {dst_ptr0, dst_ptr1};
+
+  // copy the chunk
+  __muillm_do_copy_p2p(
+    (const uint8_t*) (src_ptr + chunk_start),
+    (uint8_t*) (dst_ptrs[chunk_idx] + local_rank * actual_chunk_size),
+    actual_chunk_size * 4,
+    block_chunk_size
+  );
+}
+
+__global__ void __muillm_chunk_broadcast_fp16_tp4_p2p_kernel(
+  const half* src_ptr,
+  half* dst_ptr0,
+  half* dst_ptr1,
+  half* dst_ptr2,
+  half* dst_ptr3,
+  unsigned N,
+  unsigned chunk_size,
+  unsigned block_chunk_size,
+  unsigned local_rank,
+  unsigned local_size
+) {
+  // we launch one series of blocks per other rank
+  // so we need to adjust the block index to get the right chunk
+  unsigned chunk_idx = blockIdx.y;
+
+  unsigned chunk_start = chunk_idx * chunk_size;
+  unsigned chunk_end = (chunk_idx == (local_size - 1)) ? N : (chunk_start + chunk_size);
+  unsigned actual_chunk_size = chunk_end - chunk_start;
+
+  half* dst_ptrs[4] = {dst_ptr0, dst_ptr1, dst_ptr2, dst_ptr3};
+
+  // copy the chunk
+  __muillm_do_copy_p2p(
+    (const uint8_t*) (src_ptr + chunk_start),
+    (uint8_t*) (dst_ptrs[chunk_idx] + local_rank * actual_chunk_size),
+    actual_chunk_size * 2,
+    block_chunk_size
+  );
+}
+
+__global__ void __muillm_chunk_broadcast_fp32_tp4_p2p_kernel(
+  const float* src_ptr,
+  float* dst_ptr0,
+  float* dst_ptr1,
+  float* dst_ptr2,
+  float* dst_ptr3,
+  unsigned N,
+  unsigned chunk_size,
+  unsigned block_chunk_size,
+  unsigned local_rank,
+  unsigned local_size
+) {
+  // we launch one series of blocks per other rank
+  // so we need to adjust the block index to get the right chunk
+  unsigned chunk_idx = blockIdx.y;
+
+  unsigned chunk_start = chunk_idx * chunk_size;
+  unsigned chunk_end = (chunk_idx == (local_size - 1)) ? N : (chunk_start + chunk_size);
+  unsigned actual_chunk_size = chunk_end - chunk_start;
+
+  float* dst_ptrs[4] = {dst_ptr0, dst_ptr1, dst_ptr2, dst_ptr3};
+
+  // copy the chunk
+  __muillm_do_copy_p2p(
+    (const uint8_t*) (src_ptr + chunk_start),
+    (uint8_t*) (dst_ptrs[chunk_idx] + local_rank * actual_chunk_size),
+    actual_chunk_size * 4,
+    block_chunk_size
+  );
+}
+
+__global__ void __muillm_chunk_broadcast_fp16_tp8_p2p_kernel(
+  const half* src_ptr,
+  half* dst_ptr0,
+  half* dst_ptr1,
+  half* dst_ptr2,
+  half* dst_ptr3,
+  half* dst_ptr4,
+  half* dst_ptr5,
+  half* dst_ptr6,
+  half* dst_ptr7,
+  unsigned N,
+  unsigned chunk_size,
+  unsigned block_chunk_size,
+  unsigned local_rank,
+  unsigned local_size
+) {
+  // we launch one series of blocks per other rank
+  // so we need to adjust the block index to get the right chunk
+  unsigned chunk_idx = blockIdx.y;
+
+  unsigned chunk_start = chunk_idx * chunk_size;
+  unsigned chunk_end = (chunk_idx == (local_size - 1)) ? N : (chunk_start + chunk_size);
+  unsigned actual_chunk_size = chunk_end - chunk_start;
+
+  half* dst_ptrs[8] = {dst_ptr0, dst_ptr1, dst_ptr2, dst_ptr3, dst_ptr4, dst_ptr5, dst_ptr6, dst_ptr7};
+
+  // copy the chunk
+  __muillm_do_copy_p2p(
+    (const uint8_t*) (src_ptr + chunk_start),
+    (uint8_t*) (dst_ptrs[chunk_idx] + local_rank * actual_chunk_size),
+    actual_chunk_size * 2,
+    block_chunk_size
+  );
+}
+
+__global__ void __muillm_chunk_broadcast_fp32_tp8_p2p_kernel(
+  const float* src_ptr,
+  float* dst_ptr0,
+  float* dst_ptr1,
+  float* dst_ptr2,
+  float* dst_ptr3,
+  float* dst_ptr4,
+  float* dst_ptr5,
+  float* dst_ptr6,
+  float* dst_ptr7,
+  unsigned N,
+  unsigned chunk_size,
+  unsigned block_chunk_size,
+  unsigned local_rank,
+  unsigned local_size
+) {
+  // we launch one series of blocks per other rank
+  // so we need to adjust the block index to get the right chunk
+  unsigned chunk_idx = blockIdx.y;
+
+  unsigned chunk_start = chunk_idx * chunk_size;
+  unsigned chunk_end = (chunk_idx == (local_size - 1)) ? N : (chunk_start + chunk_size);
+  unsigned actual_chunk_size = chunk_end - chunk_start;
+
+  float* dst_ptrs[8] = {dst_ptr0, dst_ptr1, dst_ptr2, dst_ptr3, dst_ptr4, dst_ptr5, dst_ptr6, dst_ptr7};
+
+  // copy the chunk
+  __muillm_do_copy_p2p(
+    (const uint8_t*) (src_ptr + chunk_start),
+    (uint8_t*) (dst_ptrs[chunk_idx] + local_rank * actual_chunk_size),
+    actual_chunk_size * 4,
+    block_chunk_size
+  );
+}
+
+// three step algorithm where
+// 1) each GPU broadcast their chunks to the other GPUs
+// 2) GPUs reduce their chunk in their own buffer
+// 3) GPUs broadcast their reduced chunk to the other GPUs
+// (communication efficient)
+muillm_comm_error_t muillm_comm_p2p_three_steps_placed_all_reduce_sum(
+  muillm_comm_p2p_t* comm,
+  const void** src_ptrs,
+  void* dst_ptr,
+  size_t count,
+  muillm_comm_datatype_t datatype,
+  hipStream_t stream
+) {
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  hipError_t hip_error;
+  muillm_comm_error_t muillm_error;
+
+  if (local_size > 8) {
+    std::cout<<"reduction unsupported tp size"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // get the reduction buffer set in which we will store the broadcasted chunks
+  // from the first phase
+  muillm_comm_p2p_buffer_set_t* buffer_set = nullptr;
+
+  void** tmp_broadcast_buffers = (void**)buffer_set->buffers;
+
+  if ((muillm_error = muillm_comm_p2p_get_buffer_set(comm, count, datatype, &buffer_set, stream)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"Reduction failed when ensuring capacity"<<std::endl;
+    return muillm_error;
+  }
+
+  //
+  // 1) each GPU broadcast their chunks to the other GPUs
+  //
+
+  // we do a straight division instead of rounding up
+  // so that reads are aligned on cache lines
+  size_t chunk_size = count / local_size;
+  size_t max_chunk_size = chunk_size + (count % local_size);
+
+  size_t chunk_start = local_rank * chunk_size;
+  // the chunk end is the end of the array for the last rank, otherwise of the size of a chunk
+  size_t chunk_end = (local_rank == (local_size - 1)) ? count : (chunk_start + chunk_size);
+
+  size_t actual_chunk_size = chunk_end - chunk_start;
+
+
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  int num_other_chunks = local_size - 1;
+
+  int num_simd_lanes = comm->gpu_info->simd_lanes;
+
+  if (datatype == MUILLM_COMM_FP16) {
+    int num_blocks = DIV_ROUND_UP(max_chunk_size, COPY_FP16S_PER_BLOCK);
+
+    int num_total_blocks = num_blocks * local_size;
+    int num_total_threads = num_total_blocks * threads_per_blocks;
+    unsigned block_chunk_size = COPY_BYTES_PER_BLOCK;
+
+    while (num_total_threads > 2 * num_simd_lanes && num_blocks > 1) {
+      num_total_threads /= 2;
+      num_blocks /= 2;
+      num_total_blocks /= 2;
+      block_chunk_size *= 2;
+    }
+
+    if (local_size == 8) {
+      __muillm_chunk_broadcast_fp16_tp8_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const half*) src_ptrs[local_rank],
+        (half*) tmp_broadcast_buffers[0],
+        (half*) tmp_broadcast_buffers[1],
+        (half*) tmp_broadcast_buffers[2],
+        (half*) tmp_broadcast_buffers[3],
+        (half*) tmp_broadcast_buffers[4],
+        (half*) tmp_broadcast_buffers[5],
+        (half*) tmp_broadcast_buffers[6],
+        (half*) tmp_broadcast_buffers[7],
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      );
+    } else if (local_size == 4) {
+      __muillm_chunk_broadcast_fp16_tp4_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const half*) src_ptrs[local_rank],
+        (half*) tmp_broadcast_buffers[0],
+        (half*) tmp_broadcast_buffers[1],
+        (half*) tmp_broadcast_buffers[2],
+        (half*) tmp_broadcast_buffers[3],
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      );
+    } else if (local_size == 2) {
+      __muillm_chunk_broadcast_fp16_tp2_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const half*) src_ptrs[local_rank],
+        (half*) tmp_broadcast_buffers[0],
+        (half*) tmp_broadcast_buffers[1],
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      );
+    } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else if (datatype == MUILLM_COMM_FP32) {
+    int num_blocks = DIV_ROUND_UP(max_chunk_size, COPY_FP32S_PER_BLOCK);
+
+    int num_total_blocks = num_blocks * local_size;
+    int num_total_threads = num_total_blocks * threads_per_blocks;
+    unsigned block_chunk_size = COPY_BYTES_PER_BLOCK;
+
+    while (num_total_threads > 2 * num_simd_lanes && num_blocks > 1) {
+      num_total_threads /= 2;
+      num_blocks /= 2;
+      num_total_blocks /= 2;
+      block_chunk_size *= 2;
+    }
+
+    if (local_size == 8) {
+      __muillm_chunk_broadcast_fp32_tp8_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const float*) src_ptrs[local_rank],
+        (float*) tmp_broadcast_buffers[0],
+        (float*) tmp_broadcast_buffers[1],
+        (float*) tmp_broadcast_buffers[2],
+        (float*) tmp_broadcast_buffers[3],
+        (float*) tmp_broadcast_buffers[4],
+        (float*) tmp_broadcast_buffers[5],
+        (float*) tmp_broadcast_buffers[6],
+        (float*) tmp_broadcast_buffers[7],
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      );
+    } else if (local_size == 4) {
+      __muillm_chunk_broadcast_fp32_tp4_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const float*) src_ptrs[local_rank],
+        (float*) tmp_broadcast_buffers[0],
+        (float*) tmp_broadcast_buffers[1],
+        (float*) tmp_broadcast_buffers[2],
+        (float*) tmp_broadcast_buffers[3],
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      );
+    } else if (local_size == 2) {
+      __muillm_chunk_broadcast_fp32_tp2_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const float*) src_ptrs[local_rank],
+        (float*) tmp_broadcast_buffers[0],
+        (float*) tmp_broadcast_buffers[1],
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      ); 
+    } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else {
+    std::cout<<"reduction unsupported dtype"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  if (hipPeekAtLastError() != hipSuccess) {
+    printf("p2p chunk broadcast failed\n");
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // make sure all GPUs have arrived
+  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"p2p chunk broadcast barrier failed"<<std::endl;
+    return muillm_error;
+  }
+    
+  //
+  // 2) GPUs reduce their chunk in their own buffer
+  //
+  void* tmp_ptrs[MUILLM_COMM_MAX_GPUS];
+  if (datatype == MUILLM_COMM_FP16) {
+    for (int i = 0; i < local_size; i++) {
+      tmp_ptrs[i] = ((half*)tmp_broadcast_buffers[local_rank]) + i * actual_chunk_size;
+    }
+  } else if (datatype == MUILLM_COMM_FP32) {
+    for (int i = 0; i < local_size; i++) {
+      tmp_ptrs[i] = ((float*)tmp_broadcast_buffers[local_rank]) + i * actual_chunk_size;
+    }
+  } else {
+    std::cout<<"reduction unsupported dtype"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // reduce the chunk we are responsible for
+  if ((muillm_error = __muillm_reduce_chunk(
+    comm,
+    (const void**) tmp_ptrs,
+    (void*) tmp_ptrs[local_rank], // dest for this reduced chunk is the temp buffer
+    0,
+    actual_chunk_size,
+    datatype,
+    stream
+  )) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"p2p reduce chunk failed"<<std::endl;
+    return muillm_error;
+  }
+
+  // make sure all GPUs have arrived
+  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"p2p reduce chunk barrier failed"<<std::endl;
+    return muillm_error;
+  }
+
+  //
+  // 3) GPUs read the reduced chunks from the other GPUs
+  //
+
+  if (datatype == MUILLM_COMM_FP16) {
+    int num_blocks = DIV_ROUND_UP(max_chunk_size, COPY_FP16S_PER_BLOCK);
+
+    int num_total_blocks = num_blocks * local_size;
+    int num_total_threads = num_total_blocks * threads_per_blocks;
+    unsigned block_chunk_size = COPY_BYTES_PER_BLOCK;
+
+    while (num_total_threads > 2 * num_simd_lanes && num_blocks > 1) {
+      num_total_threads /= 2;
+      num_blocks /= 2;
+      num_total_blocks /= 2;
+      block_chunk_size *= 2;
+    }
+
+    if (local_size == 8) {
+      __muillm_chunk_copy_fp16_tp8_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const half*) tmp_broadcast_buffers[0],
+        (const half*) tmp_broadcast_buffers[1],
+        (const half*) tmp_broadcast_buffers[2],
+        (const half*) tmp_broadcast_buffers[3],
+        (const half*) tmp_broadcast_buffers[4],
+        (const half*) tmp_broadcast_buffers[5],
+        (const half*) tmp_broadcast_buffers[6],
+        (const half*) tmp_broadcast_buffers[7],
+        (half*) dst_ptr,
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      );
+    } else if (local_size == 4) {
+      __muillm_chunk_copy_fp16_tp4_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const half*) tmp_broadcast_buffers[0],
+        (const half*) tmp_broadcast_buffers[1],
+        (const half*) tmp_broadcast_buffers[2],
+        (const half*) tmp_broadcast_buffers[3],
+        (half*) dst_ptr,
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      );
+    } else if (local_size == 2) {
+      __muillm_chunk_copy_fp16_tp2_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const half*) tmp_broadcast_buffers[0],
+        (const half*) tmp_broadcast_buffers[1],
+        (half*) dst_ptr,
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      );
+    } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else if (datatype == MUILLM_COMM_FP32) {
+    int num_blocks = DIV_ROUND_UP(max_chunk_size, COPY_FP32S_PER_BLOCK);
+
+    int num_total_blocks = num_blocks * local_size;
+    int num_total_threads = num_total_blocks * threads_per_blocks;
+    unsigned block_chunk_size = COPY_BYTES_PER_BLOCK;
+
+    while (num_total_threads > 2 * num_simd_lanes && num_blocks > 1) {
+      num_total_threads /= 2;
+      num_blocks /= 2;
+      num_total_blocks /= 2;
+      block_chunk_size *= 2;
+    }
+
+    if (local_size == 8) {
+      __muillm_chunk_copy_fp32_tp8_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const float*) tmp_broadcast_buffers[0],
+        (const float*) tmp_broadcast_buffers[1],
+        (const float*) tmp_broadcast_buffers[2],
+        (const float*) tmp_broadcast_buffers[3],
+        (const float*) tmp_broadcast_buffers[4],
+        (const float*) tmp_broadcast_buffers[5],
+        (const float*) tmp_broadcast_buffers[6],
+        (const float*) tmp_broadcast_buffers[7],
+        (float*) dst_ptr,
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      );
+    } else if (local_size == 4) {
+      __muillm_chunk_copy_fp32_tp4_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const float*) tmp_broadcast_buffers[0],
+        (const float*) tmp_broadcast_buffers[1],
+        (const float*) tmp_broadcast_buffers[2],
+        (const float*) tmp_broadcast_buffers[3],
+        (float*) dst_ptr,
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      );
+    } else if (local_size == 2) {
+      __muillm_chunk_copy_fp32_tp2_p2p_kernel<<<dim3(num_blocks, local_size), THREADS_PER_BLOCK, 0, stream>>>(
+        (const float*) tmp_broadcast_buffers[0],
+        (const float*) tmp_broadcast_buffers[1],
+        (float*) dst_ptr,
+        count,
+        chunk_size,
+        block_chunk_size,
+        local_rank,
+        local_size
+      ); 
+    } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else {
+    std::cout<<"reduction unsupported dtype"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  if (hipPeekAtLastError() != hipSuccess) {
+    printf("p2p chunk copy failed\n");
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // TODO: maybe unneeded?
+  // make sure all GPUs have arrived
+  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"p2p chunk copy barrier failed"<<std::endl;
+    return muillm_error;
+  }
+  
+  return MUILLM_COMM_SUCCESS;
+}
+
 #define LOW_LATENCY_THRESHOLD (1024 * 256)
 
 muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum(
@@ -1919,9 +2486,18 @@ muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum(
       datatype,
       stream
     );
-  } else {
+  } else if (false) {
     // the two step algorithm is better for large sizes
     return muillm_comm_p2p_two_steps_placed_all_reduce_sum(
+      comm,
+      src_ptrs,
+      dst_ptr,
+      count,
+      datatype,
+      stream
+    );
+  } else {
+    return muillm_comm_p2p_three_steps_placed_all_reduce_sum(
       comm,
       src_ptrs,
       dst_ptr,
@@ -1954,9 +2530,7 @@ muillm_comm_error_t muillm_comm_p2p_all_reduce_sum(
     return muillm_error;
   }
 
-  // TODO: avoid this copy if src_ptrs are the buffer set
-  // (need to pay attention to the fact that muillm_comm_p2p_get_buffer_set flips the buffers,
-  // so if we use it to place into buffers for parallel linear, we need to check somehow properly when calling here)
+  // TODO: this copy is not required for the three step reduce
 
   // copy into reduction buffers
   size_t byte_count = __comm_size(datatype, count);
