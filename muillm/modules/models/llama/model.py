@@ -33,6 +33,7 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import CrossEntropyLoss
 
+from transformers.generation import GenerationMixin
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_outputs import (
@@ -373,7 +374,7 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         return causal_mask
 
 
-class MuiLlamaForCausalLM(LlamaPreTrainedModel):
+class MuiLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, prev_model: Union["MuiLlamaForCausalLM", LlamaForCausalLM]):
@@ -425,6 +426,7 @@ class MuiLlamaForCausalLM(LlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        num_logits_to_keep: int = 0,
         all_ones_mask: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -433,6 +435,11 @@ class MuiLlamaForCausalLM(LlamaPreTrainedModel):
                 Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
                 config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
                 (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+
+            num_logits_to_keep (`int`, *optional*):
+                Calculate logits for the last `num_logits_to_keep` tokens. If `0`, calculate logits for all
+                `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that
+                token can save memory, which becomes pretty significant for long sequences or large vocabulary size.
 
         Returns:
 
@@ -481,10 +488,8 @@ class MuiLlamaForCausalLM(LlamaPreTrainedModel):
         if self.config.pretraining_tp > 1:
             raise ValueError("Not supported")
 
-        # only transform the last hidden states
-        # (that wouldn't work when using speculative decoding to verify tokens as we would
-        # need all the tokens being verified)
-        hidden_states = hidden_states[:, None, -1, :]
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        hidden_states = hidden_states[:, -num_logits_to_keep:, :]
         logits = self.lm_head(hidden_states)
         logits = logits.float()
 
@@ -513,6 +518,7 @@ class MuiLlamaForCausalLM(LlamaPreTrainedModel):
         cache_position=None,
         position_ids=None,
         use_cache=True,
+        num_logits_to_keep=None,
         **kwargs,
     ):
         # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
@@ -536,6 +542,9 @@ class MuiLlamaForCausalLM(LlamaPreTrainedModel):
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
             model_inputs = {"input_ids": input_ids.contiguous()}  # `contiguous()` needed for compilation use cases
+
+        if num_logits_to_keep is not None:
+            model_inputs["num_logits_to_keep"] = num_logits_to_keep
 
         model_inputs.update(
             {
