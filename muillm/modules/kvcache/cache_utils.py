@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.module import MuiModule
 from transformers.cache_utils import StaticCache, DynamicCache
@@ -68,12 +68,11 @@ class MuiStaticCache(StaticCache, MuiCache):
             self,
             engine_config: MuiEngineConfig,
             config: PretrainedConfig,
-            batch_size: int = None,
-            max_cache_len: int = None,
-            device: torch.device = None,
-            dtype=None,
+            max_batch_size: int,
+            max_cache_len: Optional[int] = None,
+            device: Union[torch.device, str, None] = None,
+            dtype: torch.dtype = torch.float32,
             tensor_parallelism: int = 1,
-            max_batch_size: Optional[int] = None,
         ) -> None:
 
         # hack to make the cache be the right size if we use tensor parallelism
@@ -87,7 +86,7 @@ class MuiStaticCache(StaticCache, MuiCache):
             # the head dim is wrong
             config.hidden_size  = config.hidden_size // tensor_parallelism
 
-        super().__init__(config=config, batch_size=batch_size, max_cache_len=max_cache_len, device=device, dtype=dtype, max_batch_size=max_batch_size)
+        super().__init__(config=config, max_cache_len=max_cache_len, device=device, dtype=dtype, max_batch_size=max_batch_size)
 
         # set back the right values in the config
         if config.num_key_value_heads is not None:
