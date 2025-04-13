@@ -6,8 +6,8 @@ import torch.nn as nn
 
 import transformers.utils.logging as logging
 from transformers.cache_utils import Cache
-from transformers.models.mistral.modeling_mistral import MistralSdpaAttention
-from transformers.models.llama.modeling_llama import LlamaSdpaAttention
+from transformers.models.mistral.modeling_mistral import MistralAttention
+from transformers.models.llama.modeling_llama import LlamaAttention
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.attention.rotaryembedding import apply_rotary_pos_emb
@@ -80,7 +80,7 @@ class MuiSdpaAttention(MuiBaseAttention):
     """
 
     @staticmethod
-    def replace(prev_module: Union[LlamaSdpaAttention, MistralSdpaAttention], engine_config: MuiEngineConfig) -> "MuiSdpaAttention":
+    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig) -> "MuiSdpaAttention":
         device = prev_module.q_proj.weight.device
         dtype = prev_module.q_proj.weight.dtype
 

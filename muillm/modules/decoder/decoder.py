@@ -8,11 +8,10 @@ from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.attention.baseattention import MuiBaseAttention
 from muillm.modules.attention.sdpaattention import MuiSdpaAttention
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
-from muillm.modules.rmsnorm import MuiRMSNorm
 from muillm.modules.multilinear import MuiMultiLinear
 
-from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralSdpaAttention
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaSdpaAttention
+from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralAttention
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaAttention
 
 class MuiDecoderLayer(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, qkv_proj: MuiMultiLinear, self_attn: MuiBaseAttention, mlp: MuiGateUpDownMLP):
@@ -30,7 +29,7 @@ class MuiDecoderLayer(MuiModule):
         input_layernorm = prev_module.input_layernorm
         qkv_proj = None
         self_attn = None
-        if isinstance(prev_attn, MistralSdpaAttention) or isinstance(prev_attn, LlamaSdpaAttention):
+        if isinstance(prev_attn, MistralAttention) or isinstance(prev_attn, LlamaAttention):
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
             qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm)
             self_attn = MuiSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config)

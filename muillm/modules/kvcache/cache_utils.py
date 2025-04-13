@@ -68,9 +68,9 @@ class MuiStaticCache(StaticCache, MuiCache):
             self,
             engine_config: MuiEngineConfig,
             config: PretrainedConfig,
-            batch_size: int,
-            max_cache_len: int,
-            device,
+            batch_size: int = None,
+            max_cache_len: int = None,
+            device: torch.device = None,
             dtype=None,
             tensor_parallelism: int = 1,
             max_batch_size: Optional[int] = None,
@@ -217,7 +217,16 @@ def create_static_cache(engine_config: MuiEngineConfig, config: PretrainedConfig
     # to avoid frequent re-allocations of the cache, we use a power of 2 schedule
     max_cache_len = _next_pow2(seq_len)
     tensor_parallelism = engine_config.tensor_parallelism
-    return MuiStaticCache(engine_config, config, max_batch_size, max_cache_len, device, dtype, tensor_parallelism)
+
+    return MuiStaticCache(
+        engine_config=engine_config,
+        config=config,
+        max_cache_len=max_cache_len,
+        device=device,
+        dtype=dtype,
+        tensor_parallelism=tensor_parallelism,
+        max_batch_size=max_batch_size
+    )
 
 def grow_static_cache_if_needed(cache: MuiStaticCache, capacity: int, max_capacity: int) -> MuiStaticCache:
     cache.grow_cache(capacity=capacity, max_capacity=max_capacity)

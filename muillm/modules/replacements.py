@@ -1,5 +1,4 @@
 
-from muillm.modules.attention.parallelbaseattention import MuiParallelBaseAttention
 from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
 from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
@@ -14,12 +13,11 @@ from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.linear import MuiLinear
 from muillm.modules.rmsnorm import MuiRMSNorm
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
-from muillm.modules.attention.sdpaattention import MuiSdpaAttention
 from muillm.modules.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
 from muillm.memorymanagement.gc import trigger_gc
 
-from transformers.models.mistral.modeling_mistral import MistralRotaryEmbedding, MistralRMSNorm, MistralAttention, MistralSdpaAttention, MistralMLP, MistralDecoderLayer, MistralModel, MistralForCausalLM
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaMLP, LlamaAttention, LlamaSdpaAttention, LlamaDecoderLayer, LlamaRMSNorm, LlamaModel, LlamaForCausalLM
+from transformers.models.mistral.modeling_mistral import MistralRotaryEmbedding, MistralRMSNorm, MistralMLP, MistralDecoderLayer, MistralModel, MistralForCausalLM
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaMLP, LlamaDecoderLayer, LlamaRMSNorm, LlamaModel, LlamaForCausalLM
 
 from muillm.modules.decoder.decoder import MuiDecoderLayer
 

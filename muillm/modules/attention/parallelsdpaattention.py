@@ -3,9 +3,6 @@ from typing import List, Optional, Tuple, Union
 import warnings
 from muillm.modules.attention.parallelbaseattention import _MuiParallelAttention, _MuiParallelAttentionRope, MuiParallelBaseAttention
 from muillm.modules.kvcache.cache_utils import MuiCache
-from muillm.modules.multilinear import MuiMultiLinear
-from muillm.modules.parallellinear import MuiParallelLinear
-from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,11 +15,8 @@ from transformers.models.llama.modeling_llama import LlamaAttention
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.module import MuiModule
 from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
-from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode, mui_causally_decode_masked
 from muillm.modules.attention.kvcache import repeat_kv
-from muillm.modules.linear import MuiLinear
 
 logger = logging.get_logger(__name__)
 

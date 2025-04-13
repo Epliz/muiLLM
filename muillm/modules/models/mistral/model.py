@@ -12,8 +12,6 @@ import muillm_ext
 import torch
 import torch.nn as nn
 
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-
 from transformers.generation import GenerationMixin
 from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
@@ -24,8 +22,6 @@ from transformers.models.mistral.modeling_mistral import MistralPreTrainedModel,
 from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
-    is_flash_attn_2_available,
-    is_flash_attn_greater_or_equal_2_10,
     logging,
     replace_return_docstrings,
 )
@@ -61,7 +57,6 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
         self.embed_tokens = prev_model.embed_tokens
         self.layers = prev_model.layers
-        self._attn_implementation = prev_model._attn_implementation
         self.norm = prev_model.norm
 
         self.gradient_checkpointing = False

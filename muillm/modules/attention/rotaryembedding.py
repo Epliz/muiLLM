@@ -126,15 +126,14 @@ class MuiMistralRotaryEmbedding(MuiModule):
         dtype = dtype if dtype is not None else torch.get_default_dtype()
 
         if config is not None:
-            if isinstance(config, LlamaConfig):
-                if config.rope_scaling is not None:
+            if isinstance(config, LlamaConfig) or isinstance(config, MistralConfig):
+                # BC: "rope_type" was originally "type"
+                if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
                     self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
                 else:
                     self.rope_type = "default"
-            elif isinstance(config, MistralConfig):
-                self.rope_type = "default"
             else:
-                raise ValueError("Unsupported config type")
+                self.rope_type = "default"
             
             max_position_embeddings = config.max_position_embeddings
         else:

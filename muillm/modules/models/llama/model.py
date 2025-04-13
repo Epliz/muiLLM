@@ -31,7 +31,6 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
-from torch.nn import CrossEntropyLoss
 
 from transformers.generation import GenerationMixin
 from transformers.cache_utils import Cache, DynamicCache, StaticCache

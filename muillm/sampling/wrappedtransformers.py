@@ -152,12 +152,20 @@ def _less_sync_sample(
         # forward pass to get next token
         outputs = self(**model_inputs, return_dict=True)
 
+        # synced_gpus: don't waste resources running the code we don't need; kwargs must be updated before skipping
+        model_kwargs = self._update_model_kwargs_for_generation(
+            outputs,
+            model_kwargs,
+            is_encoder_decoder=self.config.is_encoder_decoder,
+        )
+
         if synced_gpus and this_peer_finished:
             continue  # don't waste resources running the code we don't need
 
         # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
         # (the clone itself is always small)
         next_token_logits = outputs.logits[:, -1, :].clone()
+        next_token_logits = next_token_logits.to(input_ids.device)
 
         # pre-process distribution
         next_token_scores = logits_processor(input_ids, next_token_logits)
@@ -203,11 +211,6 @@ def _less_sync_sample(
         if streamer is not None:
             raise ValueError("Streaming is not supported at the moment")
             #streamer.put(next_tokens.cpu())
-        model_kwargs = self._update_model_kwargs_for_generation(
-            outputs,
-            model_kwargs,
-            is_encoder_decoder=self.config.is_encoder_decoder,
-        )
 
         unfinished_sequences = unfinished_sequences & ~stopping_criteria(input_ids, scores)
 
