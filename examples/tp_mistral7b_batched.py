@@ -115,10 +115,14 @@ def run(rank, size):
         batched_prompts
     ]
 
+    del model
+    from muillm.memorymanagement.gc import trigger_gc
+    trigger_gc()
+
     # Use the muiLLM replacements layers
-    from muillm.engine import init_engine
-    # tensor_parallelism=None indicates to use all GPUs
-    model = init_engine(model, tensor_parallelism=None)
+    from muillm.engine import load_model
+    # use auto-detected tensor parallelism level by setting to None
+    model = load_model(model_id, tensor_parallelism=None)
 
     if rank == 0:
         print("Optimized models: ", model)

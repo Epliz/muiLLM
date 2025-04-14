@@ -25,7 +25,7 @@ def rotate_half(x):
 
 # TODO: custom kernel for BS=1, S=1 case at least
 @torch.jit.script
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim:int=1):
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim:int=1):
     """Applies Rotary Position Embedding to the query and key tensors.
 
     Args:
@@ -51,8 +51,8 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim:int=1):
     # sin  torch.Size([54, 128])
     # q  torch.Size([B, 32, T, 128])
     # k  torch.Size([B, 8, T, 128])
-    cos = cos[position_ids].unsqueeze(unsqueeze_dim)
-    sin = sin[position_ids].unsqueeze(unsqueeze_dim)
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
     # cos[position_ids]  torch.Size([B, 1, T, 128])
     # sin[position_ids]  torch.Size([B, 1, T, 128])
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -113,7 +113,7 @@ class _MuiRotaryHFStaticCache(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise NotImplementedError("rotary backward not implemented")
     
-class MuiMistralRotaryEmbedding(MuiModule):
+class MuiRotaryEmbedding(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], rope_kwargs: Dict[str, Any] = None, layer_idx: int = 0, device=None, dtype=None):
         super().__init__(engine_config=engine_config)
 
@@ -156,14 +156,25 @@ class MuiMistralRotaryEmbedding(MuiModule):
             seq_len=max_position_embeddings, device=device, dtype=dtype
         )
 
-        dispatchable_type = (dtype == torch.float16)
-        dispatchable_device = inv_freq.is_cuda
-        self.dispatchable = dispatchable_device and dispatchable_type
+        self.dtype = dtype
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
 
         # the cpp module will be created at the end of all layer replacements
         self.cpp_module = None
 
+    def _check_dispatchable(self):
+        # cos and sin are of type self.dtype
+        # but the frequencies are float32
+        dispatchable_type = (self.dtype == torch.float16)
+        dispatchable_device = self.inv_freq.is_cuda
+        self.dispatchable = dispatchable_device and dispatchable_type
+
     def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
         if self.cpp_module is not None:
             muillm_ext.muillm_rotary_embedding_module_deinit(self.cpp_module)
 
@@ -175,26 +186,22 @@ class MuiMistralRotaryEmbedding(MuiModule):
         )
 
     @staticmethod
-    def replace(prev_module: Union[LlamaRotaryEmbedding, MistralRotaryEmbedding], engine_config: MuiEngineConfig) -> "MuiMistralRotaryEmbedding":
-        device = prev_module.inv_freq.device
+    def replace(prev_module: Union[LlamaRotaryEmbedding, MistralRotaryEmbedding], engine_config: MuiEngineConfig, device=None) -> "MuiRotaryEmbedding":
+        if device is None:
+            raise ValueError("device was None")
+
+        device = prev_module.inv_freq.device if device is None else device
         dtype = prev_module.inv_freq.dtype
 
         # we either need a model config for Llama or rope_kwargs
         config = None
         rope_kwargs = None
-        if isinstance(prev_module, LlamaRotaryEmbedding):
+        if isinstance(prev_module, LlamaRotaryEmbedding) or isinstance(prev_module, MistralRotaryEmbedding):
             config = prev_module.config
-        elif isinstance(prev_module, MistralRotaryEmbedding):
-            rope_kwargs = {
-                "rope_type": "default",
-                "dim": prev_module.dim,
-                "base": prev_module.base,
-                "max_position_embeddings": prev_module.max_position_embeddings,
-            }
         else:
-            raise ValueError("Unsupported type of module")
+            raise ValueError(f"Unsupported type of module: {prev_module.__class__.__name__}")
 
-        new_module = MuiMistralRotaryEmbedding(engine_config=engine_config, config=config, rope_kwargs=rope_kwargs, device=device, dtype=dtype)
+        new_module = MuiRotaryEmbedding(engine_config=engine_config, config=config, rope_kwargs=rope_kwargs, device=device, dtype=dtype)
 
         return new_module
 
@@ -296,7 +303,7 @@ class MuiMistralRotaryEmbedding(MuiModule):
                 raise ValueError(f"Unsupported cache type: {type(cache).__name__}")
 
         else:
-            query_states, key_states = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
+            query_states, key_states = apply_rotary_pos_emb(q, k, cos, sin)
             # might need to return if if there is no cache
             value_states = v
 

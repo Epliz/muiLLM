@@ -1,4 +1,5 @@
 from typing import Union
+from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.module import MuiModule
 import torch
 from torch import Tensor
@@ -41,19 +42,49 @@ class MuiRMSNorm(MuiModule):
         dispatchable_device = self.weight.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
 
+    def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
     @staticmethod
-    def replace(prev_module: Union[LlamaRMSNorm, MistralRMSNorm], engine_config: MuiEngineConfig) -> "MuiRMSNorm":
+    def replace(prev_module: Union["MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm], engine_config: MuiEngineConfig, device = None) -> "MuiRMSNorm":
+        if device is None:
+            raise ValueError("device was None")
+        
+        if isinstance(prev_module, MuiRMSNorm):
+            # nothing would be changing if we created a new module, so might as well return the previous one
+            return prev_module
+        
+        device = prev_module.weight.device if device is None else device
+
+        # put on the end device to accelerate things
+        # (ok as we are replacing the module entirely so we can change its device)
+        if device is not None:
+            prev_module = prev_module.to(device=device)
+
         hidden_size = prev_module.weight.shape[0]
         eps = prev_module.variance_epsilon
 
-        new_module = MuiRMSNorm(engine_config=engine_config, hidden_size=hidden_size, eps=eps, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
-        new_module.copy_module(prev_module.weight)
+        new_module = MuiRMSNorm(engine_config=engine_config, hidden_size=hidden_size, eps=eps, dtype=prev_module.weight.dtype, device=device)
+        new_module.copy_module(prev_module.weight, device=device)
+
+        # delete the previous module to save memory
+        del prev_module
+
+        # trigger GC to save memory
+        trigger_gc()
 
         return new_module
 
-    def copy_module(self, prev_module: nn.Parameter):
+    def copy_module(self, prev_module: nn.Parameter, device = None):
+        if device is None:
+            raise ValueError("device was None")
+
         self.weight = nn.Parameter(prev_module.detach())
         self.weight.requires_grad = prev_module.requires_grad
+
+        # put ourselves on the right device
+        self.to(device=device)
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()

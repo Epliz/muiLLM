@@ -18,17 +18,33 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.module import MuiModule
-from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
-from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode, mui_causally_decode_masked
+from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
+from muillm.modules.attention.causaltransformerdecoding import (
+    mui_causally_decode,
+    mui_causally_decode_masked,
+)
 from muillm.modules.attention.kvcache import repeat_kv
 from muillm.modules.linear import MuiLinear
 import muillm_ext
 
 logger = logging.get_logger(__name__)
 
+
 class _MuiParallelAttentionRope(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, module, cache_module, q, k, v, m, residual, position_ids, position_embeddings, cache_positions):
+    def forward(
+        ctx,
+        module,
+        cache_module,
+        q,
+        k,
+        v,
+        m,
+        residual,
+        position_ids,
+        position_embeddings,
+        cache_positions,
+    ):
         output = muillm_ext.muillm_parallel_attention_module_rope_forward(
             module,
             cache_module,
@@ -39,7 +55,7 @@ class _MuiParallelAttentionRope(torch.autograd.Function):
             residual,
             position_ids,
             position_embeddings,
-            cache_positions
+            cache_positions,
         )
 
         ctx.save_for_backward(q, k, v, m)
@@ -50,10 +66,13 @@ class _MuiParallelAttentionRope(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise ValueError("Not implemented")
 
+
 class _MuiParallelAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, module, q, k, v, m, residual):
-        output = muillm_ext.muillm_parallel_attention_module_forward(module, q, k, v, m, residual)
+        output = muillm_ext.muillm_parallel_attention_module_forward(
+            module, q, k, v, m, residual
+        )
 
         ctx.save_for_backward(q, k, v, m)
 
@@ -63,10 +82,19 @@ class _MuiParallelAttention(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise ValueError("Not implemented")
 
+
 class MuiParallelBaseAttention(MuiModule):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], rotary_emb: MuiMistralRotaryEmbedding, layer_idx: Optional[int] = None, device=None, dtype=None):
+    def __init__(
+        self,
+        engine_config: MuiEngineConfig,
+        config: Union[LlamaConfig, MistralConfig],
+        rotary_emb: MuiRotaryEmbedding,
+        layer_idx: Optional[int] = None,
+        device=None,
+        dtype=None,
+    ):
         super().__init__(engine_config=engine_config)
 
         self.cpp_engine = engine_config.cpp_engine
@@ -95,7 +123,9 @@ class MuiParallelBaseAttention(MuiModule):
 
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_heads = config.num_key_value_heads
-        self.num_tp_key_value_heads = self.num_key_value_heads // self.tensor_parallelism
+        self.num_tp_key_value_heads = (
+            self.num_key_value_heads // self.tensor_parallelism
+        )
 
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
@@ -113,7 +143,15 @@ class MuiParallelBaseAttention(MuiModule):
         else:
             attention_bias = False
 
-        self.o_proj = MuiParallelLinear(engine_config, self.num_heads * self.head_dim, self.hidden_size, bias=attention_bias, device=device, dtype=dtype, sharding_dim=1)
+        self.o_proj = MuiParallelLinear(
+            engine_config,
+            self.num_heads * self.head_dim,
+            self.hidden_size,
+            bias=attention_bias,
+            device=device,
+            dtype=dtype,
+            sharding_dim=1,
+        )
 
         self.rotary_emb = rotary_emb
 
@@ -129,6 +167,9 @@ class MuiParallelBaseAttention(MuiModule):
         self.dispatchable = self.rotary_emb.dispatchable
 
     def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
         if self.cpp_module is not None:
             muillm_ext.muillm_parallel_attention_module_deinit(self.cpp_module)
 
@@ -142,10 +183,21 @@ class MuiParallelBaseAttention(MuiModule):
             self.head_dim,
         )
 
-    staticmethod
-    def _create_rotary_embeddings(engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx:int, device=None, dtype=None) -> MuiMistralRotaryEmbedding:
+    def finalize_deinit(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_attention_module_deinit(self.cpp_module)
+            self.cpp_module = None
 
-        rotary_emb = MuiMistralRotaryEmbedding(
+    @staticmethod
+    def _create_rotary_embeddings(
+        engine_config: MuiEngineConfig,
+        config: Union[LlamaConfig, MistralConfig],
+        layer_idx: int,
+        device=None,
+        dtype=None,
+    ) -> MuiRotaryEmbedding:
+
+        rotary_emb = MuiRotaryEmbedding(
             engine_config,
             config,
             layer_idx=layer_idx,
@@ -155,18 +207,38 @@ class MuiParallelBaseAttention(MuiModule):
         return rotary_emb
 
     @staticmethod
-    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig) -> "MuiParallelBaseAttention":
-        device = prev_module.q_proj.weight.device
-        dtype = prev_module.q_proj.weight.dtype
+    def replace(
+        prev_module: Union[LlamaAttention, MistralAttention],
+        engine_config: MuiEngineConfig,
+        device=None,
+    ) -> "MuiParallelBaseAttention":
+        if device is None:
+            raise ValueError("device was None")
 
-        layer_idx=prev_module.layer_idx
-        config=prev_module.config
+        if isinstance(prev_module.o_proj, MuiParallelLinear):
+            device = prev_module.o_proj.weights[0].device if device is None else device
+            dtype = prev_module.o_proj.weights[0].dtype
+        else:
+            device = prev_module.o_proj.weight.device if device is None else device
+            dtype = prev_module.o_proj.weight.dtype
 
-        rotary_emb = MuiParallelBaseAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
+        layer_idx = prev_module.layer_idx
+        config = prev_module.config
 
-        new_module = MuiParallelBaseAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
+        rotary_emb = MuiParallelBaseAttention._create_rotary_embeddings(
+            engine_config, config, layer_idx, device, dtype
+        )
 
-        new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
+        new_module = MuiParallelBaseAttention(
+            engine_config=engine_config,
+            config=config,
+            rotary_emb=rotary_emb,
+            layer_idx=layer_idx,
+            device=device,
+            dtype=dtype,
+        )
+
+        new_module.o_proj.copy_module(prev_module=prev_module.o_proj, device=device)
 
         return new_module
 
@@ -181,7 +253,9 @@ class MuiParallelBaseAttention(MuiModule):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        position_embeddings: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # will become mandatory in v4.46
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,
@@ -223,12 +297,12 @@ class MuiParallelBaseAttention(MuiModule):
             #     # It contains 0 where OK, min_dtype where padded
             #     # min_dtype obtained with torch.finfo(dtype).min
             #     attn_output = mui_causally_decode_masked(query_states, key_states, value_states, attention_mask)
-            
+
             # attn_output = self.o_proj.parallel_forward([attn_output], residual=residual)[0]
 
             # The mask has shape:
             # M: [B, 1, S, T]
-            
+
             if self.dispatchable and isinstance(past_key_value, MuiCache):
                 # can use the C++ module for doing rope + cache write + attention
                 attn_output = _MuiParallelAttentionRope.apply(
@@ -245,45 +319,77 @@ class MuiParallelBaseAttention(MuiModule):
                 )
             else:
                 # as q_len is 1, we can avoid the transpose
-                query_states = query_states.view(bsz, self.num_tp_heads, q_len, self.head_dim)
-                key_states = key_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
-                value_states = value_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
+                query_states = query_states.view(
+                    bsz, self.num_tp_heads, q_len, self.head_dim
+                )
+                key_states = key_states.view(
+                    bsz, self.num_tp_key_value_heads, q_len, self.head_dim
+                )
+                value_states = value_states.view(
+                    bsz, self.num_tp_key_value_heads, q_len, self.head_dim
+                )
 
-                query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                query_states, key_states, value_states = (
+                    self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                        query_states,
+                        key_states,
+                        position_ids,
+                        position_embeddings,
+                        value_states,
+                        past_key_value,
+                        cache_position,
+                    )
+                )
+                attn_output = _MuiParallelAttention.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    residual,
+                )
+        else:
+            if q_len == 1:
+                # as q_len is 1, we can avoid the transpose
+                query_states = query_states.view(
+                    bsz, self.num_tp_heads, q_len, self.head_dim
+                )
+                key_states = key_states.view(
+                    bsz, self.num_tp_key_value_heads, q_len, self.head_dim
+                )
+                value_states = value_states.view(
+                    bsz, self.num_tp_key_value_heads, q_len, self.head_dim
+                )
+            else:
+                query_states = query_states.view(
+                    bsz, q_len, self.num_tp_heads, self.head_dim
+                ).transpose(1, 2)
+                key_states = key_states.view(
+                    bsz, q_len, self.num_tp_key_value_heads, self.head_dim
+                ).transpose(1, 2)
+                value_states = value_states.view(
+                    bsz, q_len, self.num_tp_key_value_heads, self.head_dim
+                ).transpose(1, 2)
+
+            query_states, key_states, value_states = (
+                self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
                     query_states,
                     key_states,
                     position_ids,
                     position_embeddings,
                     value_states,
                     past_key_value,
-                    cache_position
+                    cache_position,
                 )
-                attn_output = _MuiParallelAttention.apply(self.cpp_module, query_states, key_states, value_states, attention_mask, residual)
-        else:
-            if (q_len == 1):
-                # as q_len is 1, we can avoid the transpose
-                query_states = query_states.view(bsz, self.num_tp_heads, q_len, self.head_dim)
-                key_states = key_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
-                value_states = value_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
-            else:
-                query_states = query_states.view(bsz, q_len, self.num_tp_heads, self.head_dim).transpose(1, 2)
-                key_states = key_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
-                value_states = value_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
-
-            query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
-                query_states,
-                key_states,
-                position_ids,
-                position_embeddings,
-                value_states,
-                past_key_value,
-                cache_position
             )
 
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / self.sqrt_head_dim
+            attn_weights = (
+                torch.matmul(query_states, key_states.transpose(2, 3))
+                / self.sqrt_head_dim
+            )
 
             if attention_mask is not None:  # no matter the length, we just slice it
                 # The mask has shape:
@@ -293,8 +399,12 @@ class MuiParallelBaseAttention(MuiModule):
                 attn_weights = attn_weights + attention_mask
 
             # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_weights = nn.functional.softmax(
+                attn_weights, dim=-1, dtype=torch.float32
+            ).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(
+                attn_weights, p=self.attention_dropout, training=self.training
+            )
             attn_output = torch.matmul(attn_weights, value_states)
 
             if attn_output.size() != (bsz, self.num_tp_heads, q_len, self.head_dim):
@@ -308,7 +418,9 @@ class MuiParallelBaseAttention(MuiModule):
             # from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
             attn_output = attn_output.view(bsz, q_len, self.tp_hidden_size)
 
-            attn_output = self.o_proj.parallel_forward([attn_output], residual=residual)[0]
+            attn_output = self.o_proj.parallel_forward(
+                [attn_output], residual=residual
+            )[0]
 
         return [attn_output]
 
@@ -323,7 +435,9 @@ class MuiParallelBaseAttention(MuiModule):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        position_embeddings: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # will become mandatory in v4.46
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,

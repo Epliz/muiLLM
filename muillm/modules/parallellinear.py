@@ -1,4 +1,5 @@
 from typing import List, Optional, Union
+from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
 import torch
@@ -13,10 +14,13 @@ from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.rmsnorm import _MuiRMSNorm
 import muillm_ext
 
+
 class _MuiParallelLinear(torch.autograd.Function):
     @staticmethod
     def forward(ctx, module, x, residual, reduce):
-        output = muillm_ext.muillm_parallel_linear_module_forward(module, x, residual=residual, reduce=reduce)
+        output = muillm_ext.muillm_parallel_linear_module_forward(
+            module, x, residual=residual, reduce=reduce
+        )
 
         ctx.save_for_backward(x)
 
@@ -26,17 +30,38 @@ class _MuiParallelLinear(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise ValueError("Not implemented")
 
+
 class MuiParallelLinear(MuiModule):
-    def __init__(self, engine_config: MuiEngineConfig, in_features: int, out_features: int, bias: bool = True,
-                 variance_epsilon:float = 0.0, normalize:bool = False, sharding_dim: int = 1, device=None, dtype=None) -> None:
+    def __init__(
+        self,
+        engine_config: MuiEngineConfig,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        variance_epsilon: float = 0.0,
+        normalize: bool = False,
+        sharding_dim: int = 1,
+        device=None,
+        dtype=None,
+    ) -> None:
         super().__init__(engine_config=engine_config)
 
-        linear = nn.Linear(in_features=in_features, out_features=out_features, bias=bias, device=device, dtype=dtype)
+        linear = nn.Linear(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            device=device,
+            dtype=dtype,
+        )
 
         self.cpp_engine = engine_config.cpp_engine
         self.comms = engine_config.comms
         self.tensor_parallelism = engine_config.tensor_parallelism
-        self.sharding_dim = sharding_dim + len(linear.weight.shape) if sharding_dim < 0 else sharding_dim
+        self.sharding_dim = (
+            sharding_dim + len(linear.weight.shape)
+            if sharding_dim < 0
+            else sharding_dim
+        )
 
         self.in_features = in_features
         self.out_features = out_features
@@ -45,14 +70,20 @@ class MuiParallelLinear(MuiModule):
 
         self.normalize = normalize
         self.variance_epsilon = variance_epsilon
-        self.norm_weights = nn.ParameterList([torch.ones(in_features, dtype=dtype, device=device)]) if normalize else None
+        self.norm_weights = (
+            nn.ParameterList([torch.ones(in_features, dtype=dtype, device=device)])
+            if normalize
+            else None
+        )
 
         self.weights = nn.ParameterList([self.__shard_weigths(linear.weight)])
         MuiParallelLinear._set_requires_grads(self.weights, linear.weight.requires_grad)
 
         if linear.bias is not None:
             self.biases = nn.ParameterList([self.__shard_bias(linear.bias)])
-            MuiParallelLinear._set_requires_grads(self.biases, linear.bias.requires_grad)
+            MuiParallelLinear._set_requires_grads(
+                self.biases, linear.bias.requires_grad
+            )
         else:
             self.biases = None
 
@@ -79,17 +110,41 @@ class MuiParallelLinear(MuiModule):
             self.weights[0],
             norm_weights,
             self.variance_epsilon,
-            None, # mul_bias
+            None,  # mul_bias
             bias,
-            self.sharding_dim
+            self.sharding_dim,
         )
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
+    def _severe_ties(self):
+        # severe ties to weights, biases and norm_weights
+        weights = self.weights[0]
+        self.weights = None
+        del weights
+
+        if self.biases is not None:
+            biases = self.biases[0]
+            self.biases = None
+            del biases
+
+        if self.norm_weights is not None:
+            norm_weights = self.norm_weights[0]
+            self.norm_weights = None
+            del norm_weights
+
+        # destroy the C++ module as well to severe the ties to tensors
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_linear_module_deinit(self.cpp_module)
+            self.cpp_module = None
+
+    def finalize_deinit(self):
+        self._severe_ties()
+
     def _check_dispatchable(self):
         self.dtype = self.weights[0].dtype
-        dispatchable_type = (self.dtype == torch.float16)
+        dispatchable_type = self.dtype == torch.float16
         self.is_cuda = self.weights[0].is_cuda
         dispatchable_device = self.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
@@ -101,37 +156,163 @@ class MuiParallelLinear(MuiModule):
                 param.requires_grad = requires_grads
 
     @staticmethod
-    def replace(prev_module: nn.Linear, engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiParallelLinear":
+    def replace(
+        prev_module: Union["MuiParallelLinear", MuiLinear, nn.Linear],
+        engine_config: MuiEngineConfig,
+        prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None,
+        device=None,
+    ) -> "MuiParallelLinear":
+        if device is None:
+            raise ValueError("device was None")
+
+        if isinstance(prev_module, MuiParallelLinear) and (
+            prev_layernorm_module is None
+        ):
+            # nothing would be changing if we created a new module, so might as well return the previous one
+            return prev_module
+
+        if isinstance(prev_module, MuiParallelLinear):
+            # gather back into a MuiLinear layer to simplify conversion
+            new_prev_module = prev_module.to_linear()
+
+            # delete the previous module to save memory
+            del prev_module
+
+            # trigger GC to save memory
+            trigger_gc()
+
+            prev_module = new_prev_module
+
+        device = prev_module.weight.device if device is None else device
+        dtype = prev_module.weight.dtype
+
+        # put on the end device to accelerate things
+        # (ok as we are replacing the module entirely so we can change its device)
+        if device is not None:
+            prev_module = prev_module.to(device)
+            prev_layernorm_module = (
+                prev_layernorm_module.to(device)
+                if prev_layernorm_module is not None
+                else None
+            )
+
         has_bias = prev_module.bias is not None
         in_features = prev_module.in_features
         out_features = prev_module.out_features
 
-        normalize = prev_layernorm_module is not None
-        variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
-        norm_weights = prev_layernorm_module.weight if normalize else None
+        if isinstance(prev_module, MuiLinear):
+            # due to replacement order, we might get the normalization weights already in
+            # or in prev_layernorm_module
+            # but not both
+            if (prev_module.normalize) and (prev_layernorm_module is not None):
+                raise ValueError(
+                    "both norm weights in MuiLinear and layernorm module provided"
+                )
+            if prev_module.normalize:
+                normalize = True
+                variance_epsilon = prev_module.variance_epsilon
+                norm_weights = None  # needs to be None for copy_module
+            elif prev_layernorm_module is not None:
+                normalize = True
+                variance_epsilon = prev_layernorm_module.variance_epsilon
+                norm_weights = prev_layernorm_module.weight
+            else:
+                normalize = False
+                variance_epsilon = 0.0
+                norm_weights = None
 
-        new_module = MuiParallelLinear(engine_config=engine_config, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
-        new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights)
+        elif isinstance(prev_module, nn.Linear):
+            normalize = prev_layernorm_module is not None
+            variance_epsilon = (
+                prev_layernorm_module.variance_epsilon if normalize else 0.0
+            )
+            norm_weights = prev_layernorm_module.weight if normalize else None
+        else:
+            raise ValueError(
+                f"Unsupported replacement to MuiParallelLinear: {prev_module.__class__.__name__}"
+            )
+
+        new_module = MuiParallelLinear(
+            engine_config=engine_config,
+            in_features=in_features,
+            out_features=out_features,
+            bias=has_bias,
+            variance_epsilon=variance_epsilon,
+            normalize=normalize,
+            dtype=dtype,
+            device=device,
+        )
+        new_module.copy_module(
+            prev_module=prev_module, norm_weights=norm_weights, device=device
+        )
+
+        # delete the previous module to save memory
+        if isinstance(prev_module, MuiParallelLinear) or isinstance(
+            prev_module, MuiLinear
+        ):
+            prev_module._severe_ties()
+        else:
+            prev_weights = prev_module.weight
+            prev_module.weight = None
+            del prev_weights
+
+            if prev_module.bias is not None:
+                prev_bias = prev_module.bias
+                prev_module.bias = None
+                del prev_bias
+
+        if prev_layernorm_module is not None:
+            prev_layernorm_weights = prev_layernorm_module.weight
+            prev_layernorm_module.weight = None
+            del prev_layernorm_weights
+
+        del prev_module
+
+        # trigger GC to save memory
+        trigger_gc()
 
         return new_module
-    
+
     def _set_norm_weights(self, norm_weights: torch.Tensor) -> None:
         norm_weights_requires_grad = norm_weights.requires_grad
         self.norm_weights = nn.ParameterList([norm_weights.detach()])
-        MuiParallelLinear._set_requires_grads(self.norm_weights, norm_weights_requires_grad)
+        MuiParallelLinear._set_requires_grads(
+            self.norm_weights, norm_weights_requires_grad
+        )
 
         # re-create the cpp module
         self.finalize_init()
 
-    def copy_module(self, prev_module: Union[nn.Linear, MuiLinear], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
+    def copy_module(
+        self,
+        prev_module: Union["MuiParallelLinear", nn.Linear, MuiLinear],
+        norm_weights: torch.Tensor = None,
+        variance_epsilon: float = 0.0,
+        device=None,
+    ):
+        if device is None:
+            raise ValueError("device was None")
+
+        if isinstance(prev_module, MuiParallelLinear):
+            # gather back into a MuiLinear layer to simplify conversion
+            prev_module = prev_module.to_linear()
+
         has_bias = prev_module.bias is not None
 
         self.weights = nn.ParameterList([self.__shard_weigths(prev_module.weight)])
-        MuiParallelLinear._set_requires_grads(self.weights, prev_module.weight.requires_grad)
+        MuiParallelLinear._set_requires_grads(
+            self.weights, prev_module.weight.requires_grad
+        )
 
         if has_bias:
-            self.biases = nn.ParameterList([self.__shard_bias(prev_module.bias)]) if prev_module.bias is not None else None
-            MuiParallelLinear._set_requires_grads(self.biases, prev_module.bias.requires_grad)
+            self.biases = (
+                nn.ParameterList([self.__shard_bias(prev_module.bias)])
+                if prev_module.bias is not None
+                else None
+            )
+            MuiParallelLinear._set_requires_grads(
+                self.biases, prev_module.bias.requires_grad
+            )
 
         if isinstance(prev_module, MuiLinear):
             # MuiLinear inherits nn.Linear, so need to check first
@@ -142,14 +323,16 @@ class MuiParallelLinear(MuiModule):
             # norm_weights need to be set in calling args if needed
             pass
         else:
-            raise ValueError(f"Unsupported replacement: {prev_module.__class__.__name__}")
+            raise ValueError(
+                f"Unsupported replacement: {prev_module.__class__.__name__}"
+            )
 
         if norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities
             self._set_norm_weights(norm_weights)
 
-        # cache the flags checking if it is dispatchable
-        self._check_dispatchable()
+        # put ourselves on the right device
+        self.to(device=device)
 
         self.finalize_init()
 
@@ -164,46 +347,72 @@ class MuiParallelLinear(MuiModule):
     def _sync_all(engine_config: MuiEngineConfig):
         torch.cuda.synchronize()
 
+    def to_linear(self) -> MuiLinear:
+        has_bias = self.biases is not None
+        normalize = self.normalize
+
+        linear = MuiLinear(
+            engine_config=self.engine_config,
+            in_features=self.in_features,
+            out_features=self.out_features,
+            bias=has_bias,
+            variance_epsilon=self.variance_epsilon,
+            normalize=normalize,
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        linear._set_weights(self._unshard_weigths(self.weights[0]))
+        if has_bias:
+            linear._set_bias(self._unshard_biases(self.biases[0]))
+        linear._set_norm_weights(self.norm_weights[0]) if self.normalize else None
+
+        linear.finalize_init()
+
+        return linear
+
     def __shard_weigths(self, tensor: Tensor) -> Tensor:
-        return MuiParallelLinear._shard_weigths(self.engine_config, tensor, self.tensor_parallelism, self.sharding_dim)
+        return MuiParallelLinear._shard_weigths(
+            self.engine_config, tensor, self.tensor_parallelism, self.sharding_dim
+        )
 
     @staticmethod
-    def _shard_weigths(engine_config: MuiEngineConfig, tensor: Tensor, tensor_parallelism: int, sharding_dim: int) -> Tensor:
+    def _shard_weigths(
+        engine_config: MuiEngineConfig,
+        tensor: Tensor,
+        tensor_parallelism: int,
+        sharding_dim: int,
+    ) -> Tensor:
         rank = engine_config.comms.rank
         tensor = torch.tensor_split(tensor, tensor_parallelism, sharding_dim)[rank]
         return tensor.contiguous()
 
-    def _shard_inputs(self, tensor: Tensor) -> Tensor:
-        if self.sharding_dim == 1:
-            # if we are sharding along the k-dim, we need to shard the input accordingly
-            rank = self.engine_config.comms.rank
-            tensor = torch.tensor_split(tensor, self.tensor_parallelism, -1)[rank]
-            return tensor
-        elif (self.sharding_dim == 0):
-            # but if we shard by row, we just need the inputs on all devices
-            return tensor
-        else:
-            raise ValueError("Unsupported sharding dimension")
+    def _unshard_weigths(self, tensor: Tensor) -> Tensor:
+        # gather the weights
+        weights = self.engine_config.comms.all_gather(tensor)
+        # and concatenate the pieces
+        weight = torch.cat(weights, dim=self.sharding_dim)
 
-    def _shard_inputs_if_needed(self, tensors: Union[Tensor, List[Tensor]]) -> List[Tensor]:
-        # if it is a list already, it indicates it is shareded
-        sharded_inputs = isinstance(tensors, list)
+        return weight.clone().contiguous().detach()
 
-        if not sharded_inputs:
-            return self._shard_inputs(tensors)
-        else:
-            # already sharded
-            # unwrap
-            return tensors[0]
-    
     def __shard_bias(self, bias: Optional[Tensor]) -> Optional[Tensor]:
-        return MuiParallelLinear._shard_bias(self.engine_config, bias, tensor_parallelism=self.tensor_parallelism, sharding_dim=self.sharding_dim)
+        return MuiParallelLinear._shard_bias(
+            self.engine_config,
+            bias,
+            tensor_parallelism=self.tensor_parallelism,
+            sharding_dim=self.sharding_dim,
+        )
 
     @staticmethod
-    def _shard_bias(engine_config: MuiEngineConfig, bias: Optional[Tensor], tensor_parallelism: int, sharding_dim: int) -> Optional[Tensor]:
+    def _shard_bias(
+        engine_config: MuiEngineConfig,
+        bias: Optional[Tensor],
+        tensor_parallelism: int,
+        sharding_dim: int,
+    ) -> Optional[Tensor]:
         if bias is None:
             return None
-        
+
         rank = engine_config.comms.rank
         if sharding_dim == 0:
             # if we shard by rows, we need to shard the bias
@@ -216,26 +425,86 @@ class MuiParallelLinear(MuiModule):
         else:
             raise ValueError("Unsupported sharding dimension")
 
+    def _unshard_biases(self, bias: Optional[Tensor]) -> Optional[Tensor]:
+        rank = self.engine_config.comms.rank
+        sharding_dim = self.sharding_dim
+
+        if sharding_dim == 0:
+            # if we shard by rows, we need to gather the bias
+            biases = self.engine_config.comms.all_gather(bias)
+            # and concatenate the pieces
+            bias = torch.cat(biases, dim=0)
+        elif sharding_dim == 1:
+            # only the GPU 0 has the bias
+            # get it by broadcasting from the GPU 0
+            bias = (
+                bias
+                if rank == 0
+                else torch.zeros(size=self.out_features, device=self.device)
+            )
+
+            bias = self.engine_config.comms.broadcast(bias, src=0)
+        else:
+            raise ValueError("Unsupported sharding dimension")
+
+        return bias.clone().contiguous().detach()
+
+    def _shard_inputs(self, tensor: Tensor) -> Tensor:
+        if self.sharding_dim == 1:
+            # if we are sharding along the k-dim, we need to shard the input accordingly
+            rank = self.engine_config.comms.rank
+            tensor = torch.tensor_split(tensor, self.tensor_parallelism, -1)[rank]
+            return tensor
+        elif self.sharding_dim == 0:
+            # but if we shard by row, we just need the inputs on all devices
+            return tensor
+        else:
+            raise ValueError("Unsupported sharding dimension")
+
+    def _shard_inputs_if_needed(
+        self, tensors: Union[Tensor, List[Tensor]]
+    ) -> List[Tensor]:
+        # if it is a list already, it indicates it is shareded
+        sharded_inputs = isinstance(tensors, list)
+
+        if not sharded_inputs:
+            return self._shard_inputs(tensors)
+        else:
+            # already sharded
+            # unwrap
+            return tensors[0]
+
     def __collect_outputs(self, tensor: Tensor) -> Tensor:
-        return MuiParallelLinear._collect_outputs(self.engine_config, tensor, self.sharding_dim)
+        return MuiParallelLinear._collect_outputs(
+            self.engine_config, tensor, self.sharding_dim
+        )
 
     @staticmethod
-    def _collect_outputs(engine_config: MuiEngineConfig, tensor: Tensor, sharding_dim: int) -> Tensor:
+    def _collect_outputs(
+        engine_config: MuiEngineConfig, tensor: Tensor, sharding_dim: int
+    ) -> Tensor:
         if sharding_dim == 1:
             # reduce
             return engine_config.comms.all_reduce_sum(tensor)
         elif sharding_dim == 0:
             # concat all
             all_tensors = engine_config.comms.all_gather(tensor)
-            return torch.cat(all_tensors, dim = -1)
+            return torch.cat(all_tensors, dim=-1)
         else:
             # TODO: implement for sharding_dim == 0 (needed by parallel multi linear)
             raise ValueError("Not supported")
 
-    def parallel_forward(self, input: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None, collect_outputs: bool = True) -> Tensor:
+    def parallel_forward(
+        self,
+        input: Union[Tensor, List[Tensor]],
+        residual: Optional[Tensor] = None,
+        collect_outputs: bool = True,
+    ) -> Tensor:
         input = self._shard_inputs_if_needed(input)
 
-        output = _MuiParallelLinear.apply(self.cpp_module, input, residual, collect_outputs)
+        output = _MuiParallelLinear.apply(
+            self.cpp_module, input, residual, collect_outputs
+        )
 
         # wrap in a list to indicate that it is the output of parallel_forward
         return [output]

@@ -84,8 +84,28 @@ class MuiInt8Linear(MuiModule):
         dispatchable_device = self.weights_uint8.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
 
+    def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
     @staticmethod
-    def replace(prev_module: Union[nn.Linear, MuiLinear], engine_config: MuiEngineConfig) -> "MuiInt8Linear":
+    def replace(prev_module: Union["MuiInt8Linear", nn.Linear, MuiLinear], engine_config: MuiEngineConfig, device=None) -> "MuiInt8Linear":
+        if device is None:
+            raise ValueError("device was None")
+
+        if isinstance(prev_module, MuiInt8Linear):
+            # re-creating a module would replace nothing so we can avoid it
+            return prev_module
+
+        device = prev_module.weight.device if device is None else device
+        dtype = prev_module.weight.dtype
+
+        # put on the end device to accelerate things
+        # (ok as we are replacing the module entirely so we can change its device)
+        if device is not None:
+            prev_module = prev_module.to(device)
+            norm_weights = norm_weights.to(device) if norm_weights is not None else None
+
         has_bias = prev_module.bias is not None
         in_features = prev_module.in_features
         out_features = prev_module.out_features
@@ -99,12 +119,15 @@ class MuiInt8Linear(MuiModule):
             variance_epsilon = prev_module.variance_epsilon if normalize else 0.0
             norm_weights = prev_module.norm_weights if normalize else None
 
-        new_module = MuiInt8Linear(engine_config=engine_config, quantization_method=engine_config.quantization_method, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=prev_module.weight.dtype, device=prev_module.weight.device)
-        new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights)
+        new_module = MuiInt8Linear(engine_config=engine_config, quantization_method=engine_config.quantization_method, in_features=in_features, out_features=out_features, bias=has_bias, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
+        new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights, device=device)
 
         return new_module
 
-    def copy_module(self, prev_module: nn.Linear, norm_weights: torch.Tensor = None):
+    def copy_module(self, prev_module: nn.Linear, norm_weights: torch.Tensor = None, device=None):
+        if device is None:
+            raise ValueError("device was None")
+
         has_bias = prev_module.bias is not None
 
         weights_require_grads = prev_module.weight.requires_grad
@@ -130,6 +153,9 @@ class MuiInt8Linear(MuiModule):
             self.norm_weights.requires_grad = norm_weights_requires_grad
 
             self.norm_weights = norm_weights
+
+        # put ourselvese on the right device
+        self.to(device=device)
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()

@@ -142,9 +142,13 @@ for prompts in all_prompts:
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
 text, time = profile_func(lambda: time_func(lambda: generate(model, batched_prompts, 50)), trace_path="trace_llama_orig_batched.json")
 
+del model
+from muillm.memorymanagement.gc import trigger_gc
+trigger_gc()
+
 # Use the muiLLM replacements layers
-from muillm.engine import init_engine
-model = init_engine(model)
+from muillm.engine import load_model
+model = load_model(model_id)
 
 print("Optimized models: ", model)
 

@@ -13,7 +13,7 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.module import MuiModule
-from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
+from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode, mui_causally_decode_masked
 from muillm.modules.attention.kvcache import repeat_kv
 from muillm.modules.linear import MuiLinear
@@ -26,7 +26,7 @@ class MuiBaseAttention(MuiModule):
     and "Generating Long Sequences with Sparse Transformers".
     """
 
-    def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], rotary_emb: MuiMistralRotaryEmbedding, layer_idx: Optional[int] = None, device=None, dtype=None):
+    def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], rotary_emb: MuiRotaryEmbedding, layer_idx: Optional[int] = None, device=None, dtype=None):
         super().__init__(engine_config=engine_config)
         self.config = config
         self.layer_idx = layer_idx
@@ -63,9 +63,9 @@ class MuiBaseAttention(MuiModule):
         self.rotary_emb = rotary_emb
 
     staticmethod
-    def _create_rotary_embeddings(engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx:int, device=None, dtype=None) -> MuiMistralRotaryEmbedding:
+    def _create_rotary_embeddings(engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx:int, device=None, dtype=None) -> MuiRotaryEmbedding:
 
-        rotary_emb = MuiMistralRotaryEmbedding(
+        rotary_emb = MuiRotaryEmbedding(
             engine_config,
             config,
             layer_idx=layer_idx,
@@ -75,9 +75,12 @@ class MuiBaseAttention(MuiModule):
         return rotary_emb
 
     @staticmethod
-    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig) -> "MuiBaseAttention":
-        device = prev_module.q_proj.weight.device
-        dtype = prev_module.q_proj.weight.dtype
+    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig, device=None) -> "MuiBaseAttention":
+        if device is None:
+            raise ValueError("device was None")
+
+        device = prev_module.o_proj.weight.device if device is None else device
+        dtype = prev_module.o_proj.weight.dtype
 
         layer_idx=prev_module.layer_idx
         config=prev_module.config
@@ -86,7 +89,7 @@ class MuiBaseAttention(MuiModule):
 
         new_module = MuiBaseAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
 
-        new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
+        new_module.o_proj.copy_module(prev_module=prev_module.o_proj, device=device)
 
         return new_module
 

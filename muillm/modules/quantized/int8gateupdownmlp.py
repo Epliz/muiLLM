@@ -67,7 +67,6 @@ class _MuiInt8GateUpSiLU(torch.autograd.Function):
 class MuiInt8GateUpDownMLP(MuiModule):
     def __init__(self, engine_config: MuiEngineConfig, quantization_method: Int8WeightOnlyQuantizationMethod, hidden_size: int, intermediate_size: int, activation_function: nn.Module, variance_epsilon:float = 0.0, normalize:bool = False, device=None, dtype=None) -> None:
         super().__init__(engine_config=engine_config)
-        self.device = device
         self.weight_dtype = dtype
         self.quantization_method = quantization_method
         self.quantizer = RTNQuantizer(n_bit=8, groupsize=quantization_method.group_size, f=quantization_method.f)
@@ -100,10 +99,27 @@ class MuiInt8GateUpDownMLP(MuiModule):
         dispatchable_device = self.gate_up_weights.is_cuda
         self.dispatchable = dispatchable_activation and dispatchable_device and dispatchable_type
 
+
+    def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
     @staticmethod
-    def replace(prev_module: MuiGateUpDownMLP, engine_config: MuiEngineConfig) -> "MuiInt8GateUpDownMLP":
+    def replace(prev_module: MuiGateUpDownMLP, engine_config: MuiEngineConfig, device=None) -> "MuiInt8GateUpDownMLP":
+        if device is None:
+            raise ValueError("device was None")
+
+        if isinstance(prev_module, MuiInt8GateUpDownMLP):
+            # re-creating a module would replace nothing so we can avoid it
+            return prev_module
+
         dtype=prev_module.gate_proj.weight.dtype
-        device=prev_module.gate_proj.weight.device
+        device=prev_module.gate_proj.weight.device if device is None else device
+
+        # put on the end device to accelerate things
+        # (ok as we are replacing the module entirely so we can change its device)
+        if device is not None:
+            prev_module = prev_module.to(device)
 
         hidden_size = prev_module.hidden_size
         intermediate_size = prev_module.intermediate_size
@@ -113,7 +129,7 @@ class MuiInt8GateUpDownMLP(MuiModule):
         variance_epsilon = prev_module.variance_epsilon
 
         new_module = MuiInt8GateUpDownMLP(engine_config=engine_config, quantization_method=engine_config.quantization_method, hidden_size=hidden_size, intermediate_size=intermediate_size, activation_function=activation_function, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
-        new_module.copy_module(prev_module=prev_module)
+        new_module.copy_module(prev_module=prev_module, device=device)
 
         return new_module
     
@@ -160,7 +176,9 @@ class MuiInt8GateUpDownMLP(MuiModule):
 
         return dequant_gate_weights, dequant_up_weights
 
-    def copy_module(self, prev_module: MuiGateUpDownMLP):
+    def copy_module(self, prev_module: MuiGateUpDownMLP, device=None):
+        if device is None:
+            raise ValueError("device was None")
 
         if prev_module.norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities
@@ -171,14 +189,17 @@ class MuiInt8GateUpDownMLP(MuiModule):
 
             self.norm_weights = prev_module.norm_weights
 
-        gate_proj = MuiInt8Linear(self.engine_config, self.quantization_method, self.hidden_size, self.intermediate_size, bias=False, device=self.device, dtype=self.weight_dtype)
-        up_proj = MuiInt8Linear(self.engine_config, self.quantization_method, self.hidden_size, self.intermediate_size, bias=False, device=self.device, dtype=self.weight_dtype)
+        gate_proj = MuiInt8Linear(self.engine_config, self.quantization_method, self.hidden_size, self.intermediate_size, bias=False, device=device, dtype=self.weight_dtype)
+        up_proj = MuiInt8Linear(self.engine_config, self.quantization_method, self.hidden_size, self.intermediate_size, bias=False, device=device, dtype=self.weight_dtype)
         gate_proj = self._qint8_linear(gate_proj, prev_module.gate_proj)
         up_proj = self._qint8_linear(up_proj, prev_module.up_proj)
 
         self.gate_up_weights, self.gate_up_scales_min_vals = self._pack_gateup_linears(gate_proj, up_proj)
 
         self.down_proj = self._qint8_linear(self.down_proj, prev_module.down_proj)
+
+        # put ourselves on the correct device
+        self.to(device=device)
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()

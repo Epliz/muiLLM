@@ -1,5 +1,6 @@
 from typing import Optional, Tuple, Union
 import warnings
+from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
@@ -23,7 +24,14 @@ class MuiDecoderLayer(MuiModule):
         self.mlp = mlp
 
     @staticmethod
-    def replace(prev_module: Union[LlamaDecoderLayer, MistralDecoderLayer], engine_config: MuiEngineConfig) -> "MuiDecoderLayer":
+    def replace(prev_module: Union["MuiDecoderLayer", LlamaDecoderLayer, MistralDecoderLayer], engine_config: MuiEngineConfig, device=None) -> "MuiDecoderLayer":
+        if device is None:
+            raise ValueError("device was None")
+        
+        if isinstance(prev_module, MuiDecoderLayer):
+            # nothing would be changing if we created a new module, so might as well return the previous one
+            return prev_module
+
         prev_attn = prev_module.self_attn
 
         input_layernorm = prev_module.input_layernorm
@@ -31,17 +39,24 @@ class MuiDecoderLayer(MuiModule):
         self_attn = None
         if isinstance(prev_attn, MistralAttention) or isinstance(prev_attn, LlamaAttention):
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
-            qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm)
-            self_attn = MuiSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config)
+            qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm, device=device)
+            self_attn = MuiSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config, device=device)
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
 
         post_attention_layernorm = prev_module.post_attention_layernorm
-        mlp = prev_module.mlp
-        if not isinstance(prev_module.mlp, MuiGateUpDownMLP):
-            mlp = MuiGateUpDownMLP.replace(prev_module=prev_module.mlp, engine_config=engine_config, prev_layernorm_module=post_attention_layernorm)
+        # even if we had a MuiGateUpDownMLP, we need to replace it with a new one to get the layernorm module
+        mlp = MuiGateUpDownMLP.replace(prev_module=prev_module.mlp, engine_config=engine_config, prev_layernorm_module=post_attention_layernorm, device=device)
 
-        return MuiDecoderLayer(engine_config=engine_config, qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp)
+        new_decoder = MuiDecoderLayer(engine_config=engine_config, qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp)
+
+        # delete the previous module to save memory
+        del prev_module
+
+        # trigger GC to save memory
+        trigger_gc()
+
+        return new_decoder
 
     
     def forward(

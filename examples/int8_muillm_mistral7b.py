@@ -98,9 +98,14 @@ if num_total_tokens < 100:
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
 text, time = profile_func(lambda: time_func(lambda: generate(model, prompt, 50)), trace_path="trace_mistral_orig_unbatched.json")
 
+del model
+from muillm.memorymanagement.gc import trigger_gc
+trigger_gc()
+
+# Use the muiLLM replacements layers
+from muillm.engine import load_model
 # Use the muiLLM replacements layers with int8 round-to-nearest (RTN) quantization
-from muillm.engine import init_engine
-model = init_engine(model, quantization_method=Int8WeightOnlyQuantizationMethod(group_size=32, modules=["qkv_proj", "o_proj", "gate_proj", "up_proj","down_proj", "mlp"]))
+model = load_model(model_id, quantization_method=Int8WeightOnlyQuantizationMethod(group_size=32, modules=["qkv_proj", "o_proj", "gate_proj", "up_proj","down_proj", "mlp"]))
 
 print("Optimized models: ", model)
 

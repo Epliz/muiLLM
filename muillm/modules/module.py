@@ -2,6 +2,7 @@ import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
 
+
 class MuiModule(nn.Module):
     def __init__(self, engine_config: MuiEngineConfig = None, **kargs) -> None:
         if engine_config is None:
@@ -14,7 +15,18 @@ class MuiModule(nn.Module):
 
         self.engine_config = engine_config
 
+    def __del__(self):
+        self.finalize_deinit()
+
+        if hasattr(nn.Module, "__del__"):
+            # call the parent destructor if it exists
+            nn.Module.__del__(self)
+
     def finalize_init(self) -> None:
         # Method called at the end of replacements of all layers
         # can for example build the C++ module counterparts
+        pass
+
+    def finalize_deinit(self):
+        # Method called during destruction of the module
         pass

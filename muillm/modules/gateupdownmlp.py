@@ -1,6 +1,7 @@
 from enum import Enum
 import math
 from typing import Optional, Union
+from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.module import MuiModule
 import torch
 from torch import Tensor
@@ -13,7 +14,7 @@ from transformers.models.mistral.modeling_mistral import MistralMLP, MistralRMSN
 
 from muillm.modules.linear import MuiLinear
 
-from muillm.modules.rmsnorm import _MuiRMSNorm
+from muillm.modules.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 import muillm_ext
 
 class _MuiGateUpSiLUMethod(Enum):
@@ -82,38 +83,94 @@ class MuiGateUpDownMLP(MuiModule):
         dispatchable_device = self.gate_proj.weight.is_cuda
         self.dispatchable = dispatchable_activation and dispatchable_device and dispatchable_type
 
+
+    def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
     @staticmethod
-    def replace(prev_module: Union[LlamaMLP, MistralMLP], engine_config: MuiEngineConfig, prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None) -> "MuiGateUpDownMLP":
+    def replace(prev_module: Union["MuiGateUpDownMLP", LlamaMLP, MistralMLP], engine_config: MuiEngineConfig, prev_layernorm_module: Union[MuiRMSNorm, LlamaRMSNorm, MistralRMSNorm] = None, device=None) -> "MuiGateUpDownMLP":
+        if device is None:
+            raise ValueError("device was None")
+        
+        if isinstance(prev_module, MuiGateUpDownMLP) and (prev_layernorm_module is None):
+            # re-creating a module would replace nothing so we can avoid it
+            return prev_module
+
         dtype=prev_module.gate_proj.weight.dtype
-        device=prev_module.gate_proj.weight.device
+        device=prev_module.gate_proj.weight.device if device is None else device
+
+        # put on the end device to accelerate things
+        # (ok as we are replacing the module entirely so we can change its device)
+        if device is not None:
+            prev_module = prev_module.to(device)
+            prev_layernorm_module = prev_layernorm_module.to(device) if prev_layernorm_module is not None else None
 
         hidden_size = prev_module.hidden_size
         intermediate_size = prev_module.intermediate_size
         activation_function = prev_module.act_fn
 
-        normalize = prev_layernorm_module is not None
-        variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
-        norm_weights = prev_layernorm_module.weight if normalize else None
+        if isinstance(prev_module, MuiGateUpDownMLP):
+            # due to replacement order, we might get the normalization weights already in
+            # or in prev_layernorm_module
+            # but not both
+            if (prev_module.normalize) and (prev_layernorm_module is not None):
+                raise ValueError("both norm weights in MuiGateUpDownMLP and layernorm module provided")
+            
+            if prev_module.normalize:
+                normalize = True
+                variance_epsilon = prev_module.variance_epsilon
+                norm_weights = None # needs to be None for copy_module
+            elif prev_layernorm_module is not None:
+                normalize = True
+                variance_epsilon = prev_layernorm_module.variance_epsilon
+                norm_weights = prev_layernorm_module.weight
+            else:
+                normalize = False
+                variance_epsilon = 0.0
+                norm_weights = None
+        else:
+            normalize = prev_layernorm_module is not None
+            variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
+            norm_weights = prev_layernorm_module.weight if normalize else None
 
         new_module = MuiGateUpDownMLP(engine_config=engine_config, hidden_size=hidden_size, intermediate_size=intermediate_size, activation_function=activation_function, variance_epsilon=variance_epsilon, normalize=normalize, dtype=dtype, device=device)
-        new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights)
+        new_module.copy_module(prev_module=prev_module, norm_weights=norm_weights, device=device)
+
+        # delete the previous module to save memory
+        del prev_module
+
+        # trigger GC to save memory
+        trigger_gc()
 
         return new_module
 
-    def copy_module(self, prev_module: Union[LlamaMLP, MistralMLP], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0):
-        self.gate_proj.copy_module(prev_module.gate_proj)
-        self.up_proj.copy_module(prev_module.up_proj)
+    def copy_module(self, prev_module: Union["MuiGateUpDownMLP", LlamaMLP, MistralMLP], norm_weights: torch.Tensor = None, variance_epsilon: float = 0.0, device=None):
+        if device is None:
+            raise ValueError("device was None")
+
+        self.gate_proj.copy_module(prev_module.gate_proj, device=device)
+        self.up_proj.copy_module(prev_module.up_proj, device=device)
+
+        if isinstance(prev_module, MuiGateUpDownMLP):
+            if (prev_module.norm_weights is not None) and (norm_weights is not None):
+                raise ValueError("both norm weights in MuiGateUpDownMLP and norm_weight provided")
+
+            if prev_module.norm_weights is not None:
+                norm_weights = prev_module.norm_weights
 
         if norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities
-
             norm_weights_requires_grad = norm_weights.requires_grad
-            self.norm_weights = nn.Parameter(norm_weights.detach())
+            self.norm_weights = nn.Parameter(norm_weights.clone().detach())
             self.norm_weights.requires_grad = norm_weights_requires_grad
 
             self.norm_weights = norm_weights
 
-        self.down_proj.copy_module(prev_module.down_proj)
+        self.down_proj.copy_module(prev_module.down_proj, device=device)
+
+        # put ourselves on the right device
+        self.to(device=device)
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()

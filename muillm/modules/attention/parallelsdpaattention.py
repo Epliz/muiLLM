@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple, Union
 import warnings
 from muillm.modules.attention.parallelbaseattention import _MuiParallelAttention, _MuiParallelAttentionRope, MuiParallelBaseAttention
 from muillm.modules.kvcache.cache_utils import MuiCache
+from muillm.modules.parallellinear import MuiParallelLinear
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,7 +16,7 @@ from transformers.models.llama.modeling_llama import LlamaAttention
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.attention.rotaryembedding import MuiMistralRotaryEmbedding
+from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.attention.kvcache import repeat_kv
 
 logger = logging.get_logger(__name__)
@@ -29,9 +30,9 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
     """
 
     @staticmethod
-    def _create_rotary_embeddings(engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx:int, device=None, dtype=None) -> MuiMistralRotaryEmbedding:
+    def _create_rotary_embeddings(engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx:int, device=None, dtype=None) -> MuiRotaryEmbedding:
 
-        rotary_emb = MuiMistralRotaryEmbedding(
+        rotary_emb = MuiRotaryEmbedding(
             engine_config,
             config,
             layer_idx=layer_idx,
@@ -41,9 +42,16 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
         return rotary_emb
 
     @staticmethod
-    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig) -> "MuiParallelSdpaAttention":
-        device = prev_module.q_proj.weight.device
-        dtype = prev_module.q_proj.weight.dtype
+    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig, device=None) -> "MuiParallelSdpaAttention":
+        if device is None:
+            raise ValueError("device was None")
+
+        if isinstance(prev_module.o_proj, MuiParallelLinear):
+            device = prev_module.o_proj.weights[0].device if device is None else device
+            dtype = prev_module.o_proj.weights[0].dtype
+        else:
+            device = prev_module.o_proj.weight.device if device is None else device
+            dtype = prev_module.o_proj.weight.dtype
 
         layer_idx=prev_module.layer_idx
         config=prev_module.config
@@ -52,7 +60,7 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
 
         new_module = MuiParallelSdpaAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
 
-        new_module.o_proj.copy_module(prev_module=prev_module.o_proj)
+        new_module.o_proj.copy_module(prev_module=prev_module.o_proj, device=device)
 
         return new_module
 
