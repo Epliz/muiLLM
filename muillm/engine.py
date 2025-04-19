@@ -76,11 +76,11 @@ def load_model(
     if engine_config.tensor_parallelism == 1:
         # we can simplify the model loading as everything has to go on the GPU
         # by loading everything on the GPU first, then replacing layers
-        from transformers import AutoModelForCausalLM
+        from transformers import AutoModel
 
         hfkwargs["torch_dtype"] = model_dtype
         hfkwargs["low_cpu_mem_usage"] = True
-        model = AutoModelForCausalLM.from_pretrained(model_id, **hfkwargs).to(
+        model = AutoModel.from_pretrained(model_id, **hfkwargs).to(
             device=device, dtype=model_dtype
         )
 
@@ -96,9 +96,9 @@ def load_model(
         hfkwargs["torch_dtype"] = model_dtype
 
         # If the model is big, we can load it on CPU first and then move it to the GPU
-        from transformers import AutoModelForCausalLM
+        from transformers import AutoModel
 
-        model = AutoModelForCausalLM.from_pretrained(model_id, **hfkwargs)
+        model = AutoModel.from_pretrained(model_id, **hfkwargs)
 
         model = init_engine(
             model,

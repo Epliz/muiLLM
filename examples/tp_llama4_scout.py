@@ -2,7 +2,7 @@
 
 #!/usr/bin/env python
 
-# Example showing how to use muiLLM's tensor parallelism support on the Llama 3.1 8b model
+# Example showing how to use muiLLM's tensor parallelism support on the Llama 4 scout model
 
 import os
 
@@ -11,10 +11,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from transformers import (
-    AutoModelForCausalLM,
     AutoTokenizer,
-    PreTrainedTokenizerBase,
-    PreTrainedModel,
 )
 import torch
 import torch.nn as nn
@@ -68,27 +65,17 @@ def profile_func(f, trace_path="trace.json"):
 
 def run(rank, size):
 
-    # this example requires the LLama 3.1 8B Instruct model
+    # this example requires the meta-llama/Llama-4-Scout-17B-16E-Instruct model
     # Provided that you have a HF token to access the Llama models, you can download it with
-    # huggingface-cli download --token <your_token> meta-llama/Llama-3.1-8B-Instruct --local-dir Llama-3.1-8B-Instruct
+    # huggingface-cli download --token <your_token> meta-llama/Llama-4-Scout-17B-16E-Instruct --local-dir Llama-4-Scout-17B-16E-Instruct
 
     # either set this environment variable before running the example, or adapt the path
-    model_id = os.getenv("LLAMA3_8B_PATH", "/storage/models/Llama-3.1-8B-Instruct/")
+    model_id = os.getenv(
+        "LLAMA3_8B_PATH", "/storage/models/Llama-4-Scout-17B-16E-Instruct/"
+    )
 
     ## Load the original model & tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
-
-    # we load the original model in fp16 precision
-    model: nn.Module = AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=torch.float16
-    ).to(device="cuda", dtype=torch.float16)
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        model.resize_token_embeddings(len(tokenizer))
-
-    if rank == 0:
-        print("Model : ", model)
 
     # 5 tokens prompt
     prompt = "Hello my name is"
@@ -101,11 +88,6 @@ def run(rank, size):
     batch_size = tokenized_prompts["input_ids"].shape[0]
     num_output_tokens = 256
     num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
-
-    del model
-    from muillm.memorymanagement.gc import trigger_gc
-
-    trigger_gc()
 
     # Use the muiLLM replacements layers
     from muillm.engine import load_model
@@ -150,7 +132,7 @@ def run(rank, size):
         lambda: time_func(
             lambda: generate(model, tokenizer, prompt, num_output_tokens)
         ),
-        trace_path=f"trace_llama_muillm_tp{size}_unbatched_rank{rank}.json",
+        trace_path=f"trace_llama4_scout_muillm_tp{size}_unbatched_rank{rank}.json",
     )
 
 
