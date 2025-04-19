@@ -9,9 +9,11 @@ import torch.nn.functional as F
 import muillm_ext
 
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
+from transformers.models.llama4.modeling_llama4 import Llama4TextRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
 from muillm.engineconfig import MuiEngineConfig
+
 
 class _MuiRMSNorm(torch.autograd.Function):
     @staticmethod
@@ -26,19 +28,26 @@ class _MuiRMSNorm(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise NotImplementedError("RMSNorm backward is not implemented")
 
+
 class MuiRMSNorm(MuiModule):
-    def __init__(self, engine_config: MuiEngineConfig, hidden_size, eps=1e-6,
-                 device=None, dtype=None) -> None:
+    def __init__(
+        self,
+        engine_config: MuiEngineConfig,
+        hidden_size,
+        eps=1e-6,
+        device=None,
+        dtype=None,
+    ) -> None:
         super().__init__(engine_config=engine_config)
         self.weight = nn.Parameter(torch.ones(hidden_size, device=device, dtype=dtype))
         self.variance_epsilon = eps
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
-    
+
     def _check_dispatchable(self):
         wdtype = self.weight.dtype
-        dispatchable_type = (wdtype == torch.float16)
+        dispatchable_type = wdtype == torch.float16
         dispatchable_device = self.weight.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
 
@@ -47,14 +56,33 @@ class MuiRMSNorm(MuiModule):
         self._check_dispatchable()
 
     @staticmethod
-    def replace(prev_module: Union["MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm], engine_config: MuiEngineConfig, device = None) -> "MuiRMSNorm":
+    def _extract_eps(
+        prev_module: Union[
+            "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
+        ],
+    ) -> float:
+        if isinstance(prev_module, Llama4TextRMSNorm):
+            # Llama4 RMSNorm has a different interface
+            return prev_module.eps
+        else:
+            # Mistral and Llama RMSNorm have the same interface
+            return prev_module.variance_epsilon
+
+    @staticmethod
+    def replace(
+        prev_module: Union[
+            "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
+        ],
+        engine_config: MuiEngineConfig,
+        device=None,
+    ) -> "MuiRMSNorm":
         if device is None:
             raise ValueError("device was None")
-        
+
         if isinstance(prev_module, MuiRMSNorm):
             # nothing would be changing if we created a new module, so might as well return the previous one
             return prev_module
-        
+
         device = prev_module.weight.device if device is None else device
 
         # put on the end device to accelerate things
@@ -63,9 +91,16 @@ class MuiRMSNorm(MuiModule):
             prev_module = prev_module.to(device=device)
 
         hidden_size = prev_module.weight.shape[0]
-        eps = prev_module.variance_epsilon
 
-        new_module = MuiRMSNorm(engine_config=engine_config, hidden_size=hidden_size, eps=eps, dtype=prev_module.weight.dtype, device=device)
+        eps = MuiRMSNorm._extract_eps(prev_module)
+
+        new_module = MuiRMSNorm(
+            engine_config=engine_config,
+            hidden_size=hidden_size,
+            eps=eps,
+            dtype=prev_module.weight.dtype,
+            device=device,
+        )
         new_module.copy_module(prev_module.weight, device=device)
 
         # delete the previous module to save memory
@@ -76,7 +111,7 @@ class MuiRMSNorm(MuiModule):
 
         return new_module
 
-    def copy_module(self, prev_module: nn.Parameter, device = None):
+    def copy_module(self, prev_module: nn.Parameter, device=None):
         if device is None:
             raise ValueError("device was None")
 
@@ -98,5 +133,7 @@ class MuiRMSNorm(MuiModule):
             input_dtype = input.dtype
             hidden_states = input.to(torch.float32)
             variance = hidden_states.pow(2).mean(-1, keepdim=True)
-            hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+            hidden_states = hidden_states * torch.rsqrt(
+                variance + self.variance_epsilon
+            )
             return self.weight * hidden_states.to(input_dtype)

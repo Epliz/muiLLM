@@ -11,6 +11,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from transformers import (
+    AutoConfig,
+    AutoModel,
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedTokenizerBase,
@@ -31,6 +33,7 @@ def generate(
     else:
         prompts = prompt
 
+    # TODO: modify to use the processor and chat template
     with torch.no_grad():
         inputs = tokenizer(prompts, return_tensors="pt", padding="longest").to(
             device="cuda"
@@ -68,20 +71,26 @@ def profile_func(f, trace_path="trace.json"):
 
 def run(rank, size):
 
-    # this example requires the LLama 3.1 8B Instruct model
-    # Provided that you have a HF token to access the Llama models, you can download it with
-    # huggingface-cli download --token <your_token> meta-llama/Llama-3.1-8B-Instruct --local-dir Llama-3.1-8B-Instruct
-
     # either set this environment variable before running the example, or adapt the path
-    model_id = os.getenv("LLAMA3_8B_PATH", "/storage/models/Llama-3.1-8B-Instruct/")
+    model_id = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
 
     ## Load the original model & tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
 
-    # we load the original model in fp16 precision
-    model: nn.Module = AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=torch.float16
-    ).to(device="cuda", dtype=torch.float16)
+    # load the original configuration
+    config = AutoConfig.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+
+    # make the model smaller
+    config.text_config.num_hidden_layers = 4
+    config.vision_config.num_hidden_layers = 4
+
+    print("Config : ", config)
+
+    model: nn.Module = AutoModel.from_config(config, torch_dtype=torch.bfloat16)
+
+    print("Model : ", model)
+
+    model = model.to(device="cuda", dtype=torch.bfloat16)
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -102,16 +111,11 @@ def run(rank, size):
     num_output_tokens = 256
     num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
 
-    del model
-    from muillm.memorymanagement.gc import trigger_gc
-
-    trigger_gc()
-
     # Use the muiLLM replacements layers
-    from muillm.engine import load_model
+    from muillm.engine import init_engine
 
     # use auto-detected tensor parallelism level by setting to None
-    model = load_model(model_id, tensor_parallelism=None)
+    model = init_engine(model, tensor_parallelism=None)
 
     if rank == 0:
         print("Optimized models: ", model)

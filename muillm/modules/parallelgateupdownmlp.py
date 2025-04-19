@@ -13,8 +13,12 @@ import torch.nn.functional as F
 from muillm.engineconfig import MuiEngineConfig
 from transformers.models.mistral.modeling_mistral import MistralMLP, MistralRMSNorm
 from transformers.models.llama.modeling_llama import LlamaMLP, LlamaRMSNorm
+from transformers.models.llama4.modeling_llama4 import (
+    Llama4TextMLP,
+    Llama4TextRMSNorm,
+)
 
-from muillm.modules.rmsnorm import _MuiRMSNorm
+from muillm.modules.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 import muillm_ext
 
 
@@ -73,6 +77,9 @@ class MuiParallelGateUpDownMLP(MuiModule):
             if normalize
             else None
         )
+
+        # We shard the gate and up projections by row so that we don't have to
+        # do an all reduce before the down projection
 
         self.gate_proj = MuiParallelLinear(
             engine_config,
@@ -149,10 +156,16 @@ class MuiParallelGateUpDownMLP(MuiModule):
     @staticmethod
     def replace(
         prev_module: Union[
-            "MuiParallelGateUpDownMLP", MuiGateUpDownMLP, LlamaMLP, MistralMLP
+            "MuiParallelGateUpDownMLP",
+            MuiGateUpDownMLP,
+            LlamaMLP,
+            MistralMLP,
+            Llama4TextMLP,
         ],
         engine_config: MuiEngineConfig,
-        prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None,
+        prev_layernorm_module: Union[
+            LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
+        ] = None,
         device=None,
     ) -> "MuiGateUpDownMLP":
         if device is None:
@@ -183,6 +196,9 @@ class MuiParallelGateUpDownMLP(MuiModule):
                 else None
             )
 
+        hidden_size = prev_module.gate_proj.in_features
+        intermediate_size = prev_module.gate_proj.out_features
+
         if isinstance(prev_module, MuiParallelGateUpDownMLP) or isinstance(
             prev_module, MuiGateUpDownMLP
         ):
@@ -194,8 +210,6 @@ class MuiParallelGateUpDownMLP(MuiModule):
                     "both norm weights in MuiParallelGateUpDownMLP/MuiGateUpDownMLP and layernorm module provided"
                 )
 
-            hidden_size = prev_module.hidden_size
-            intermediate_size = prev_module.intermediate_size
             activation_function = prev_module.activation_function
 
             if prev_module.normalize:
@@ -204,21 +218,27 @@ class MuiParallelGateUpDownMLP(MuiModule):
                 norm_weights = None  # needs to be None for copy_module
             elif prev_layernorm_module is not None:
                 normalize = True
-                variance_epsilon = prev_layernorm_module.variance_epsilon
+                variance_epsilon = MuiRMSNorm._extract_eps(prev_layernorm_module)
                 norm_weights = prev_layernorm_module.weight
             else:
                 normalize = False
                 variance_epsilon = 0.0
                 norm_weights = None
 
-        elif isinstance(prev_module, MistralMLP) or isinstance(prev_module, LlamaMLP):
-            hidden_size = prev_module.hidden_size
-            intermediate_size = prev_module.intermediate_size
-            activation_function = prev_module.act_fn
+        elif (
+            isinstance(prev_module, MistralMLP)
+            or isinstance(prev_module, LlamaMLP)
+            or isinstance(prev_module, Llama4TextMLP)
+        ):
+            if isinstance(prev_module, Llama4TextMLP):
+                # Llama4TextMLP has a different activation function
+                activation_function = prev_module.activation_fn
+            else:
+                activation_function = prev_module.act_fn
 
             normalize = prev_layernorm_module is not None
             variance_epsilon = (
-                prev_layernorm_module.variance_epsilon if normalize else 0.0
+                MuiRMSNorm._extract_eps(prev_layernorm_module) if normalize else 0.0
             )
             norm_weights = prev_layernorm_module.weight if normalize else None
         else:
@@ -251,7 +271,11 @@ class MuiParallelGateUpDownMLP(MuiModule):
     def copy_module(
         self,
         prev_module: Union[
-            "MuiParallelGateUpDownMLP", LlamaMLP, MistralMLP, MuiGateUpDownMLP
+            "MuiParallelGateUpDownMLP",
+            LlamaMLP,
+            MistralMLP,
+            Llama4TextRMSNorm,
+            MuiGateUpDownMLP,
         ],
         norm_weights: torch.Tensor = None,
         variance_epsilon: float = 0.0,
@@ -273,7 +297,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
             if prev_module.norm_weights is not None:
                 norm_weights = prev_module.norm_weights
-        elif isinstance(prev_module, MistralMLP) or isinstance(prev_module, LlamaMLP):
+        elif isinstance(prev_module, (MistralMLP, LlamaMLP, Llama4TextMLP)):
             # norm_weights need to be set in calling args if needed
             pass
         else:
@@ -340,6 +364,6 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.tensor_parallelism > 1:
-            return self.parallel_forward(input, residual)[0]
+            return self.parallel_forward([input], residual)[0]
 
         raise ValueError("Only parallel inference is supported")

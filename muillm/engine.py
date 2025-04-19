@@ -48,7 +48,7 @@ def init_engine(
         quantize_layers(model=model, engine_config=engine_config, device=device)
 
     # wrap model e.g. to replace generation function for transformer models
-    model = wrap_model(model, engine_config=engine_config)
+    # model = wrap_model(model, engine_config=engine_config)
 
     # store the config in the model
     setattr(model, "muillm_config", engine_config)
