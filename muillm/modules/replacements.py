@@ -1,3 +1,4 @@
+from muillm.modules.attention.llama4attention import MuiLlama4TextAttention
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
 from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
@@ -32,6 +33,8 @@ from transformers.models.llama.modeling_llama import (
     LlamaForCausalLM,
 )
 
+from transformers.models.llama4.modeling_llama4 import Llama4TextAttention
+
 from muillm.modules.decoder.decoder import MuiDecoderLayer
 
 
@@ -41,6 +44,8 @@ _LAYER_REPLACEMENTS = {
     LlamaRMSNorm: MuiRMSNorm,
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
+    # attentions
+    Llama4TextAttention: MuiLlama4TextAttention,
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
     MistralDecoderLayer: MuiDecoderLayer,
@@ -63,6 +68,8 @@ _TP_LAYER_REPLACEMENTS = {
     LlamaRMSNorm: MuiRMSNorm,
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
+    # attentions
+    Llama4TextAttention: MuiLlama4TextAttention,
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
     MistralDecoderLayer: MuiParallelDecoderLayer,

@@ -1,4 +1,4 @@
-# Example showing how to use muiLLM's fp16 support on the Meta LLama 3.1 8b model
+# Example showing how to use muiLLM's fp16 support on the Meta LLama 4 model
 
 import os
 
@@ -7,30 +7,42 @@ os.environ["ROCR_VISIBLE_DEVICES"] = "0"
 os.environ["ROCM_VISIBLE_DEVICES"] = "0"
 os.environ["HIP_VISIBLE_DEVICES"] = "0"
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModel, AutoTokenizer
 import torch
 import torch.nn as nn
 
-# this example requires the LLama 3.1 8B Instruct model
-# Provided that you have a HF token to access the Llama models, you can download it with
-# huggingface-cli download --token <your_token> meta-llama/Llama-3.1-8B-Instruct --local-dir Llama-3.1-8B-Instruct
-
 # either set this environment variable before running the example, or adapt the path
-model_id = os.getenv("LLAMA3_8B_PATH", "/storage/models/Llama-3.1-8B-Instruct/")
+model_id = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
 
+# TODO: modify to use the processor and chat template
 ## Load the original model & tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
 
-# we load the original model in fp16 precision
-model: nn.Module = AutoModelForCausalLM.from_pretrained(
-    model_id, torch_dtype=torch.float16
-).to(device="cuda", dtype=torch.float16)
+# load the original configuration
+config = AutoConfig.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+
+# make the model smaller
+config.text_config.num_hidden_layers = 4
+config.vision_config.num_hidden_layers = 4
+
+print("Config : ", config)
+
+model: nn.Module = AutoModel.from_config(config, torch_dtype=torch.bfloat16)
+
+print("Model : ", model)
+
+model = model.to(device="cuda", dtype=torch.bfloat16)
+
+# print all the parameters and buffer shapes, and dtypes
+for name, param in model.named_parameters():
+    print(f"param {name}: {param.shape} {param.dtype}")
+for name, buffer in model.named_buffers():
+    print(f"buffer {name}: {buffer.shape} {buffer.dtype}")
 
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
     model.resize_token_embeddings(len(tokenizer))
 
-print("Model : ", model)
 
 from typing import List, Union
 
@@ -88,7 +100,7 @@ print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
 
 num_input_tokens = tokenized_prompts["input_ids"].shape[1]
 batch_size = tokenized_prompts["input_ids"].shape[0]
-num_output_tokens = 256
+num_output_tokens = 4
 num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
 
 # Have a look at the original speed
@@ -112,18 +124,13 @@ if num_total_tokens < 100:
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
 text, time = profile_func(
     lambda: time_func(lambda: generate(model, prompt, 50)),
-    trace_path="trace_llama_orig_unbatched.json",
+    trace_path="trace_llama4_sandbox_orig_unbatched.json",
 )
 
-del model
-from muillm.memorymanagement.gc import trigger_gc
-
-trigger_gc()
-
 # Use the muiLLM replacements layers
-from muillm.engine import load_model
+from muillm.engine import init_engine
 
-model = load_model(model_id)
+model = init_engine(model)
 
 print("Optimized models: ", model)
 
@@ -132,7 +139,7 @@ print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
 
 num_input_tokens = tokenized_prompts["input_ids"].shape[1]
 batch_size = tokenized_prompts["input_ids"].shape[0]
-num_output_tokens = 256
+num_output_tokens = 4
 num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
 
 # Have a look at the speed
@@ -155,5 +162,5 @@ print(
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
 text, time = profile_func(
     lambda: time_func(lambda: generate(model, prompt, num_output_tokens)),
-    trace_path="trace_llama_muillm_unbatched.json",
+    trace_path="trace_llama4_sandbox_muillm_unbatched.json",
 )
