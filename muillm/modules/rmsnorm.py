@@ -56,6 +56,19 @@ class MuiRMSNorm(MuiModule):
         self._check_dispatchable()
 
     @staticmethod
+    def _extract_eps(
+        prev_module: Union[
+            "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
+        ],
+    ) -> float:
+        if isinstance(prev_module, Llama4TextRMSNorm):
+            # Llama4 RMSNorm has a different interface
+            return prev_module.eps
+        else:
+            # Mistral and Llama RMSNorm have the same interface
+            return prev_module.variance_epsilon
+
+    @staticmethod
     def replace(
         prev_module: Union[
             "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
@@ -79,12 +92,7 @@ class MuiRMSNorm(MuiModule):
 
         hidden_size = prev_module.weight.shape[0]
 
-        if isinstance(prev_module, Llama4TextRMSNorm):
-            # Llama4 RMSNorm has a different interface
-            eps = prev_module.eps
-        else:
-            # Mistral and Llama RMSNorm have the same interface
-            eps = prev_module.variance_epsilon
+        eps = MuiRMSNorm._extract_eps(prev_module)
 
         new_module = MuiRMSNorm(
             engine_config=engine_config,

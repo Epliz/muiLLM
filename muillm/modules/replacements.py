@@ -36,6 +36,7 @@ from transformers.models.llama.modeling_llama import (
 from transformers.models.llama4.modeling_llama4 import (
     Llama4TextRMSNorm,
     Llama4TextAttention,
+    Llama4TextMLP,
 )
 
 from muillm.modules.decoder.decoder import MuiDecoderLayer
@@ -44,6 +45,10 @@ from muillm.modules.decoder.decoder import MuiDecoderLayer
 _LAYER_REPLACEMENTS = {
     # Linear
     nn.Linear: MuiLinear,
+    # MLPs
+    MistralMLP: MuiGateUpDownMLP,
+    LlamaMLP: MuiGateUpDownMLP,
+    Llama4TextMLP: MuiGateUpDownMLP,
     # RMS Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
@@ -73,6 +78,7 @@ _TP_LAYER_REPLACEMENTS = {
     # MLPs
     MistralMLP: MuiParallelGateUpDownMLP,
     LlamaMLP: MuiParallelGateUpDownMLP,
+    Llama4TextMLP: MuiParallelGateUpDownMLP,
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
     # RMS Norm layers
     MistralRMSNorm: MuiRMSNorm,
