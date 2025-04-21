@@ -78,6 +78,9 @@ class MuiParallelGateUpDownMLP(MuiModule):
             else None
         )
 
+        # We shard the gate and up projections by row so that we don't have to
+        # do an all reduce before the down projection
+
         self.gate_proj = MuiParallelLinear(
             engine_config,
             self.hidden_size,
