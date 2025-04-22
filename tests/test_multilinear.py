@@ -4,23 +4,25 @@ import torch
 import torch.nn as nn
 
 from muillm.modules.multilinear import MuiMultiLinear
+from .test_utils import copy_linears, random_linears, tensors_equal
 
-def tensors_equal(t1, t2):
-    assert t1.shape == t2.shape
-    assert torch.allclose(t1, t2, rtol=1e-04)
-
-def random_linear(in_features: int, out_features: int) -> nn.Linear:
-    return nn.Linear(in_features= in_features, out_features = out_features)
-
-def random_linears(in_features: int, out_features: List[int]) -> List[nn.Linear]:
-    return [random_linear(in_features=in_features, out_features=out_feat) for out_feat in out_features]
 
 def test_basic_linears():
+    device = "cpu"
     in_features = 4096
-    linears = random_linears(in_features=in_features, out_features=[1024, 2048, 4096])
+    linears = random_linears(
+        in_features=in_features, out_features=[1024, 2048, 4096], device=device
+    )
+
+    # replace destroys the passed linear module so we need to copy it
+    linear_copies = copy_linears(linears)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    multilinear = MuiMultiLinear.replace(prev_modules=linears, engine_config=engine_config)
+    multilinear = MuiMultiLinear.replace(
+        prev_modules=linear_copies,
+        engine_config=engine_config,
+        device=device,
+    )
 
     input_tensor = torch.rand(size=(4, in_features))
 
@@ -34,16 +36,25 @@ def test_basic_linears():
     tensors_equal(k, k_m)
     tensors_equal(v, v_m)
 
+
 # TODO tests with bias and no bias
 # TODO tests with input norm
 # TODO tests with other data types
 
+
 def test_replace_back():
+    device = "cpu"
     in_features = 4096
-    linears = random_linears(in_features=in_features, out_features=[1024, 2048, 4096])
+    linears = random_linears(
+        in_features=in_features, out_features=[1024, 2048, 4096], device=device
+    )
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    multilinear = MuiMultiLinear.replace(prev_modules=linears, engine_config=engine_config)
+    multilinear = MuiMultiLinear.replace(
+        prev_modules=linears,
+        engine_config=engine_config,
+        device=device,
+    )
 
     replaced_back_linears, _ = multilinear.replace_back()
 

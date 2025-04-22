@@ -424,11 +424,12 @@ class MuiParallelMultiLinear(MuiModule):
         # output x device
         all_split_outputs = self.__slice_outputs(all_outputs=all_outputs)
 
-        if collect_outputs:
+        if collect_outputs:  # sharding by rows
             # collect the outputs if necessary
             for output_idx in range(num_slices):
                 all_split_outputs[output_idx] = self.__collect_output(
-                    all_split_outputs[output_idx]
+                    # tensors need to be contiguous for the all-reduce
+                    all_split_outputs[output_idx].contiguous()
                 )
 
         return [tuple(all_split_outputs)]
