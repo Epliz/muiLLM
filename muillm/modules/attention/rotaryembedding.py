@@ -9,13 +9,15 @@ from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.models.mistral.configuration_mistral import MistralConfig
 from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 
 from transformers.models.mistral.modeling_mistral import MistralRotaryEmbedding
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+from transformers.models.llama4.modeling_llama4 import Llama4TextRotaryEmbedding
 
 import muillm_ext
 
-    
+
 # Copied from transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -23,9 +25,10 @@ def rotate_half(x):
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
+
 # TODO: custom kernel for BS=1, S=1 case at least
 @torch.jit.script
-def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim:int=1):
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim: int = 1):
     """Applies Rotary Position Embedding to the query and key tensors.
 
     Args:
@@ -59,10 +62,13 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim:int=1):
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
+
 class _MuiRotaryNoCache(torch.autograd.Function):
     @staticmethod
     def forward(ctx, positions_ids, cos_cached, sin_cached, q, k):
-        output = muillm_ext.muillm_rope_forward_no_cache(positions_ids, cos_cached, sin_cached, q, k)
+        output = muillm_ext.muillm_rope_forward_no_cache(
+            positions_ids, cos_cached, sin_cached, q, k
+        )
 
         ctx.save_for_backward(positions_ids, cos_cached, sin_cached, q, k)
 
@@ -72,11 +78,14 @@ class _MuiRotaryNoCache(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise NotImplementedError("rotary backward not implemented")
 
+
 # Generic for all Mui cache modules
 class _MuiRotaryCacheModule(torch.autograd.Function):
     @staticmethod
     def forward(ctx, module, cache, q, k, v, position_ids, cos_sin, cache_positions):
-        output = muillm_ext.muillm_rotary_embedding_module_forward(module, cache, q, k, v, position_ids, cos_sin, cache_positions)
+        output = muillm_ext.muillm_rotary_embedding_module_forward(
+            module, cache, q, k, v, position_ids, cos_sin, cache_positions
+        )
 
         ctx.save_for_backward(q, k, v, position_ids, cos_sin, cache_positions)
 
@@ -86,10 +95,15 @@ class _MuiRotaryCacheModule(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise NotImplementedError("rotary backward not implemented")
 
+
 class _MuiRotaryHFDynamicCache(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, positions_ids, cos_cached, sin_cached, q, k, v, prev_k_cache, prev_v_cache):
-        output = muillm_ext.muillm_rope_forward_dynamic_cache(positions_ids, cos_cached, sin_cached, q, k, v, prev_k_cache, prev_v_cache)
+    def forward(
+        ctx, positions_ids, cos_cached, sin_cached, q, k, v, prev_k_cache, prev_v_cache
+    ):
+        output = muillm_ext.muillm_rope_forward_dynamic_cache(
+            positions_ids, cos_cached, sin_cached, q, k, v, prev_k_cache, prev_v_cache
+        )
 
         ctx.save_for_backward(positions_ids, cos_cached, sin_cached, q, k)
 
@@ -102,8 +116,31 @@ class _MuiRotaryHFDynamicCache(torch.autograd.Function):
 
 class _MuiRotaryHFStaticCache(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, positions_ids, cos_cached, sin_cached, q, k, v, k_cache, v_cache, cache_position, seen_tokens):
-        output = muillm_ext.muillm_rope_forward_static_cache(positions_ids, cos_cached, sin_cached, q, k, v, k_cache, v_cache, cache_position, seen_tokens)
+    def forward(
+        ctx,
+        positions_ids,
+        cos_cached,
+        sin_cached,
+        q,
+        k,
+        v,
+        k_cache,
+        v_cache,
+        cache_position,
+        seen_tokens,
+    ):
+        output = muillm_ext.muillm_rope_forward_static_cache(
+            positions_ids,
+            cos_cached,
+            sin_cached,
+            q,
+            k,
+            v,
+            k_cache,
+            v_cache,
+            cache_position,
+            seen_tokens,
+        )
 
         ctx.save_for_backward(positions_ids, cos_cached, sin_cached, q, k)
 
@@ -112,15 +149,26 @@ class _MuiRotaryHFStaticCache(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         raise NotImplementedError("rotary backward not implemented")
-    
+
+
 class MuiRotaryEmbedding(MuiModule):
-    def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], rope_kwargs: Dict[str, Any] = None, layer_idx: int = 0, device=None, dtype=None):
+    def __init__(
+        self,
+        engine_config: MuiEngineConfig,
+        config: Union[LlamaConfig, MistralConfig, Llama4TextConfig],
+        rope_kwargs: Dict[str, Any] = None,
+        layer_idx: int = 0,
+        output_complex: bool = False,
+        device=None,
+        dtype=None,
+    ):
         super().__init__(engine_config=engine_config)
 
         self.cpp_engine = engine_config.cpp_engine
         self.config = config
         self.rope_kwargs = {}
 
+        self.output_complex = output_complex
         self.layer_idx = layer_idx
 
         dtype = dtype if dtype is not None else torch.get_default_dtype()
@@ -129,12 +177,19 @@ class MuiRotaryEmbedding(MuiModule):
             if isinstance(config, LlamaConfig) or isinstance(config, MistralConfig):
                 # BC: "rope_type" was originally "type"
                 if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-                    self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+                    self.rope_type = config.rope_scaling.get(
+                        "rope_type", config.rope_scaling.get("type")
+                    )
+                else:
+                    self.rope_type = "default"
+            elif isinstance(config, Llama4TextConfig):
+                if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
+                    self.rope_type = "llama3"
                 else:
                     self.rope_type = "default"
             else:
                 self.rope_type = "default"
-            
+
             max_position_embeddings = config.max_position_embeddings
         else:
             if rope_kwargs is None:
@@ -147,7 +202,9 @@ class MuiRotaryEmbedding(MuiModule):
         self.max_position_embeddings = max_position_embeddings
 
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, **self.rope_kwargs)
+        inv_freq, self.attention_scaling = self.rope_init_fn(
+            self.config, device, **self.rope_kwargs
+        )
 
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -167,7 +224,7 @@ class MuiRotaryEmbedding(MuiModule):
     def _check_dispatchable(self):
         # cos and sin are of type self.dtype
         # but the frequencies are float32
-        dispatchable_type = (self.dtype == torch.float16)
+        dispatchable_type = self.dtype == torch.float16
         dispatchable_device = self.inv_freq.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
 
@@ -186,7 +243,11 @@ class MuiRotaryEmbedding(MuiModule):
         )
 
     @staticmethod
-    def replace(prev_module: Union[LlamaRotaryEmbedding, MistralRotaryEmbedding], engine_config: MuiEngineConfig, device=None) -> "MuiRotaryEmbedding":
+    def replace(
+        prev_module: Union[LlamaRotaryEmbedding, MistralRotaryEmbedding],
+        engine_config: MuiEngineConfig,
+        device=None,
+    ) -> "MuiRotaryEmbedding":
         if device is None:
             raise ValueError("device was None")
 
@@ -196,23 +257,45 @@ class MuiRotaryEmbedding(MuiModule):
         # we either need a model config for Llama or rope_kwargs
         config = None
         rope_kwargs = None
-        if isinstance(prev_module, LlamaRotaryEmbedding) or isinstance(prev_module, MistralRotaryEmbedding):
+        if (
+            isinstance(prev_module, LlamaRotaryEmbedding)
+            or isinstance(prev_module, MistralRotaryEmbedding)
+            or isinstance(prev_module, Llama4TextRotaryEmbedding)
+        ):
             config = prev_module.config
         else:
-            raise ValueError(f"Unsupported type of module: {prev_module.__class__.__name__}")
+            raise ValueError(
+                f"Unsupported type of module: {prev_module.__class__.__name__}"
+            )
 
-        new_module = MuiRotaryEmbedding(engine_config=engine_config, config=config, rope_kwargs=rope_kwargs, device=device, dtype=dtype)
+        output_complex = isinstance(prev_module, Llama4TextRotaryEmbedding)
+
+        new_module = MuiRotaryEmbedding(
+            engine_config=engine_config,
+            config=config,
+            rope_kwargs=rope_kwargs,
+            output_complex=output_complex,
+            device=device,
+            dtype=dtype,
+        )
 
         return new_module
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
 
         self.max_seq_len_cached = seq_len
-        t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
+        t = torch.arange(
+            self.max_seq_len_cached, device=device, dtype=torch.int64
+        ).type_as(self.inv_freq)
 
         freqs = torch.outer(t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        emb = torch.cat((freqs, freqs), dim=-1)
+
+        # LLama 4 uses complex numbers and doesn't need this concatenation
+        if not self.output_complex:
+            emb = torch.cat((freqs, freqs), dim=-1)
+        else:
+            emb = freqs
 
         cos = emb.cos()
         sin = emb.sin()
@@ -228,20 +311,24 @@ class MuiRotaryEmbedding(MuiModule):
         # x: [bs, num_attention_heads, seq_len, head_size]
         cos = self.cos_cached[position_ids].to(dtype=x.dtype)
         sin = self.sin_cached[position_ids].to(dtype=x.dtype)
-        return cos, sin
-    
+
+        if self.output_complex:
+            return torch.complex(cos, sin)
+        else:
+            return cos, sin
+
     def apply_rotary_pos_emb_write_kv_cache(
-            self,
-            q: torch.Tensor,
-            k: torch.Tensor,
-            position_ids: torch.Tensor,
-            position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]],
-            v: Optional[torch.Tensor] = None,
-            cache: Optional[Cache] = None,
-            cache_position: Optional[torch.LongTensor] = None
-        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        position_ids: torch.Tensor,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        v: Optional[torch.Tensor] = None,
+        cache: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if position_embeddings is None:
-            #raise ValueError("should be provided")
+            # raise ValueError("should be provided")
             # Shape [S, E]
             cos, sin = self.forward(k, position_ids)
         else:
@@ -251,13 +338,24 @@ class MuiRotaryEmbedding(MuiModule):
         if self.dispatchable:
             if cache is None:
                 # No cache
-                query_states, key_states = _MuiRotaryNoCache.apply(position_ids, cos, sin, q, k)
+                query_states, key_states = _MuiRotaryNoCache.apply(
+                    position_ids, cos, sin, q, k
+                )
                 # might need to return if if there is no cache
                 value_states = v
-            
+
             # Mui cache types
             elif isinstance(cache, MuiCache):
-                return _MuiRotaryCacheModule.apply(self.cpp_module, cache.cpp_module, q, k, v, position_ids, (cos, sin), cache_position)
+                return _MuiRotaryCacheModule.apply(
+                    self.cpp_module,
+                    cache.cpp_module,
+                    q,
+                    k,
+                    v,
+                    position_ids,
+                    (cos, sin),
+                    cache_position,
+                )
             # original HF cache types
             elif isinstance(cache, StaticCache):
                 layer_idx = self.layer_idx
@@ -271,7 +369,18 @@ class MuiRotaryEmbedding(MuiModule):
                 if cache_position is None:
                     raise ValueError("cache_position is needed")
 
-                query_states, key_states, value_states = _MuiRotaryHFStaticCache.apply(position_ids, cos, sin, q, k, v, k_cache, v_cache, cache_position, cache._seen_tokens)
+                query_states, key_states, value_states = _MuiRotaryHFStaticCache.apply(
+                    position_ids,
+                    cos,
+                    sin,
+                    q,
+                    k,
+                    v,
+                    k_cache,
+                    v_cache,
+                    cache_position,
+                    cache._seen_tokens,
+                )
 
                 return query_states, key_states, value_states
             elif isinstance(cache, DynamicCache):
@@ -281,7 +390,9 @@ class MuiRotaryEmbedding(MuiModule):
 
                 # Update the cache
                 if len(cache.key_cache) <= layer_idx:
-                    query_states, key_states = _MuiRotaryNoCache.apply(position_ids, cos, sin, q, k)
+                    query_states, key_states = _MuiRotaryNoCache.apply(
+                        position_ids, cos, sin, q, k
+                    )
                     # we need the kv caches to be contiguous at all times, so need to make sure they are
                     # when we first create them
                     cache.key_cache.append(key_states.contiguous())
@@ -290,7 +401,11 @@ class MuiRotaryEmbedding(MuiModule):
                     prev_k_cache = cache.key_cache[layer_idx]
                     prev_v_cache = cache.value_cache[layer_idx]
 
-                    query_states, k_cache_out, v_cache_out = _MuiRotaryHFDynamicCache.apply(position_ids, cos, sin, q, k, v, prev_k_cache, prev_v_cache)
+                    query_states, k_cache_out, v_cache_out = (
+                        _MuiRotaryHFDynamicCache.apply(
+                            position_ids, cos, sin, q, k, v, prev_k_cache, prev_v_cache
+                        )
+                    )
                     cache.key_cache[layer_idx] = k_cache_out
                     cache.value_cache[layer_idx] = v_cache_out
 
@@ -309,6 +424,8 @@ class MuiRotaryEmbedding(MuiModule):
 
         if cache is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = cache.update(key_states, v, self.layer_idx, cache_kwargs)
+            key_states, value_states = cache.update(
+                key_states, v, self.layer_idx, cache_kwargs
+            )
 
         return query_states, key_states, value_states
