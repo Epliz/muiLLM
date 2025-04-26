@@ -53,7 +53,7 @@ _LAYER_REPLACEMENTS = {
     LlamaMLP: MuiGateUpDownMLP,
     Llama4TextMLP: MuiGateUpDownMLP,
     # MoE MLPS
-    # Llama4TextMoe: MuiGateUpDownMLPMoe,
+    Llama4TextMoe: MuiGateUpDownMLPMoe,
     # RMS Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
@@ -83,7 +83,7 @@ _TP_LAYER_REPLACEMENTS = {
     # MLPs
     MistralMLP: MuiParallelGateUpDownMLP,
     LlamaMLP: MuiParallelGateUpDownMLP,
-    # Llama4TextMLP: MuiParallelGateUpDownMLP,
+    Llama4TextMLP: MuiParallelGateUpDownMLP,
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
     # MoE MLPS
     Llama4TextMoe: MuiParallelGateUpDownMLPMoe,
