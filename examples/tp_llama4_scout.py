@@ -94,7 +94,7 @@ def run(rank, size):
     from muillm.engine import load_model
 
     # use auto-detected tensor parallelism level by setting to None
-    model = load_model(model_id, model_dtype=torch.bfloat16, tensor_parallelism=None)
+    model = load_model(model_id, model_dtype=torch.float16, tensor_parallelism=None)
 
     if rank == 0:
         print("Optimized models: ", model)
