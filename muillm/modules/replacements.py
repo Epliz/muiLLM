@@ -57,7 +57,7 @@ _LAYER_REPLACEMENTS = {
     # RMS Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
-    # Llama4TextRMSNorm: MuiRMSNorm,
+    Llama4TextRMSNorm: MuiRMSNorm,
     # Rotary embeddings
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
@@ -90,7 +90,7 @@ _TP_LAYER_REPLACEMENTS = {
     # RMS Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
-    # Llama4TextRMSNorm: MuiRMSNorm,
+    Llama4TextRMSNorm: MuiRMSNorm,
     # Rotrary embeddings
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
