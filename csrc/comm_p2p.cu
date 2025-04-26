@@ -4,6 +4,10 @@
 #include "comm_base.h"
 #include "gpu_info.h"
 
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_bf16.h>
+
 #include <stdint.h>
 #include <stdio.h>
 
@@ -566,6 +570,19 @@ __global__ void __all_reduce_fp16_tp2_p2p_kernel(
   }
 }
 
+__global__ void __all_reduce_bf16_tp2_p2p_kernel(
+  const __hip_bfloat16* x1,
+  const __hip_bfloat16* x2,
+  __hip_bfloat16* y,
+  unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    __hip_bfloat16 res = __hadd(x1[i], x2[i]);
+    y[i] = res;
+  }
+}
+
 __global__ void __all_reduce_fp32_tp2_p2p_kernel(
   const float* x1,
   const float* x2,
@@ -592,6 +609,21 @@ __global__ void __all_reduce_fp16_tp4_p2p_kernel(
   unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
   if (i < N) {
     half res = __hadd(__hadd(x1[i], x2[i]), __hadd(x3[i], x4[i]));
+    y[i] = res;
+  }
+}
+
+__global__ void __all_reduce_bf16_tp4_p2p_kernel(
+  const __hip_bfloat16* x1,
+  const __hip_bfloat16* x2,
+  const __hip_bfloat16* x3,
+  const __hip_bfloat16* x4,
+  __hip_bfloat16* y,
+  unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    __hip_bfloat16 res = __hadd(__hadd(x1[i], x2[i]), __hadd(x3[i], x4[i]));
     y[i] = res;
   }
 }
@@ -634,6 +666,31 @@ __global__ void __all_reduce_fp16_tp8_p2p_kernel(
     half x7x8 = __hadd(x7[i], x8[i]);
     half x5x8 = __hadd(x5x6, x7x8);
     half res = __hadd(x1x4, x5x8);
+    y[i] = res;
+  }
+}
+
+__global__ void __all_reduce_bf16_tp8_p2p_kernel(
+  const __hip_bfloat16* x1,
+  const __hip_bfloat16* x2,
+  const __hip_bfloat16* x3,
+  const __hip_bfloat16* x4,
+  const __hip_bfloat16* x5,
+  const __hip_bfloat16* x6,
+  const __hip_bfloat16* x7,
+  const __hip_bfloat16* x8,
+  __hip_bfloat16* y,
+  unsigned N
+) {
+  unsigned i = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
+  if (i < N) {
+    __hip_bfloat16 x1x2 = __hadd(x1[i], x2[i]);
+    __hip_bfloat16 x3x4 = __hadd(x3[i], x4[i]);
+    __hip_bfloat16 x1x4 = __hadd(x1x2, x3x4);
+    __hip_bfloat16 x5x6 = __hadd(x5[i], x6[i]);
+    __hip_bfloat16 x7x8 = __hadd(x7[i], x8[i]);
+    __hip_bfloat16 x5x8 = __hadd(x5x6, x7x8);
+    __hip_bfloat16 res = __hadd(x1x4, x5x8);
     y[i] = res;
   }
 }
@@ -716,6 +773,40 @@ muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum(
         (const half*) src_ptrs[0],
         (const half*) src_ptrs[1],
         (half*) dst_ptr,
+        count
+      );
+    } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else if (datatype == MUILLM_COMM_BF16) {
+    if (local_size == 8) {
+      __all_reduce_bf16_tp8_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+        (const __hip_bfloat16*) src_ptrs[0],
+        (const __hip_bfloat16*) src_ptrs[1],
+        (const __hip_bfloat16*) src_ptrs[2],
+        (const __hip_bfloat16*) src_ptrs[3],
+        (const __hip_bfloat16*) src_ptrs[4],
+        (const __hip_bfloat16*) src_ptrs[5],
+        (const __hip_bfloat16*) src_ptrs[6],
+        (const __hip_bfloat16*) src_ptrs[7],
+        (__hip_bfloat16*) dst_ptr,
+        count
+      );
+    } else if (local_size == 4) {
+      __all_reduce_bf16_tp4_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+        (const __hip_bfloat16*) src_ptrs[0],
+        (const __hip_bfloat16*) src_ptrs[1],
+        (const __hip_bfloat16*) src_ptrs[2],
+        (const __hip_bfloat16*) src_ptrs[3],
+        (__hip_bfloat16*) dst_ptr,
+        count
+      );
+    } else if (local_size == 2) {
+      __all_reduce_bf16_tp2_p2p_kernel<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+        (const __hip_bfloat16*) src_ptrs[0],
+        (const __hip_bfloat16*) src_ptrs[1],
+        (__hip_bfloat16*) dst_ptr,
         count
       );
     } else {

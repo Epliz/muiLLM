@@ -5,9 +5,6 @@
 #include "engine.h"
 #include "gpu_info.h"
 
-#include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
-
 typedef struct muillm_comm_p2p_buffer_set {
   void* buffers[MUILLM_COMM_MAX_GPUS];
   size_t capacity;

@@ -4,9 +4,6 @@
 #include "comm_base.h"
 #include "engine.h"
 
-#include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
-
 typedef struct muillm_comm_staged_buffer_set {
   void* buffers[MUILLM_COMM_MAX_GPUS];
   void* host_buffers[MUILLM_COMM_MAX_GPUS];

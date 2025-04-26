@@ -4,9 +4,6 @@
 #include "comm_base.h"
 #include "engine.h"
 
-#include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
-
 #include <stdint.h>
 #include <stddef.h>
 
