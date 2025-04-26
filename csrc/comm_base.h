@@ -30,6 +30,7 @@ typedef enum muillm_comm_datatype {
   MUILLM_COMM_INT32,
   MUILLM_COMM_INT64,
   MUILLM_COMM_FP16,
+  MUILLM_COMM_BF16,
   MUILLM_COMM_FP32,
   MUILLM_COMM_FP64
 } muillm_comm_datatype_t;
@@ -76,6 +77,9 @@ static inline size_t __comm_size(
       return 8 * count;
     }
     case MUILLM_COMM_FP16: {
+      return 2 * count;
+    }
+    case MUILLM_COMM_BF16: {
       return 2 * count;
     }
     case MUILLM_COMM_FP32: {

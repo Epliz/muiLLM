@@ -73,6 +73,8 @@ muillm_comm_error_t muillm_all_reduce_sum(
 
   if (dtype == torch::kFloat16) {
       datatype = MUILLM_COMM_FP16;
+  } else if (dtype == torch::kBFloat16) {
+    datatype = MUILLM_COMM_BF16;
   } else if (dtype == torch::kFloat32) {
       datatype = MUILLM_COMM_FP32;
   } else {
@@ -114,6 +116,8 @@ if (dtype == at::kBool) {
   datatype = MUILLM_COMM_INT64;
 } else if (dtype == at::kHalf) {
   datatype = MUILLM_COMM_FP16;
+} else if (dtype == torch::kBFloat16) {
+  datatype = MUILLM_COMM_BF16;
 } else if (dtype == at::kFloat) {
   datatype = MUILLM_COMM_FP32;
 } else if (dtype == at::kDouble) {
