@@ -86,7 +86,7 @@ _TP_LAYER_REPLACEMENTS = {
     # Llama4TextMLP: MuiParallelGateUpDownMLP,
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
     # MoE MLPS
-    # Llama4TextMoe: MuiParallelGateUpDownMLPMoe,
+    Llama4TextMoe: MuiParallelGateUpDownMLPMoe,
     # RMS Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
