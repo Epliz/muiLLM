@@ -53,16 +53,16 @@ _LAYER_REPLACEMENTS = {
     LlamaMLP: MuiGateUpDownMLP,
     Llama4TextMLP: MuiGateUpDownMLP,
     # MoE MLPS
-    Llama4TextMoe: MuiGateUpDownMLPMoe,
+    # Llama4TextMoe: MuiGateUpDownMLPMoe,
     # RMS Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
-    Llama4TextRMSNorm: MuiRMSNorm,
+    # Llama4TextRMSNorm: MuiRMSNorm,
     # Rotary embeddings
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
     # attentions
-    Llama4TextAttention: MuiLlama4TextAttention,
+    # Llama4TextAttention: MuiLlama4TextAttention,
     # Decoders
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
@@ -83,19 +83,19 @@ _TP_LAYER_REPLACEMENTS = {
     # MLPs
     MistralMLP: MuiParallelGateUpDownMLP,
     LlamaMLP: MuiParallelGateUpDownMLP,
-    Llama4TextMLP: MuiParallelGateUpDownMLP,
+    # Llama4TextMLP: MuiParallelGateUpDownMLP,
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
     # MoE MLPS
-    Llama4TextMoe: MuiParallelGateUpDownMLPMoe,
+    # Llama4TextMoe: MuiParallelGateUpDownMLPMoe,
     # RMS Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
-    Llama4TextRMSNorm: MuiRMSNorm,
+    # Llama4TextRMSNorm: MuiRMSNorm,
     # Rotrary embeddings
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
     # attentions
-    Llama4TextAttention: MuiLlama4TextAttention,
+    # Llama4TextAttention: MuiLlama4TextAttention,
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
     MistralDecoderLayer: MuiParallelDecoderLayer,
