@@ -1,4 +1,7 @@
 from muillm.modules.attention.llama4attention import MuiLlama4TextAttention
+from muillm.modules.attention.parallelllama4attention import (
+    MuiParallelLlama4TextAttention,
+)
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
 from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
@@ -62,7 +65,7 @@ _LAYER_REPLACEMENTS = {
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
     # attentions
-    # Llama4TextAttention: MuiLlama4TextAttention,
+    Llama4TextAttention: MuiLlama4TextAttention,
     # Decoders
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
@@ -95,7 +98,7 @@ _TP_LAYER_REPLACEMENTS = {
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
     # attentions
-    # Llama4TextAttention: MuiLlama4TextAttention,
+    Llama4TextAttention: MuiParallelLlama4TextAttention,
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
     MistralDecoderLayer: MuiParallelDecoderLayer,

@@ -36,7 +36,7 @@ from transformers.models.llama4.modeling_llama4 import (
 )
 from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 
-from muillm.modules.multilinear import MuiMultiLinear
+from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
 
 logger = logging.get_logger(__name__)
 
@@ -77,7 +77,19 @@ def eager_attention_forward(
     dropout: float = 0.0,
     **kwargs,
 ):
-    # print the dtypes of query, key, value
+    # print the shapes of query, key, value, mask
+    print(f"query: {query.shape}")
+    print(f"key: {key.shape}")
+    print(f"value: {value.shape}")
+    if attention_mask is not None:
+        print(f"mask: {attention_mask.shape}")
+
+    # Shapes are:
+    # TODO: seqlen doesn't seem accurate as we get something different out of the cache...
+    # cache len is the window size for the local attention layers
+    # query: (batch_size, num_attention_heads, seqlen, head_dim)
+    # key: (batch_size, num_key_value_heads, cachelen, head_dim)
+    # value: (batch_size, num_key_value_heads, cachelen, head_dim)
 
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
@@ -98,14 +110,14 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
-class MuiLlama4TextAttention(MuiModule):
+class MuiParallelLlama4TextAttention(MuiModule):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
         self,
         engine_config: MuiEngineConfig,
         prev_module: Llama4TextAttention,
-        qkv_proj: MuiMultiLinear,
+        qkv_proj: MuiParallelMultiLinear,
     ):
         super().__init__(engine_config=engine_config)
         self.config = prev_module.config
@@ -129,7 +141,7 @@ class MuiLlama4TextAttention(MuiModule):
     @staticmethod
     def replace(
         prev_module: Llama4TextAttention, engine_config: MuiEngineConfig, device=None
-    ) -> "MuiLlama4TextAttention":
+    ) -> "MuiParallelLlama4TextAttention":
 
         q_proj = prev_module.q_proj
         k_proj = prev_module.k_proj
@@ -137,13 +149,14 @@ class MuiLlama4TextAttention(MuiModule):
 
         # we shard by columns because the full attention block is not shardable by head
         # if there is the QK norm
-        qkv_proj = MuiMultiLinear.replace(
+        qkv_proj = MuiParallelMultiLinear.replace(
             prev_modules=[q_proj, k_proj, v_proj],
             engine_config=engine_config,
+            sharding_dim=1,
             device=device,
         )
 
-        return MuiLlama4TextAttention(
+        return MuiParallelLlama4TextAttention(
             engine_config=engine_config,
             prev_module=prev_module,
             qkv_proj=qkv_proj,
