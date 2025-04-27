@@ -3,23 +3,27 @@ import os.path
 from setuptools import setup, Extension, find_packages
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
+
 def read(rel_path):
     here = os.path.abspath(os.path.dirname(__file__))
-    with codecs.open(os.path.join(here, rel_path), 'r') as fp:
+    with codecs.open(os.path.join(here, rel_path), "r") as fp:
         return fp.read()
+
 
 def get_version(rel_path):
     for line in read(rel_path).splitlines():
-        if line.startswith('__version__'):
+        if line.startswith("__version__"):
             delim = '"' if '"' in line else "'"
             return line.split(delim)[1]
     else:
         raise RuntimeError("Unable to find version string.")
 
+
 class NinjaBuildExtension(BuildExtension):
     def __init__(self, *args, **kwargs) -> None:
-        kwargs['use_ninja'] = True
+        kwargs["use_ninja"] = True
         super().__init__(*args, **kwargs)
+
 
 setup(
     name="muillm",
@@ -37,60 +41,59 @@ setup(
         "Operating System :: OS Independent",
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
-    keywords=(
-        "llm, ml, AI, Machine Learning, NLP"
-    ),
+    keywords=("llm, ml, AI, Machine Learning, NLP"),
     packages=find_packages(),
     ext_modules=[
-        CUDAExtension('muillm_ext', [
-            'csrc/module.cpp',
-            'csrc/linear_kernels.cu',
-            'csrc/int8_dequantization_kernel.cu',
-            'csrc/int8_linear_kernels.cu',
-            'csrc/gateup_kernels.cu',
-            'csrc/int8_gateup_kernels.cu',
-            'csrc/int8_gateup_dequantization_kernel.cu',
-            'csrc/rmsnorm_kernels.cu',
-            'csrc/rotary_kernels.cu',
-            'csrc/causal_transformer_decoding.cu',
-            'csrc/half_fused_decoding.cu',
-            'csrc/flash_decoding.cu',
-            'csrc/sync.cu',
-            'csrc/sync_torch.cpp',
-            # comms
-            'csrc/comm_base.cpp',
-            'csrc/comm.cpp',
-            'csrc/comm_torch.cpp',
-            'csrc/comm_p2p.cu',
-            'csrc/comm_staged.cu',
-            # parallel
-            'csrc/parallel_linear_kernels.cu',
-            'csrc/parallel_gateup_kernels.cu',
-            # modules
-            'csrc/modules/kvcache.cpp',
-            'csrc/modules/static_kvcache.cpp',
-            'csrc/modules/dynamic_kvcache.cpp',
-            'csrc/modules/rotary_module.cpp',
-            # parallel modules
-            'csrc/modules/parallel_linear_module.cpp',
-            'csrc/modules/parallel_multilinear_module.cpp',
-            'csrc/modules/parallel_gateup_module.cpp',
-            'csrc/modules/parallel_attention_module.cpp',
-            'csrc/modules/parallel_decoder_module.cpp',
-            'csrc/modules/parallel_decoder_stack.cpp',
-            # other
-            'csrc/engine.cpp',
-            'csrc/gpu_info.cpp',
-
-        ],
-        extra_compile_args={
-            'cxx': ['-g'],  # Add debug symbols for C++ code
-            'hipcc': ['-g']  # Add debug symbols for HIP code
-        }
-    )
+        CUDAExtension(
+            "muillm_ext",
+            [
+                "csrc/module.cpp",
+                "csrc/linear_kernels.cu",
+                "csrc/int8_dequantization_kernel.cu",
+                "csrc/int8_linear_kernels.cu",
+                "csrc/gateup_kernels.cu",
+                "csrc/int8_gateup_kernels.cu",
+                "csrc/int8_gateup_dequantization_kernel.cu",
+                "csrc/l2norm_kernels.cu",
+                "csrc/rmsnorm_kernels.cu",
+                "csrc/rotary_kernels.cu",
+                "csrc/causal_transformer_decoding.cu",
+                "csrc/half_fused_decoding.cu",
+                "csrc/flash_decoding.cu",
+                "csrc/sync.cu",
+                "csrc/sync_torch.cpp",
+                # comms
+                "csrc/comm_base.cpp",
+                "csrc/comm.cpp",
+                "csrc/comm_torch.cpp",
+                "csrc/comm_p2p.cu",
+                "csrc/comm_staged.cu",
+                # parallel
+                "csrc/parallel_linear_kernels.cu",
+                "csrc/parallel_gateup_kernels.cu",
+                # modules
+                "csrc/modules/kvcache.cpp",
+                "csrc/modules/static_kvcache.cpp",
+                "csrc/modules/dynamic_kvcache.cpp",
+                "csrc/modules/rotary_module.cpp",
+                # parallel modules
+                "csrc/modules/parallel_linear_module.cpp",
+                "csrc/modules/parallel_multilinear_module.cpp",
+                "csrc/modules/parallel_gateup_module.cpp",
+                "csrc/modules/parallel_attention_module.cpp",
+                "csrc/modules/parallel_decoder_module.cpp",
+                "csrc/modules/parallel_decoder_stack.cpp",
+                # other
+                "csrc/engine.cpp",
+                "csrc/gpu_info.cpp",
+            ],
+            extra_compile_args={
+                "cxx": ["-g"],  # Add debug symbols for C++ code
+                "hipcc": ["-g"],  # Add debug symbols for HIP code
+            },
+        )
     ],
-    cmdclass={
-        'build_ext': NinjaBuildExtension
-    },
+    cmdclass={"build_ext": NinjaBuildExtension},
     install_requires=["torch", "transformers==4.51.2"],
-    version=get_version("muillm/__init__.py"))
+    version=get_version("muillm/__init__.py"),
+)
