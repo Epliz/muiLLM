@@ -4,6 +4,7 @@ from muillm.modules.attention.parallelllama4attention import (
 )
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
+from muillm.modules.l2norm import MuiL2Norm
 from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
 from muillm.modules.moe.gateupdownmlpmoe import MuiGateUpDownMLPMoe
 from muillm.modules.moe.parallelgateupdownmlpmoe import MuiParallelGateUpDownMLPMoe
@@ -40,6 +41,7 @@ from transformers.models.llama.modeling_llama import (
 
 from transformers.models.llama4.modeling_llama4 import (
     Llama4TextRMSNorm,
+    Llama4TextL2Norm,
     Llama4TextAttention,
     Llama4TextMLP,
     Llama4TextMoe,
@@ -57,10 +59,11 @@ _LAYER_REPLACEMENTS = {
     Llama4TextMLP: MuiGateUpDownMLP,
     # MoE MLPS
     Llama4TextMoe: MuiGateUpDownMLPMoe,
-    # RMS Norm layers
+    # Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
     Llama4TextRMSNorm: MuiRMSNorm,
+    Llama4TextL2Norm: MuiL2Norm,
     # Rotary embeddings
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
@@ -90,10 +93,11 @@ _TP_LAYER_REPLACEMENTS = {
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
     # MoE MLPS
     Llama4TextMoe: MuiParallelGateUpDownMLPMoe,
-    # RMS Norm layers
+    # Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
     Llama4TextRMSNorm: MuiRMSNorm,
+    Llama4TextL2Norm: MuiL2Norm,
     # Rotrary embeddings
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
