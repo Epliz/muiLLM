@@ -18,6 +18,10 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
 
 from muillm.engineconfig import MuiEngineConfig
+from muillm.modules.attention.causaltransformerdecoding import (
+    mui_causally_decode,
+    mui_causally_decode_masked,
+)
 from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
@@ -77,12 +81,6 @@ def eager_attention_forward(
     dropout: float = 0.0,
     **kwargs,
 ):
-    # print the shapes of query, key, value, mask
-    print(f"query: {query.shape}")
-    print(f"key: {key.shape}")
-    print(f"value: {value.shape}")
-    if attention_mask is not None:
-        print(f"mask: {attention_mask.shape}")
 
     # Shapes are:
     # TODO: seqlen doesn't seem accurate as we get something different out of the cache...
@@ -172,75 +170,160 @@ class MuiParallelLlama4TextAttention(MuiModule):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        bsz, q_len, _ = hidden_states.size()
 
         query_states, key_states, value_states = self.qkv_proj(hidden_states)
 
-        query_states = query_states.view(hidden_shape)
-        key_states = key_states.view(*input_shape, -1, self.head_dim)
-        value_states = value_states.view(hidden_shape).transpose(1, 2)
-
-        if self.use_rope:  # the 16E model skips rope for long context on certain layers
-            query_states, key_states = apply_rotary_emb(
-                query_states, key_states, position_embeddings.to(query_states.device)
+        if (
+            (q_len == 1)
+            and (query_states.dtype == torch.float16)
+            and (query_states.is_cuda)
+        ):
+            # as q_len == 1, we can avoid the transposes
+            query_states = query_states.view(
+                bsz, self.num_attention_heads, q_len, self.head_dim
+            )
+            key_states = key_states.view(
+                bsz, self.num_key_value_heads, q_len, self.head_dim
+            )
+            value_states = value_states.view(
+                bsz, self.num_key_value_heads, q_len, self.head_dim
             )
 
-        if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
-            query_states = self.qk_norm(query_states)
-            key_states = self.qk_norm(key_states)
-
-        # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
-        if self.attn_temperature_tuning and not self.use_rope:
-            attn_scales = (
-                torch.log(
-                    torch.floor((cache_position.float() + 1.0) / self.floor_scale) + 1.0
+            if (
+                self.use_rope
+            ):  # the 16E model skips rope for long context on certain layers
+                query_states, key_states = apply_rotary_emb(
+                    query_states,
+                    key_states,
+                    position_embeddings.to(query_states.device),
                 )
-                * self.attn_scale
-                + 1.0
-            )
-            attn_scales = attn_scales.view((1, input_shape[-1], 1, 1)).expand(
-                (*input_shape, 1, 1)
-            )  # batch size > 1
-            query_states = (query_states * attn_scales).to(query_states.dtype)
 
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
+            # (rope and qk_norm commute as rope is a rotation)
+            if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
+                query_states = self.qk_norm(query_states)
+                key_states = self.qk_norm(key_states)
 
-        if past_key_value is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"cache_position": cache_position}
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, cache_kwargs
-            )
+            # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
+            if self.attn_temperature_tuning and not self.use_rope:
+                attn_scales = (
+                    torch.log(
+                        torch.floor((cache_position.float() + 1.0) / self.floor_scale)
+                        + 1.0
+                    )
+                    * self.attn_scale
+                    + 1.0
+                )
+                attn_scales = attn_scales.view((1, 1, q_len, 1)).expand(
+                    (bsz, 1, q_len, 1)
+                )  # batch size > 1
+                query_states = (query_states * attn_scales).to(query_states.dtype)
 
-        # TODO: the hybrid chunked cache might be in bf16 while we need fp16
-        key_states = key_states.type_as(query_states)
-        value_states = value_states.type_as(query_states)
+            query_states = query_states
+            key_states = key_states
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            if self.config._attn_implementation == "sdpa" and kwargs.get(
-                "output_attentions", False
-            ):
-                logger.warning_once(
-                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
-                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+            if past_key_value is not None:
+                # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                cache_kwargs = {"cache_position": cache_position}
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, self.layer_idx, cache_kwargs
+                )
+
+            # TODO: the hybrid chunked cache might be in bf16 while we need fp16
+            key_states = key_states.type_as(query_states)
+            value_states = value_states.type_as(query_states)
+
+            if attention_mask is not None:
+                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+                attn_output = mui_causally_decode_masked(
+                    query_states, key_states, value_states, causal_mask
                 )
             else:
-                attention_interface = ALL_ATTENTION_FUNCTIONS[
-                    self.config._attn_implementation
-                ]
-        attn_output, attn_weights = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            **kwargs,
-        )
+                attn_output = mui_causally_decode(
+                    query_states, key_states, value_states
+                )
 
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+            attn_weights = None
+        else:
+            query_states = query_states.view(
+                bsz, q_len, self.num_attention_heads, self.head_dim
+            )
+            key_states = key_states.view(
+                bsz, q_len, self.num_key_value_heads, self.head_dim
+            )
+            value_states = value_states.view(
+                bsz, q_len, self.num_key_value_heads, self.head_dim
+            )
+
+            if (
+                self.use_rope
+            ):  # the 16E model skips rope for long context on certain layers
+                query_states, key_states = apply_rotary_emb(
+                    query_states,
+                    key_states,
+                    position_embeddings.to(query_states.device),
+                )
+
+            # (rope and qk_norm commute as rope is a rotation)
+            if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
+                query_states = self.qk_norm(query_states)
+                key_states = self.qk_norm(key_states)
+
+            query_states = query_states.transpose(1, 2)
+            key_states = key_states.transpose(1, 2)
+            value_states = value_states.transpose(1, 2)
+
+            # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
+            if self.attn_temperature_tuning and not self.use_rope:
+                attn_scales = (
+                    torch.log(
+                        torch.floor((cache_position.float() + 1.0) / self.floor_scale)
+                        + 1.0
+                    )
+                    * self.attn_scale
+                    + 1.0
+                )
+                attn_scales = attn_scales.view((1, 1, q_len, 1)).expand(
+                    (bsz, 1, q_len, 1)
+                )  # batch size > 1
+                query_states = (query_states * attn_scales).to(query_states.dtype)
+
+            if past_key_value is not None:
+                # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                cache_kwargs = {"cache_position": cache_position}
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, self.layer_idx, cache_kwargs
+                )
+
+            # TODO: the hybrid chunked cache might be in bf16 while we need fp16
+            key_states = key_states.type_as(query_states)
+            value_states = value_states.type_as(query_states)
+
+            attention_interface: Callable = eager_attention_forward
+            if self.config._attn_implementation != "eager":
+                if self.config._attn_implementation == "sdpa" and kwargs.get(
+                    "output_attentions", False
+                ):
+                    logger.warning_once(
+                        "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                        'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                    )
+                else:
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[
+                        self.config._attn_implementation
+                    ]
+            attn_output, attn_weights = attention_interface(
+                self,
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                scaling=self.scaling,
+                **kwargs,
+            )
+
+        attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
