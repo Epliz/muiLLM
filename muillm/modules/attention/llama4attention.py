@@ -81,7 +81,12 @@ def eager_attention_forward(
     dropout: float = 0.0,
     **kwargs,
 ):
-    # print the dtypes of query, key, value
+    # Shapes are:
+    # TODO: seqlen doesn't seem accurate as we get something different out of the cache...
+    # cache len is the window size for the local attention layers
+    # query: (batch_size, num_attention_heads, seqlen, head_dim)
+    # key: (batch_size, num_key_value_heads, cachelen, head_dim)
+    # value: (batch_size, num_key_value_heads, cachelen, head_dim)
 
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)

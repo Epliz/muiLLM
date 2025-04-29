@@ -49,6 +49,12 @@ from transformers.models.llama4.modeling_llama4 import (
 
 from muillm.modules.decoder.decoder import MuiDecoderLayer
 
+# TODO Llama4:
+# 1) use flash decoding
+# 2) make hybrid cache use the right dtype
+# 3) Fused MoE
+# 4) Complex rotary embedding kernel
+# 5) Make masks and cache to output minimal sizes (affects flash decoding performance)
 
 _LAYER_REPLACEMENTS = {
     # Linear
