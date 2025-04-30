@@ -335,6 +335,9 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
             device=device,
             dtype=dtype,
         )
+        # we don't want the router to be sharded, so mark as not a target for further
+        # replacements
+        self.router._muillm_no_further_replacement = True
 
         self.shared_expert = MuiParallelGateUpDownMLP(
             engine_config=engine_config,

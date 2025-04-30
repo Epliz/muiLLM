@@ -123,6 +123,12 @@ def _recursive_setattr(model: nn.Module, module_name: str, new_module: nn.Module
     current_module.__setattr__(split_list[-1], new_module)
 
 
+def _no_further_replacement(module: nn.Module) -> bool:
+    if hasattr(module, "_muillm_no_further_replacement"):
+        return module._muillm_no_further_replacement
+    return False
+
+
 def replace_layers(
     module: nn.Module,
     engine_config: MuiEngineConfig,
@@ -141,7 +147,7 @@ def replace_layers(
     if engine_config.is_rank0():
         print(f"Replace {name_prefix} ({module_type})?")
 
-    if module_type in replacements:
+    if (module_type in replacements) and not _no_further_replacement(module):
         new_module_type = replacements[module_type]
 
         if engine_config.is_rank0():
