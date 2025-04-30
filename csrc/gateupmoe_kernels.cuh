@@ -1,12 +1,13 @@
-#ifndef __MUILLM_GATEUP_KERNELS_CUH__
-#define __MUILLM_GATEUP_KERNELS_CUH__
+#ifndef __MUILLM_GATEUPMOE_KERNELS_CUH__
+#define __MUILLM_GATEUPMOE_KERNELS_CUH__
 
 #include "engine.h"
 
 #include <torch/extension.h>
 
-void muillm_gateupsilu_forward_placed_output(
+void muillm_gateupsilumoe_forward_placed_output(
     muillm_engine_t* engine,
+    int num_experts,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -14,10 +15,14 @@ void muillm_gateupsilu_forward_placed_output(
     torch::Tensor& down_weights,
     torch::Tensor& residual,
     torch::Tensor& x,
-    void* output_ptr);
+    torch::Tensor& router_scores,
+    torch::Tensor& router_indices,
+    void* output_ptr
+);
 
-void muillm_gateupsilu_split_forward_placed_output(
+void muillm_gateupsilumoe_split_forward_placed_output(
     muillm_engine_t* engine,
+    int num_experts,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -25,49 +30,66 @@ void muillm_gateupsilu_split_forward_placed_output(
     torch::Tensor& down_weights,
     torch::Tensor& residual,
     torch::Tensor& x,
-    void* output_ptr);
+    torch::Tensor& router_scores,
+    torch::Tensor& router_indices,
+    void* output_ptr
+);
 
-at::Tensor muillm_gateupsilu_forward(
+at::Tensor muillm_gateupsilumoe_forward(
     muillm_engine_t* engine,
+    int num_experts,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
     torch::Tensor& residual,
-    torch::Tensor& x);
+    torch::Tensor& x,
+    torch::Tensor& router_scores,
+    torch::Tensor& router_indices
+);
 
-at::Tensor muillm_gateupsilu_split_forward(
+at::Tensor muillm_gateupsilumoe_split_forward(
     muillm_engine_t* engine,
+    int num_experts,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
     torch::Tensor& residual,
-    torch::Tensor& x);
+    torch::Tensor& x,
+    torch::Tensor& router_scores,
+    torch::Tensor& router_indices
+);
 
 // python trampoline
-at::Tensor muillm_gateupsilu_forward_trampoline(
+at::Tensor muillm_gateupsilumoe_forward_trampoline(
     muillm_engine_ptr engine,
+    int num_experts,
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
     torch::Tensor gate_weights,
     torch::Tensor up_weights,
     torch::Tensor down_weights,
     std::optional<torch::Tensor> residual_,
-    torch::Tensor x
+    torch::Tensor x,
+    torch::Tensor router_scores,
+    torch::Tensor router_indices
 );
 
-at::Tensor muillm_gateupsilu_split_forward_trampoline(
+at::Tensor muillm_gateupsilumoe_split_forward_trampoline(
     muillm_engine_ptr engine,
+    int num_experts,
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
     torch::Tensor gate_weights,
     torch::Tensor up_weights,
     torch::Tensor down_weights,
     std::optional<torch::Tensor> residual_,
-    torch::Tensor x
+    torch::Tensor x,
+    torch::Tensor router_scores,
+    torch::Tensor router_indices
 );
 
-#endif // __MUILLM_GATEUP_KERNELS_CUH__
+#endif // __MUILLM_GATEUPMOE_KERNELS_CUH__

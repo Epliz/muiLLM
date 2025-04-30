@@ -57,7 +57,6 @@ class _MuiGateUpSiLU(torch.autograd.Function):
         ctx.save_for_backward(
             inputs,
             norm_weights,
-            variance_epsilon,
             gate_weights,
             up_weights,
             down_weights,
@@ -98,7 +97,6 @@ class _MuiGateUpSiLUSplit(torch.autograd.Function):
         ctx.save_for_backward(
             inputs,
             norm_weights,
-            variance_epsilon,
             gate_weights,
             up_weights,
             down_weights,

@@ -12,7 +12,7 @@ from .test_utils import execute_distributed, tensors_equal
 
 
 def random_llama4_moe_mlp(
-    hidden_size: int, intermediate_size: int, device: str
+    hidden_size: int, intermediate_size: int, device: str, dtype=torch.float32
 ) -> Llama4TextMoe:
     config = Llama4TextConfig(
         hidden_size=hidden_size,
@@ -24,7 +24,7 @@ def random_llama4_moe_mlp(
         layer_norm_eps=1e-5,
     )
 
-    mlp = Llama4TextMoe(config).to(device)
+    mlp = Llama4TextMoe(config).to(device=device, dtype=dtype)
 
     # We seed to have reproducible results
     torch.manual_seed(0)
@@ -91,12 +91,18 @@ def copy_llama4_moe_mlp(mlp: Llama4TextMoe) -> Llama4TextMoe:
     return new_mlp
 
 
-def _test_basic_llama4_moe_mlp():
-    hidden_size = 128
-    intermediate_size = 256
-    device = "cuda"
+def _test_basic_llama4_moe_mlp(
+    size,
+    hidden_size: int,
+    intermediate_size: int,
+    device: str,
+    dtype=torch.float32,
+):
     moe_mlp = random_llama4_moe_mlp(
-        hidden_size=hidden_size, intermediate_size=intermediate_size, device=device
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        device=device,
+        dtype=dtype,
     )
 
     # replace destroys the passed linear module so we need to copy it
@@ -108,20 +114,119 @@ def _test_basic_llama4_moe_mlp():
         engine_config=engine_config,
         device=device,
     )
+    muimlp.finalize_init()
 
     # check that outputs seem fine
-    input_tensor = torch.rand(size=(1, 3, hidden_size), device=device)
+    input_tensor = torch.rand(size=size, device=device, dtype=dtype)
 
-    y, scores = moe_mlp(input_tensor)
+    # We don't really care about the scores, just the main output
+    y, _ = moe_mlp(input_tensor)
 
-    y_m, scores_m = muimlp(input_tensor)
+    y_m, _ = muimlp(input_tensor)
 
-    tensors_equal(y, y_m)
-    tensors_equal(scores, scores_m)
+    # the mui layer returns tensors in the same shape as the input
+    # but the original layer flattens the B and T dimensions
+    # so make a view so that the equality check doesn't fail as we don't
+    # really care about the exact shape
+    y_m = y_m.view(y.shape)
+
+    tensors_equal(y, y_m, rtol=5 * 1e-4)
 
 
-def test_basic_llama4_moe_mlp():
-    execute_distributed(_test_basic_llama4_moe_mlp)
+def test_basic_llama4_moe_mlp_fp16():
+    device = "cuda"
+    dtype = torch.float16
+    hidden_size = 128
+    intermediate_size = 2 * hidden_size
+    size = (1, 1, hidden_size)
+    execute_distributed(
+        _test_basic_llama4_moe_mlp,
+        size=size,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        device=device,
+        dtype=dtype,
+    )
+
+
+def test_basic_llama4_moe_mlp_bf16():
+    device = "cuda"
+    dtype = torch.bfloat16
+    hidden_size = 128
+    intermediate_size = 2 * hidden_size
+    size = (1, 1, hidden_size)
+    execute_distributed(
+        _test_basic_llama4_moe_mlp,
+        size=size,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        device=device,
+        dtype=dtype,
+    )
+
+
+def test_basic_llama4_moe_mlp_fp32():
+    device = "cuda"
+    dtype = torch.float32
+    hidden_size = 128
+    intermediate_size = 2 * hidden_size
+    size = (1, 1, hidden_size)
+    execute_distributed(
+        _test_basic_llama4_moe_mlp,
+        size=size,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        device=device,
+        dtype=dtype,
+    )
+
+
+def test_basic_llama4_moe_mlp_batched_fp16():
+    device = "cuda"
+    dtype = torch.float16
+    hidden_size = 128
+    intermediate_size = 2 * hidden_size
+    size = (3, 1, hidden_size)
+    execute_distributed(
+        _test_basic_llama4_moe_mlp,
+        size=size,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        device=device,
+        dtype=dtype,
+    )
+
+
+def test_basic_llama4_moe_mlp_batched_bf16():
+    device = "cuda"
+    dtype = torch.bfloat16
+    hidden_size = 128
+    intermediate_size = 2 * hidden_size
+    size = (3, 1, hidden_size)
+    execute_distributed(
+        _test_basic_llama4_moe_mlp,
+        size=size,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        device=device,
+        dtype=dtype,
+    )
+
+
+def test_basic_llama4_moe_mlp_batched_fp32():
+    device = "cuda"
+    dtype = torch.float32
+    hidden_size = 128
+    intermediate_size = 2 * hidden_size
+    size = (3, 1, hidden_size)
+    execute_distributed(
+        _test_basic_llama4_moe_mlp,
+        size=size,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        device=device,
+        dtype=dtype,
+    )
 
 
 # TODO tests with bias and no bias

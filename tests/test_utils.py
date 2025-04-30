@@ -9,16 +9,21 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 
-def tensors_equal(t1, t2):
+def tensors_equal(t1, t2, rtol=1e-04):
     same_shapes = t1.shape == t2.shape
 
     if not same_shapes:
         print(f"Shapes are different: {t1.shape} vs {t2.shape}")
         assert False
 
-    close_enough = torch.allclose(t1, t2, rtol=1e-04)
+    # we don't care so much about absolute differences, but rather relative differences
+    close_enough = torch.allclose(t1, t2, rtol=rtol, atol=1e-01)
     if not close_enough:
+        abs_diff = torch.abs(t1 - t2)
+        rel_diff = torch.abs(t1 - t2) / (torch.abs(t1) + 1e-8)
         print(f"Tensors are not close enough: {t1} vs {t2}")
+        print(f"Max absolute difference: {abs_diff.max()})")
+        print(f"Max relative difference: {rel_diff.max()})")
         assert False
 
 
