@@ -4,6 +4,7 @@ from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
 
+from muillm.modules.moe.gateupdownmlpmoe import _MuiGateUpDownMoe
 from muillm.modules.parallelgateupdownmlp import MuiParallelGateUpDownMLP
 from muillm.modules.parallellinear import MuiParallelLinear
 from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
@@ -73,6 +74,19 @@ class MuiParallelExperts(MuiModule):
         )
 
         self.activation_function = activation_function
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+    def _check_dispatchable(self):
+        wdtype = self.gate_projs.linear.weights[0].dtype
+        dispatchable_type = wdtype == torch.float16
+        dispatchable_device = self.gate_projs.linear.weights[0].is_cuda
+        self.dispatchable = dispatchable_device and dispatchable_type
+
+    def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
 
     @staticmethod
     def replace(
@@ -231,8 +245,12 @@ class MuiParallelExperts(MuiModule):
         MuiParallelLinear._sync_all(engine_config=self.engine_config)
 
     def parallel_forward(
-        self, hidden_states: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> List[torch.Tensor]:
+        self,
+        hidden_states: Union[torch.Tensor, List[torch.Tensor]],
+        router_top_values: torch.Tensor,
+        router_indices: torch.Tensor,
+        shared_expert_output: torch.Tensor,
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
         This should really not be run on a single machine, as we are reaching compute bound:
         - the inputs are expected to be "sorted" per expert already.
@@ -251,53 +269,127 @@ class MuiParallelExperts(MuiModule):
         else:
             raise ValueError("not implemented")
 
-        hidden_states = hidden_states.view(self.num_experts, -1, self.hidden_size)
+        batch, seq_len, hidden_dim = hidden_states.shape
+        tokens_per_expert = batch * seq_len
 
-        # the bmm operation requires the weights to be in the shape of (num_experts, expert_dim, hidden_size)
-        # so we need to transpose them
-        gate_proj_weights = (
-            self.gate_projs.linear.weights[0]
-            .view(self.num_experts, self.tp_expert_dim, self.hidden_size)
-            .transpose(1, 2)
-        )
+        if self.dispatchable and (batch * seq_len) == 1:
 
-        up_proj_weights = (
-            self.up_projs.linear.weights[0]
-            .view(self.num_experts, self.tp_expert_dim, self.hidden_size)
-            .transpose(1, 2)
-        )
+            # we are running on a single token, so we can use the custom kernel
+            router_scores = torch.sigmoid(router_top_values.float()).to(
+                hidden_states.dtype
+            )
 
-        down_proj_weights = (
-            self.down_projs.linear.weights[0]
-            .view(self.num_experts, self.hidden_size, self.tp_expert_dim)
-            .transpose(1, 2)
-        )
+            moe_out = _MuiGateUpDownMoe.apply(
+                self.engine_config,
+                self.num_experts,
+                hidden_states,
+                router_scores,
+                router_indices,
+                None,  # norm_weights
+                self.gate_projs.linear.weights[0],
+                self.up_projs.linear.weights[0],
+                self.down_projs.linear.weights[0],
+                None,  # residual
+                0,  # epsilon
+            )
 
-        g = torch.bmm(
-            hidden_states,
-            gate_proj_weights,
-        )
+            # reduce across all the ranks the moe output
+            moe_out = self.comms.all_reduce_sum(moe_out)
 
-        u = torch.bmm(
-            hidden_states,
-            up_proj_weights,
-        )
+            # TODO: fuse the shared expert and the MoE computations
+            out = shared_expert_output + moe_out
 
-        next_states = torch.bmm(
-            (self.activation_function(g) * u),  # shape (num_experts, -1, tp_expert_dim)
-            down_proj_weights,
-        )
+            return out, router_scores
+        else:
+            shared_expert_output = shared_expert_output.view(-1, hidden_dim)
 
-        # reduce across all the ranks
-        next_states = self.comms.all_reduce_sum(next_states)
+            router_scores = (
+                torch.full(
+                    size=(batch, seq_len, self.num_experts),
+                    fill_value=float("-inf"),
+                    dtype=router_top_values.dtype,
+                    device=router_top_values.device,
+                )
+                .scatter_(2, router_indices, router_top_values)
+                .view(-1, self.num_experts)
+                .transpose(0, 1)
+            )
+            # We do this to make sure we have -inf for non topK tokens before going through the !
+            # Here we are just creating a tensor to index each and every single one of the hidden states. Let s maybe register a buffer for this!
+            router_indices = (
+                torch.arange(tokens_per_expert, device=hidden_states.device)
+                .view(1, -1)
+                .expand(router_scores.size(0), -1)
+            )
+            router_scores = torch.sigmoid(router_scores.float()).to(hidden_states.dtype)
 
-        next_states = next_states.view(-1, self.hidden_size)
+            router_indices = router_indices.reshape(-1, 1).expand(-1, hidden_dim)
 
-        return [next_states]
+            routed_in = torch.gather(
+                input=hidden_states.view(-1, self.hidden_size),
+                dim=0,
+                index=router_indices,
+            ).to(hidden_states.device)
+            # we gather inputs corresponding to each expert based on the router indices
+            routed_in = routed_in * router_scores.reshape(-1, 1)
+
+            hidden_states = routed_in.view(self.num_experts, -1, self.hidden_size)
+
+            # the bmm operation requires the weights to be in the shape of (num_experts, expert_dim, hidden_size)
+            # so we need to transpose them
+            gate_proj_weights = (
+                self.gate_projs.linear.weights[0]
+                .view(self.num_experts, self.tp_expert_dim, self.hidden_size)
+                .transpose(1, 2)
+            )
+
+            up_proj_weights = (
+                self.up_projs.linear.weights[0]
+                .view(self.num_experts, self.tp_expert_dim, self.hidden_size)
+                .transpose(1, 2)
+            )
+
+            down_proj_weights = (
+                self.down_projs.linear.weights[0]
+                .view(self.num_experts, self.hidden_size, self.tp_expert_dim)
+                .transpose(1, 2)
+            )
+
+            g = torch.bmm(
+                hidden_states,
+                gate_proj_weights,
+            )
+
+            u = torch.bmm(
+                hidden_states,
+                up_proj_weights,
+            )
+
+            next_states = torch.bmm(
+                (
+                    self.activation_function(g) * u
+                ),  # shape (num_experts, -1, tp_expert_dim)
+                down_proj_weights,
+            )
+
+            # reduce across all the ranks
+            next_states = self.comms.all_reduce_sum(next_states)
+
+            next_states = next_states.view(-1, self.hidden_size)
+
+            # now that we finished expert computation -> we scatter add because we gathered previously
+            # we have to do this because we used all experts on all tokens. This is faster than the for loop, tho you are compute bound
+            # this scales a lot better if you do EP!
+            shared_expert_output.scatter_add_(
+                dim=0, index=router_indices, src=next_states.view(-1, hidden_dim)
+            )
+
+            return [shared_expert_output], [router_scores]
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.tensor_parallelism > 1:
-            return self.parallel_forward([hidden_states])[0]
+            out, score = self.parallel_forward([hidden_states])
+            return out[0], score[0]
 
         raise ValueError("Only parallel inference is supported")
 
@@ -357,6 +449,9 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
             device=device,
             dtype=dtype,
         )
+
+    def finalize_init(self):
+        self.experts.finalize_init()
 
     @staticmethod
     def replace(
@@ -426,47 +521,19 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         else:
             raise ValueError("not implemented")
 
-        batch, seq_len, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, self.hidden_dim)
-        router_logits = self.router(hidden_states).transpose(0, 1)
-        tokens_per_expert = batch * seq_len
+        router_logits = self.router(hidden_states)
+        router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)
 
-        router_top_value, router_indices = torch.topk(
-            router_logits.transpose(0, 1), self.top_k, dim=1
-        )
-        router_scores = (
-            torch.full_like(router_logits.transpose(0, 1), float("-inf"))
-            .scatter_(1, router_indices, router_top_value)
-            .transpose(0, 1)
-        )
-        # We do this to make sure we have -inf for non topK tokens before going through the !
-        # Here we are just creating a tensor to index each and every single one of the hidden states. Let s maybe register a buffer for this!
-        router_indices = (
-            torch.arange(tokens_per_expert, device=hidden_states.device)
-            .view(1, -1)
-            .expand(router_scores.size(0), -1)
-        )
-        router_scores = torch.sigmoid(router_scores.float()).to(hidden_states.dtype)
+        shared_expert_out = self.shared_expert.parallel_forward([hidden_states])[0]
 
-        router_indices = router_indices.reshape(-1, 1).expand(-1, hidden_dim)
-        routed_in = torch.gather(
-            input=hidden_states,
-            dim=0,
-            index=router_indices,
-        ).to(hidden_states.device)
-        # we gather inputs corresponding to each expert based on the router indices
-        routed_in = routed_in * router_scores.reshape(-1, 1)
-
-        routed_out = self.experts.parallel_forward([routed_in])[0]
-        out = self.shared_expert.parallel_forward([hidden_states])[0]
-        # now that we finished expert computation -> we scatter add because we gathered previously
-        # we have to do this because we used all experts on all tokens. This is faster than the for loop, tho you are compute bound
-        # this scales a lot better if you do EP!
-        out.scatter_add_(
-            dim=0, index=router_indices, src=routed_out.view(-1, hidden_dim)
+        out, scores_out = self.experts.parallel_forward(
+            [hidden_states],
+            router_top_values=router_top_value,
+            router_indices=router_indices,
+            shared_expert_output=shared_expert_out,
         )
 
-        return [out], [router_scores]
+        return out, scores_out
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.tensor_parallelism > 1:

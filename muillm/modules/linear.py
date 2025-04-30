@@ -35,7 +35,7 @@ class _MuiLinear(torch.autograd.Function):
             add_bias=add_bias,
         )
 
-        ctx.save_for_backward(x, weights, norm_weights, variance_epsilon, add_bias)
+        ctx.save_for_backward(x, weights, norm_weights, add_bias)
 
         return output
 
