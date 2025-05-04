@@ -88,7 +88,7 @@ And install the library (creating a virtual environment beforehand is recommende
 pip install --upgrade build
 pip install wheel
 
-python setup.py bdist_wheel && pip install ./dist/muillm-0.0.1-cp310-cp310-linux_x86_64.whl
+python -m build --no-isolation && pip install ./dist/muillm-0.0.1-cp310-cp310-linux_x86_64.whl
 ```
 
 Then you can run one of the examples
