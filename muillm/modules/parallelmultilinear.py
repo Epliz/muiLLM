@@ -13,6 +13,8 @@ from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
 import muillm_ext
 
+from muillm.modules.rmsnorm import MuiRMSNorm
+
 
 class _MuiParallelMultiLinear(torch.autograd.Function):
     @staticmethod
@@ -264,7 +266,9 @@ class MuiParallelMultiLinear(MuiModule):
             )
 
         normalize = prev_layernorm_module is not None
-        variance_epsilon = prev_layernorm_module.variance_epsilon if normalize else 0.0
+        variance_epsilon = (
+            MuiRMSNorm._extract_eps(prev_layernorm_module) if normalize else 0.0
+        )
         norm_weights = prev_layernorm_module.weight if normalize else None
 
         new_module = MuiParallelMultiLinear(
