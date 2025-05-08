@@ -1,9 +1,9 @@
-from muillm.modules.attention.llama4attention import MuiLlama4TextAttention
-from muillm.modules.attention.parallelllama4attention import (
-    MuiParallelLlama4TextAttention,
-)
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
+from muillm.modules.decoder.llama4decoder import MuiLlama4TextDecoderLayer
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
+from muillm.modules.decoder.parallelllama4decoder import (
+    MuiParallelLlama4TextDecoderLayer,
+)
 from muillm.modules.l2norm import MuiL2Norm
 from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
 from muillm.modules.moe.gateupdownmlpmoe import MuiGateUpDownMLPMoe
@@ -42,19 +42,26 @@ from transformers.models.llama.modeling_llama import (
 from transformers.models.llama4.modeling_llama4 import (
     Llama4TextRMSNorm,
     Llama4TextL2Norm,
-    Llama4TextAttention,
     Llama4TextMLP,
     Llama4TextMoe,
+    Llama4TextDecoderLayer,
 )
 
 from muillm.modules.decoder.decoder import MuiDecoderLayer
 
 # TODO Llama4:
-# 1) use flash decoding
-# 2) make hybrid cache use the right dtype
-# 3) Fused MoE
-# 4) Complex rotary embedding kernel
-# 5) Make masks and cache to output minimal sizes (affects flash decoding performance)
+# 1) use flash decoding -> DONE
+# 2) Fused MoE -> v1 DONE (need to fuse shared expert)
+# 3) fuse rmsnorm in decoder
+# 4) sharded attention
+# 5) sampling method
+# 6) Make masks and cache to output minimal sizes (affects flash decoding performance)
+# 7) Complex rotary embedding kernel
+# 8) topk sigmoid kernel
+# 9) fused Moe v2 (fuse shared expert)
+# 10) make hybrid cache use the right dtype
+# 11) cache update kernels
+# 12) CPU modules
 
 _LAYER_REPLACEMENTS = {
     # Linear
@@ -73,13 +80,12 @@ _LAYER_REPLACEMENTS = {
     # Rotary embeddings
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
-    # attentions
-    Llama4TextAttention: MuiLlama4TextAttention,
     # Decoders
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
     MistralDecoderLayer: MuiDecoderLayer,
     LlamaDecoderLayer: MuiDecoderLayer,
+    Llama4TextDecoderLayer: MuiLlama4TextDecoderLayer,
     # replacements for full models
     MistralModel: MuiMistralModel,
     LlamaModel: MuiLlamaModel,
@@ -107,12 +113,11 @@ _TP_LAYER_REPLACEMENTS = {
     # Rotrary embeddings
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
-    # attentions
-    Llama4TextAttention: MuiParallelLlama4TextAttention,
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
     MistralDecoderLayer: MuiParallelDecoderLayer,
     LlamaDecoderLayer: MuiParallelDecoderLayer,
+    Llama4TextDecoderLayer: MuiParallelLlama4TextDecoderLayer,
     # replacements for full models
     MistralModel: MuiMistralModel,
     MistralForCausalLM: MuiMistralForCausalLM,

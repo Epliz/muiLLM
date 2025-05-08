@@ -11,11 +11,21 @@ from muillm.modules.attention.sdpaattention import MuiSdpaAttention
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
 from muillm.modules.multilinear import MuiMultiLinear
 
-from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralAttention
+from transformers.models.mistral.modeling_mistral import (
+    MistralDecoderLayer,
+    MistralAttention,
+)
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaAttention
 
+
 class MuiDecoderLayer(MuiModule):
-    def __init__(self, engine_config: MuiEngineConfig, qkv_proj: MuiMultiLinear, self_attn: MuiBaseAttention, mlp: MuiGateUpDownMLP):
+    def __init__(
+        self,
+        engine_config: MuiEngineConfig,
+        qkv_proj: MuiMultiLinear,
+        self_attn: MuiBaseAttention,
+        mlp: MuiGateUpDownMLP,
+    ):
         super().__init__(engine_config=engine_config)
 
         self.qkv_proj = qkv_proj
@@ -24,10 +34,14 @@ class MuiDecoderLayer(MuiModule):
         self.mlp = mlp
 
     @staticmethod
-    def replace(prev_module: Union["MuiDecoderLayer", LlamaDecoderLayer, MistralDecoderLayer], engine_config: MuiEngineConfig, device=None) -> "MuiDecoderLayer":
+    def replace(
+        prev_module: Union["MuiDecoderLayer", LlamaDecoderLayer, MistralDecoderLayer],
+        engine_config: MuiEngineConfig,
+        device=None,
+    ) -> "MuiDecoderLayer":
         if device is None:
             raise ValueError("device was None")
-        
+
         if isinstance(prev_module, MuiDecoderLayer):
             # nothing would be changing if we created a new module, so might as well return the previous one
             return prev_module
@@ -37,18 +51,34 @@ class MuiDecoderLayer(MuiModule):
         input_layernorm = prev_module.input_layernorm
         qkv_proj = None
         self_attn = None
-        if isinstance(prev_attn, MistralAttention) or isinstance(prev_attn, LlamaAttention):
+        if isinstance(prev_attn, MistralAttention) or isinstance(
+            prev_attn, LlamaAttention
+        ):
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
-            qkv_proj = MuiMultiLinear.replace(prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj], engine_config=engine_config, prev_layernorm_module=input_layernorm, device=device)
-            self_attn = MuiSdpaAttention.replace(prev_module.self_attn, engine_config=engine_config, device=device)
+            qkv_proj = MuiMultiLinear.replace(
+                prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj],
+                engine_config=engine_config,
+                prev_layernorm_module=input_layernorm,
+                device=device,
+            )
+            self_attn = MuiSdpaAttention.replace(
+                prev_module.self_attn, engine_config=engine_config, device=device
+            )
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
 
         post_attention_layernorm = prev_module.post_attention_layernorm
         # even if we had a MuiGateUpDownMLP, we need to replace it with a new one to get the layernorm module
-        mlp = MuiGateUpDownMLP.replace(prev_module=prev_module.mlp, engine_config=engine_config, prev_layernorm_module=post_attention_layernorm, device=device)
+        mlp = MuiGateUpDownMLP.replace(
+            prev_module=prev_module.mlp,
+            engine_config=engine_config,
+            prev_layernorm_module=post_attention_layernorm,
+            device=device,
+        )
 
-        new_decoder = MuiDecoderLayer(engine_config=engine_config, qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp)
+        new_decoder = MuiDecoderLayer(
+            engine_config=engine_config, qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp
+        )
 
         # delete the previous module to save memory
         del prev_module
@@ -58,7 +88,6 @@ class MuiDecoderLayer(MuiModule):
 
         return new_decoder
 
-    
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -68,10 +97,14 @@ class MuiDecoderLayer(MuiModule):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
+        position_embeddings: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # will become mandatory in v4.45
         all_ones_mask: Optional[bool] = None,
         **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> Tuple[
+        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
+    ]:
         if "padding_mask" in kwargs:
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
