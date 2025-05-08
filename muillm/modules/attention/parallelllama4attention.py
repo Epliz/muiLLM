@@ -115,7 +115,6 @@ class MuiParallelLlama4TextAttention(MuiModule):
         self,
         engine_config: MuiEngineConfig,
         prev_module: Llama4TextAttention,
-        qkv_proj: MuiParallelMultiLinear,
     ):
         super().__init__(engine_config=engine_config)
         self.config = prev_module.config
@@ -131,7 +130,6 @@ class MuiParallelLlama4TextAttention(MuiModule):
         self.attention_dropout = prev_module.attention_dropout
         self.is_causal = True
         self.use_rope = prev_module.use_rope
-        self.qkv_proj = qkv_proj
         self.o_proj = prev_module.o_proj
         if self.config.use_qk_norm and self.use_rope:
             self.qk_norm = prev_module.qk_norm
@@ -141,39 +139,24 @@ class MuiParallelLlama4TextAttention(MuiModule):
         prev_module: Llama4TextAttention, engine_config: MuiEngineConfig, device=None
     ) -> "MuiParallelLlama4TextAttention":
 
-        q_proj = prev_module.q_proj
-        k_proj = prev_module.k_proj
-        v_proj = prev_module.v_proj
-
-        # we shard by columns because the full attention block is not shardable by head
-        # if there is the QK norm
-        qkv_proj = MuiParallelMultiLinear.replace(
-            prev_modules=[q_proj, k_proj, v_proj],
-            engine_config=engine_config,
-            sharding_dim=1,
-            device=device,
-        )
-
         return MuiParallelLlama4TextAttention(
             engine_config=engine_config,
             prev_module=prev_module,
-            qkv_proj=qkv_proj,
         )
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        input_shape = hidden_states.shape[:-1]
 
-        bsz, q_len, _ = hidden_states.size()
-
-        query_states, key_states, value_states = self.qkv_proj(hidden_states)
+        bsz, q_len, _ = query_states.size()
 
         if (
             (q_len == 1)
