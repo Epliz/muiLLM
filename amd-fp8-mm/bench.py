@@ -178,6 +178,18 @@ def custom_kernel(data: input_t) -> output_t:
     return c
 
 
+_compiled_kernel = None
+
+
+def compiled_custom_kernel(data: input_t) -> output_t:
+    global _compiled_kernel
+    if _compiled_kernel is None:
+        # Compile the custom kernel
+        _compiled_kernel = torch.compile(custom_kernel)
+
+    return _compiled_kernel(data)
+
+
 def make_match_reference(custom_kernel, rtol=1e-02, atol=1e-03):
     """
     Compare the output of the custom kernel with the reference kernel.
@@ -232,6 +244,7 @@ def benchmark_kernel(
 
 
 if __name__ == "__main__":
+    print("Testing custom kernel...")
     # Testing for correctness
     make_match_reference(custom_kernel)
     print("Custom kernel matches reference kernel for all tested shapes.")
@@ -239,4 +252,14 @@ if __name__ == "__main__":
     # Benchmarking for speed
     for shape in benchmarking_shapes:
         benchmark_kernel(custom_kernel, shape)
+        print(f"Benchmarking completed for shape {shape}.")
+
+    print("Testing compiled custom kernel...")
+    # Testing for correctness
+    make_match_reference(compiled_custom_kernel)
+    print("Custom kernel matches reference kernel for all tested shapes.")
+
+    # Benchmarking for speed
+    for shape in benchmarking_shapes:
+        benchmark_kernel(compiled_custom_kernel, shape)
         print(f"Benchmarking completed for shape {shape}.")
