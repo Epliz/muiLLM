@@ -158,7 +158,7 @@ class MuiRotaryEmbedding(MuiModule):
         config: Union[LlamaConfig, MistralConfig, Llama4TextConfig],
         rope_kwargs: Dict[str, Any] = None,
         layer_idx: int = 0,
-        output_complex: bool = False,
+        output_complex: Optional[bool] = None,
         device=None,
         dtype=None,
     ):
@@ -175,6 +175,11 @@ class MuiRotaryEmbedding(MuiModule):
 
         if config is not None:
             if isinstance(config, LlamaConfig) or isinstance(config, MistralConfig):
+                if output_complex is None:
+                    # override the output_complex flag
+                    output_complex = False
+                    self.output_complex = False
+
                 # BC: "rope_type" was originally "type"
                 if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
                     self.rope_type = config.rope_scaling.get(
@@ -183,6 +188,11 @@ class MuiRotaryEmbedding(MuiModule):
                 else:
                     self.rope_type = "default"
             elif isinstance(config, Llama4TextConfig):
+                if output_complex is None:
+                    # override the output_complex flag
+                    output_complex = True
+                    self.output_complex = True
+
                 if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
                     self.rope_type = "llama3"
                 else:

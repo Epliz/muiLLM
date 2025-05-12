@@ -6,6 +6,12 @@ from muillm.modules.decoder.parallelllama4decoder import (
 )
 from muillm.modules.l2norm import MuiL2Norm
 from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
+from muillm.modules.models.llama4.model import (
+    MuiLlama4ForCausalLM,
+    MuiLlama4ForConditionalGeneration,
+    MuiLlama4TextModel,
+)
+
 from muillm.modules.moe.gateupdownmlpmoe import MuiGateUpDownMLPMoe
 from muillm.modules.moe.parallelgateupdownmlpmoe import MuiParallelGateUpDownMLPMoe
 from muillm.modules.multilinear import MuiMultiLinear
@@ -45,6 +51,9 @@ from transformers.models.llama4.modeling_llama4 import (
     Llama4TextMLP,
     Llama4TextMoe,
     Llama4TextDecoderLayer,
+    Llama4TextModel,
+    Llama4ForCausalLM,
+    Llama4ForConditionalGeneration,
 )
 
 from muillm.modules.decoder.decoder import MuiDecoderLayer
@@ -77,8 +86,11 @@ _LAYER_REPLACEMENTS = {
     # replacements for full models
     MistralModel: MuiMistralModel,
     LlamaModel: MuiLlamaModel,
+    Llama4TextModel: MuiLlama4TextModel,
     MistralForCausalLM: MuiMistralForCausalLM,
     LlamaForCausalLM: MuiLlamaForCausalLM,
+    Llama4ForCausalLM: MuiLlama4ForCausalLM,
+    Llama4ForConditionalGeneration: MuiLlama4ForConditionalGeneration,
 }
 
 _TP_LAYER_REPLACEMENTS = {
@@ -108,9 +120,12 @@ _TP_LAYER_REPLACEMENTS = {
     Llama4TextDecoderLayer: MuiParallelLlama4TextDecoderLayer,
     # replacements for full models
     MistralModel: MuiMistralModel,
-    MistralForCausalLM: MuiMistralForCausalLM,
     LlamaModel: MuiLlamaModel,
+    Llama4TextModel: MuiLlama4TextModel,
+    MistralForCausalLM: MuiMistralForCausalLM,
     LlamaForCausalLM: MuiLlamaForCausalLM,
+    Llama4ForCausalLM: MuiLlama4ForCausalLM,
+    Llama4ForConditionalGeneration: MuiLlama4ForConditionalGeneration,
 }
 
 
