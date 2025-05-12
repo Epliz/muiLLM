@@ -255,6 +255,12 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         tot_seq_len = past_seen_tokens + inputs_embeds.shape[1]
 
         if use_cache:
+            # If we have a cache, but not a MuiCache, drop it
+            if isinstance(past_key_values, Cache) and not isinstance(
+                past_key_values, MuiCache
+            ):
+                past_key_values = None
+
             no_cache = past_key_values is None
             use_legacy_cache = (not isinstance(past_key_values, Cache)) and (
                 not no_cache
@@ -282,6 +288,8 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
                     grow_static_cache_if_needed(
                         past_key_values, tot_seq_len, max_cache_length
                     )
+
+            # TODO: convert cache if not a MuiCache
 
         if cache_position is None:
             cache_position = torch.arange(

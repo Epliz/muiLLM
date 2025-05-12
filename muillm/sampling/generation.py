@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional, Union
 import warnings
 
@@ -26,6 +27,7 @@ from muillm.sampling.multinomial import muillm_multinomial_sample_one_no_sync
 
 
 from transformers.generation import GenerationMixin
+from transformers.cache_utils import Cache
 
 
 class MuiGenerationMixin(MuiModule, GenerationMixin):
@@ -59,15 +61,11 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
             generation_config ([`~generation.GenerationConfig`]):
                 The generation configuration to be used as parametrization of the decoding method.
             synced_gpus (`bool`):
-                Whether to continue running the while loop until max_length (needed for ZeRO stage 3)
+                Whether to continue running the while loop until max_length (needed to avoid deadlocking with
+                `FullyShardedDataParallel` and DeepSpeed ZeRO Stage 3).
             streamer (`BaseStreamer`, *optional*):
                 Streamer object that will be used to stream the generated sequences. Generated tokens are passed
                 through `streamer.put(token_ids)` and the streamer is responsible for any further processing.
-            logits_warper (`LogitsProcessorList`, *optional*):
-                An instance of [`LogitsProcessorList`]. List of instances of class derived from [`LogitsWarper`] used
-                to warp the prediction score distribution of the language modeling head applied before multinomial
-                sampling at each generation step. Only required with sampling strategies (i.e. `do_sample` is set in
-                `generation_config`)
             model_kwargs:
                 Additional model specific kwargs will be forwarded to the `forward` function of the model. If model is
                 an encoder-decoder model the kwargs should include `encoder_outputs`.
@@ -79,6 +77,7 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
             `return_dict_in_generate=True` or a [`~generation.GenerateEncoderDecoderOutput`] if
             `model.config.is_encoder_decoder=True`.
         """
+
         engine_config = self.engine_config
 
         synchronizer = engine_config.synchronizer
@@ -124,24 +123,36 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
             )
 
         # keep track of which sequences are already finished
-        batch_size = input_ids.shape[0]
+        batch_size, cur_len = input_ids.shape
         this_peer_finished = False
         unfinished_sequences = torch.ones(
             batch_size, dtype=torch.long, device=input_ids.device
         )
-
-        # parallelmodel needs to receive a list of caches
-        # but HF gives a single one
-        # until we figure out how to shard into several, remove the one passed by HF
-        # (required to support static caches)
-        if "mamba" in self.__class__.__name__.lower():
-            cache_name = "cache_params"
-        else:
-            cache_name = "past_key_values"
-
-        model_kwargs[cache_name] = None
-
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
+
+        model_forward = self.__call__
+        if isinstance(model_kwargs.get("past_key_values"), Cache):
+            is_compileable = (
+                model_kwargs["past_key_values"].is_compileable
+                and self._supports_static_cache
+            )
+            if getattr(self, "hf_quantizer", None) is not None:
+                is_compileable &= self.hf_quantizer.is_compileable
+            is_compileable = is_compileable and not generation_config.disable_compile
+            if is_compileable and (
+                self.device.type == "cuda"
+                or generation_config.compile_config._compile_all_devices
+            ):
+                os.environ["TOKENIZERS_PARALLELISM"] = "0"
+                model_forward = self.get_compiled_call(generation_config.compile_config)
+
+        if generation_config.prefill_chunk_size is not None:
+            model_kwargs = self._prefill_chunking(
+                input_ids, generation_config, **model_kwargs
+            )
+            is_prefill = False
+        else:
+            is_prefill = True
 
         # extract information about how many tokens we will generate max
         # so that we can sync GPU and CPU less but still every now and then
@@ -153,7 +164,7 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
             max_remaining_generate = max_length - cur_len
 
         last_sync = 0
-        sync_frequency = 4
+        sync_frequency = 1
 
         # help removes a GPU sync point when preparing masks
         checked_mask_content = False
@@ -165,7 +176,6 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
         # All peers are syncrhonized by broadcasting the tokens, so they all finish at the same
         # time
         while not this_peer_finished:
-
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
@@ -188,8 +198,11 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
                 else {}
             )
 
-            # forward pass to get next token
-            outputs = self(**model_inputs, return_dict=True)
+            if is_prefill:
+                outputs = self(**model_inputs, return_dict=True)
+                is_prefill = False
+            else:
+                outputs = model_forward(**model_inputs, return_dict=True)
 
             # synced_gpus: don't waste resources running the code we don't need; kwargs must be updated before skipping
             model_kwargs = self._update_model_kwargs_for_generation(
@@ -201,10 +214,11 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
 
-            # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
+            # Copy is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
             # (the clone itself is always small)
-            next_token_logits = outputs.logits[:, -1, :].clone()
-            next_token_logits = next_token_logits.to(input_ids.device)
+            next_token_logits = outputs.logits[:, -1, :].to(
+                copy=True, dtype=torch.float32, device=input_ids.device
+            )
 
             # pre-process distribution
             next_token_scores = logits_processor(input_ids, next_token_logits)
@@ -262,6 +276,8 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
             if max_remaining_generate is not None:
                 max_remaining_generate = max_remaining_generate - 1
 
+            cur_len += 1
+
             last_sync = last_sync + 1
             if (last_sync >= sync_frequency) or (max_remaining_generate <= 0):
                 last_sync = 0
@@ -276,7 +292,7 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
 
                 if sync_frequency < 16:
                     # decrease the sync frequency up to every 16 tokens
-                    sync_frequency = sync_frequency * 2
+                    sync_frequency = sync_frequency * 4
 
             # This is needed to properly delete outputs.logits which may be very large for first iteration
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
