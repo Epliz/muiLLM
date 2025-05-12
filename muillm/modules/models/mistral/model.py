@@ -25,7 +25,6 @@ import muillm_ext
 import torch
 import torch.nn as nn
 
-from transformers.generation import GenerationMixin
 from transformers.cache_utils import (
     Cache,
     DynamicCache,
@@ -54,6 +53,7 @@ from transformers.utils import (
 )
 
 from muillm.engineconfig import MuiEngineConfig
+from muillm.sampling.generation import MuiGenerationMixin
 
 logger = logging.get_logger(__name__)
 
@@ -603,7 +603,7 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         return causal_mask
 
 
-class MuiMistralForCausalLM(MistralPreTrainedModel, GenerationMixin):
+class MuiMistralForCausalLM(MistralPreTrainedModel, MuiGenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(
@@ -612,7 +612,10 @@ class MuiMistralForCausalLM(MistralPreTrainedModel, GenerationMixin):
         lm_head: Union[MuiLinear, MuiParallelLinear],
         initialize: bool = True,
     ):
-        super().__init__(model.config)
+        MuiGenerationMixin.__init__(self, model.engine_config)
+        # order matters: error if we call the mistral constructor first
+        MistralPreTrainedModel.__init__(self, model.config)
+
         self.model = model
         self.vocab_size = model.vocab_size
         self.lm_head = lm_head

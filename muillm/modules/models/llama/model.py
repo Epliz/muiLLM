@@ -45,7 +45,6 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 
-from transformers.generation import GenerationMixin
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_outputs import (
@@ -66,6 +65,8 @@ from transformers.models.llama.modeling_llama import (
     LLAMA_INPUTS_DOCSTRING,
     LLAMA_START_DOCSTRING,
 )
+
+from muillm.sampling.generation import MuiGenerationMixin
 
 
 logger = logging.get_logger(__name__)
@@ -568,7 +569,7 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         return causal_mask
 
 
-class MuiLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
+class MuiLlamaForCausalLM(LlamaPreTrainedModel, MuiGenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(
@@ -577,7 +578,10 @@ class MuiLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         lm_head: Union[MuiLinear, MuiParallelLinear],
         initialize: bool = True,
     ):
-        super().__init__(model.config)
+        MuiGenerationMixin.__init__(self, model.engine_config)
+        # order matters: error if we call the llama constructor first
+        LlamaPreTrainedModel.__init__(self, model.config)
+
         self.model = model
         self.vocab_size = model.vocab_size
         self.lm_head = lm_head
