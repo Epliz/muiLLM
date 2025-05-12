@@ -257,6 +257,12 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         tot_seq_len = past_seen_tokens + inputs_embeds.shape[1]
 
         if use_cache:
+            # If we have a cache, but not a MuiCache, drop it
+            if isinstance(past_key_values, Cache) and not isinstance(
+                past_key_values, MuiCache
+            ):
+                past_key_values = None
+
             no_cache = past_key_values is None
             use_legacy_cache = (not isinstance(past_key_values, Cache)) and (
                 not no_cache
