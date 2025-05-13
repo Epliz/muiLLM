@@ -402,7 +402,11 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
                 )  # flash does not support chunked attn TODO support flash
             return None, None
 
-        if self.config._attn_implementation not in ["sdpa", "flex_attention", "eager"]:
+        if self.config._attn_implementation not in [
+            "sdpa",
+            "flex_attention",
+            "eager",
+        ]:
             return None, None
 
         sequence_length = input_tensor.shape[1]
@@ -429,7 +433,9 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
                 cond1,
                 attention_chunk_size + sequence_length - 1,
                 torch.where(
-                    cond2, first_cache_position + sequence_length, attention_chunk_size
+                    cond2,
+                    first_cache_position + sequence_length,
+                    attention_chunk_size,
                 ),
             )
             if use_cache
@@ -560,6 +566,7 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         If the chunk size is 3.
         This can just be appplied over the already created attention mask
         """
+
         arange_vector = torch.arange(start, end, device=device)
         block_pos = torch.abs(
             arange_vector.unsqueeze(0) // attention_chunk_size
@@ -602,6 +609,7 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
             batch_size (`torch.Tensor`):
                 Batch size.
         """
+
         if attention_mask is not None and attention_mask.dim() == 4:
             # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
             causal_mask = attention_mask
@@ -1205,6 +1213,7 @@ class MuiLlama4ForConditionalGeneration(Llama4PreTrainedModel, MuiGenerationMixi
             batch_size (`torch.Tensor`):
                 Batch size.
         """
+
         if attention_mask is not None and attention_mask.dim() == 4:
             # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
             causal_mask = attention_mask
