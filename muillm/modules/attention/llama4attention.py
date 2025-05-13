@@ -81,8 +81,6 @@ def eager_attention_forward(
     dropout: float = 0.0,
     **kwargs,
 ):
-    # print the dtypes of query, key, value
-
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
     attn_weights = torch.matmul(query, key_states.transpose(2, 3)) / math.sqrt(
@@ -206,10 +204,6 @@ class MuiLlama4TextAttention(MuiModule):
                     key_states, value_states, self.layer_idx, cache_kwargs
                 )
 
-            # TODO: the hybrid chunked cache might be in bf16 while we need fp16
-            key_states = key_states.type_as(query_states)
-            value_states = value_states.type_as(query_states)
-
             if attention_mask is not None:
                 causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
                 attn_output = mui_causally_decode_masked(
@@ -271,10 +265,6 @@ class MuiLlama4TextAttention(MuiModule):
                 key_states, value_states = past_key_value.update(
                     key_states, value_states, self.layer_idx, cache_kwargs
                 )
-
-            # TODO: the hybrid chunked cache might be in bf16 while we need fp16
-            key_states = key_states.type_as(query_states)
-            value_states = value_states.type_as(query_states)
 
             attention_interface: Callable = eager_attention_forward
             if self.config._attn_implementation != "eager":

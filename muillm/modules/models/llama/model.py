@@ -271,7 +271,7 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             if no_cache:
                 # create a cache from scratch
                 device = inputs_embeds.device
-                dtype = torch.float16
+                dtype = inputs_embeds.dtype
                 past_key_values = create_static_cache(
                     self.engine_config,
                     self.config,

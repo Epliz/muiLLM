@@ -25,6 +25,12 @@ from muillm.modules.decoder.llama4decoder import MuiLlama4TextDecoderLayer
 from muillm.modules.decoder.parallelllama4decoder import (
     MuiParallelLlama4TextDecoderLayer,
 )
+from muillm.modules.kvcache.cache_utils import (
+    MuiCache,
+    MuiHybridChunkedCache,
+    create_hybrid_chunked_cache,
+    grow_hybrid_chunked_cache_if_needed,
+)
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
 
@@ -254,18 +260,47 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
                 input_ids.to(self.embed_tokens.weight.device)
             )
 
-        if use_cache and past_key_values is None:
-            past_key_values = HybridChunkedCache(
-                self.config, inputs_embeds.shape[0], inputs_embeds.shape[1]
-            )
+        batch_size = inputs_embeds.shape[0]
+
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+        tot_seq_len = past_seen_tokens + inputs_embeds.shape[1]
+
+        if use_cache:
+            # If we have a cache, but not a MuiCache, drop it
+            if isinstance(past_key_values, Cache) and not isinstance(
+                past_key_values, MuiCache
+            ):
+                past_key_values = None
+
+            no_cache = past_key_values is None
+            if no_cache:
+                # create a hybrid cache
+                device = inputs_embeds.device
+                dtype = inputs_embeds.dtype
+                past_key_values = create_hybrid_chunked_cache(
+                    self.engine_config,
+                    self.config,
+                    batch_size,
+                    tot_seq_len,
+                    device,
+                    dtype,
+                )
+
+            else:
+                # we have a previous cache, just re-use it
+                if isinstance(past_key_values, MuiHybridChunkedCache):
+                    # grow cache if needed
+                    max_cache_length = self.config.max_position_embeddings
+                    grow_hybrid_chunked_cache_if_needed(
+                        past_key_values, tot_seq_len, max_cache_length
+                    )
 
         if cache_position is None:
-            past_seen_tokens = (
-                past_key_values.get_seq_length() if past_key_values is not None else 0
-            )
             cache_position = torch.arange(
                 past_seen_tokens,
-                past_seen_tokens + inputs_embeds.shape[1],
+                tot_seq_len,
                 device=inputs_embeds.device,
             )
 
@@ -332,6 +367,11 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
+
+        if use_cache:
+            if isinstance(past_key_values, MuiCache):
+                # the C++ module increase the seen tokens counts, and we need the python part to see it too
+                past_key_values.sync_back()
 
         output = BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -494,6 +534,7 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         ):
             chunked_attention_mask = chunked_attention_mask.bool()
             causal_mask = causal_mask.bool()
+            # TODO: replace with our version that doesn't sync
             if AttentionMaskConverter._ignore_causal_mask_sdpa(
                 attention_mask,
                 inputs_embeds=input_tensor,
