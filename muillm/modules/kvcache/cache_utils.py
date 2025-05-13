@@ -143,12 +143,17 @@ class MuiStaticCache(StaticCache, MuiCache):
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # update like usual
-        ret = super().update(key_states, value_states, layer_idx, cache_kwargs)
+        k_out, v_out = super().update(key_states, value_states, layer_idx, cache_kwargs)
 
-        # and update the seen counter
-        self._seen_tokens += key_states.shape[-2]
+        if layer_idx == 0:
+            # and update the seen counter (only for layer 0 to avoid double counting)
+            self._seen_tokens += key_states.shape[-2]
 
-        return ret
+        # return the minimal slice of cache
+        k_out = torch.narrow(k_out, 2, 0, self._seen_tokens)
+        v_out = torch.narrow(v_out, 2, 0, self._seen_tokens)
+
+        return k_out, v_out
 
     def grow_cache(self, capacity: int, max_capacity: int) -> None:
         required_capacity = _next_pow2(capacity)
@@ -274,20 +279,28 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        # TODO: extract a view to get the right slice
-        # (for global attention, up to seq len)
-        # for sliding window, seq_len up to the window size, then the window size
-        ret = super().update(
+        k_out, v_out = super().update(
             key_states=key_states,
             value_states=value_states,
             layer_idx=layer_idx,
             cache_kwargs=cache_kwargs,
         )
 
-        # and update the seen counter
-        self._seen_tokens += key_states.shape[-2]
+        if layer_idx == 0:
+            # and update the seen counter (only for layer 0 to avoid double counting)
+            self._seen_tokens += key_states.shape[-2]
 
-        return ret
+        # return the minimal slice of cache
+        if self.is_sliding[layer_idx] and self._seen_tokens > self.sliding_window:
+            # this is a sliding window cache, we need to return the last `sliding_window` tokens
+            # as we are past the point where we are starting to slide
+            return k_out, v_out
+        else:
+            # global cache or not sliding yet, we return only the seen tokens
+            k_out = torch.narrow(k_out, 2, 0, self._seen_tokens)
+            v_out = torch.narrow(v_out, 2, 0, self._seen_tokens)
+
+        return k_out, v_out
 
     def get_seq_length(self, layer_idx: Optional[int] = 0):
         # Occupied cache == any slot in the 3rd dim (sequence length) holds a non-zero value. To save on compute, let's
