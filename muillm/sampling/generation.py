@@ -1,5 +1,6 @@
+import inspect
 import os
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 import warnings
 
 from muillm.engineconfig import MuiEngineConfig
@@ -19,7 +20,6 @@ from transformers.generation.stopping_criteria import (
     validate_stopping_criteria,
     StoppingCriteriaList,
 )
-
 import torch
 import torch.nn as nn
 
@@ -328,3 +328,41 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
                 )
         else:
             return input_ids
+
+    def _cache_dependant_input_preparation(
+        self,
+        input_ids: torch.LongTensor,
+        inputs_embeds: Optional[torch.FloatTensor],
+        cache_position: Optional[torch.LongTensor],
+    ) -> Tuple[torch.FloatTensor, torch.LongTensor]:
+        """
+        Generic cache-dependent input preparation
+        The code is put in a separate function to allow granular unit testing
+        as it needs a different implementation to be exportable.
+
+        If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
+        - Exception 1: when passing input_embeds, input_ids may be missing entries
+        - Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
+        - Exception 3: with synced GPUs cache_position may go out of bounds, but we only want dummy token in that case.
+        - Excpetion 4: If input_embeds are passed then slice it through `cache_position`, to keep only the unprocessed tokens and
+          generate the first token for each sequence. Later use the generated Input ids for continuation.
+
+        The current implementation does not rely on ``self`` and could be
+        a class method. It is left as a standard method to be easily rewritten.
+        """
+
+        # The original method from HF was triggering a GPU sync due to some if statement
+        # we use this from the Llama 3 model code, which should be sufficient for what we care about
+        # and doesn't trigger a GPU sync
+
+        # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
+        # Exception 1: when passing input_embeds, input_ids may be missing entries
+        # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
+        if inputs_embeds is not None:  # Exception 1
+            input_ids = input_ids[:, -cache_position.shape[0] :]
+        elif (
+            input_ids.shape[1] != cache_position.shape[0]
+        ):  # Default case (the "else", a no op, is Exception 2)
+            input_ids = input_ids[:, cache_position]
+
+        return inputs_embeds, input_ids
