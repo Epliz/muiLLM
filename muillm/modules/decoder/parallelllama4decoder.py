@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 from muillm.engineconfig import MuiEngineConfig
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.attention.parallelllama4attention import (
@@ -26,6 +26,10 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
     ):
         super().__init__(engine_config=engine_config)
 
+        self.cpp_engine = engine_config.cpp_engine
+        self.comms = engine_config.comms
+        self.tensor_parallelism = engine_config.tensor_parallelism
+
         self.hidden_size = prev_module.hidden_size
         self.self_attn = self_attn
         self.use_chunked_attention = prev_module.use_chunked_attention  # <=> use rope
@@ -37,7 +41,6 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
 
         self.qkv_proj = qkv_proj
         # TODO: fuse this
-        self.input_layernorm = prev_module.input_layernorm
         self.post_attention_layernorm = prev_module.post_attention_layernorm
 
         self.layer_idx = prev_module.layer_idx
@@ -74,11 +77,13 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
             prev_attn.k_proj = None
             prev_attn.v_proj = None
 
+            input_layernorm = prev_module.input_layernorm
             qkv_proj = MuiParallelMultiLinear.replace(
                 prev_modules=[prev_q, prev_k, prev_v],
+                prev_layernorm_module=input_layernorm,
                 engine_config=engine_config,
                 device=device,
-                sharding_dim=1,  # should switch to row-wise sharding once we split the attention heads
+                sharding_dim=0,  # row-wise sharding to split attention heads
             )
 
             del prev_q
@@ -114,7 +119,81 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
 
         return new_module
 
-    # TODO: parallel forward
+    def parallel_forward(
+        self,
+        hidden_states: List[torch.Tensor],
+        attention_mask: Optional[torch.Tensor] = None,
+        chunk_causal_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: Optional[bool] = False,
+        output_router_logits: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # necessary, but kept here for BC
+        **kwargs,
+    ) -> Tuple[
+        List[torch.FloatTensor], Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
+    ]:
+
+        if output_attentions:
+            raise ValueError("output_attention is not supported")
+
+        if output_router_logits:
+            raise ValueError("output_router_logits is not supported")
+
+        # unwrap inputs if needed
+        if isinstance(hidden_states, list):
+            hidden_states = hidden_states[0]
+
+        residual = hidden_states
+
+        # Transform q, k, v
+        # input layer norm is fused
+        query_states, key_states, value_states = self.qkv_proj.parallel_forward(
+            [hidden_states], collect_outputs=False
+        )[0]
+
+        # use local attention mask for ROPE layers
+        if self.use_chunked_attention and chunk_causal_mask is not None:
+            attention_mask = chunk_causal_mask
+
+        # Self Attention
+        hidden_states, _ = self.self_attn.parallel_forward(
+            query_states=[query_states],
+            key_states=[key_states],
+            value_states=[value_states],
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            residual=residual,
+            **kwargs,
+        )
+
+        hidden_states = hidden_states[0]
+
+        # Fully Connected
+        residual = hidden_states
+
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        if self.is_moe_layer:
+            # TODO: parallel forward for MoE MLP
+            hidden_states = self.feed_forward(hidden_states)
+            hidden_states, router_logits = hidden_states
+        else:
+            hidden_states = self.feed_forward.parallel_forward([hidden_states])[0]
+            router_logits = None
+
+        # TODO: fuse residual
+        hidden_states = residual + hidden_states.view(residual.shape)
+        outputs = ([hidden_states],)
+
+        return outputs
 
     def forward(
         self,
@@ -134,49 +213,33 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
     ]:
-        residual = hidden_states
+        if self.tensor_parallelism > 1:
+            layer_outputs = self.parallel_forward(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                chunk_causal_mask=chunk_causal_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                output_router_logits=output_router_logits,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                **kwargs,
+            )
 
-        hidden_states = self.input_layernorm(hidden_states)
+            hidden_states = layer_outputs[0][0]
 
-        # Transform q, k, v
-        # input layer norm is fused
-        query_states, key_states, value_states = self.qkv_proj(hidden_states)
+            final_outputs = (hidden_states,)
 
-        # use local attention mask for ROPE layers
-        if self.use_chunked_attention and chunk_causal_mask is not None:
-            attention_mask = chunk_causal_mask
+            if output_attentions:
+                attn_weights = (layer_outputs[1][0],)
+                final_outputs += (attn_weights,)
 
-        # Self Attention
-        attention_states, self_attn_weights = self.self_attn(
-            query_states=query_states,
-            key_states=key_states,
-            value_states=value_states,
-            position_embeddings=position_embeddings,
-            attention_mask=attention_mask,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            **kwargs,
-        )
-        hidden_states = residual + attention_states
+            if output_router_logits:
+                router_logits = (layer_outputs[2][0],)
+                final_outputs += (router_logits,)
 
-        # Fully Connected
-        residual = hidden_states
+            return final_outputs
 
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.feed_forward(hidden_states)
-        if self.is_moe_layer:
-            hidden_states, router_logits = hidden_states
-        else:
-            router_logits = None
-        hidden_states = residual + hidden_states.view(residual.shape)
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (self_attn_weights,)
-
-        if output_router_logits:
-            outputs += (router_logits,)
-
-        return outputs
+        raise ValueError("Only parallel inference is supported")

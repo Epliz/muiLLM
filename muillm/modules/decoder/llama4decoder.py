@@ -35,7 +35,6 @@ class MuiLlama4TextDecoderLayer(MuiModule):
 
         self.qkv_proj = qkv_proj
         # TODO: fuse this
-        self.input_layernorm = prev_module.input_layernorm
         self.post_attention_layernorm = prev_module.post_attention_layernorm
 
         self.layer_idx = prev_module.layer_idx
@@ -72,8 +71,10 @@ class MuiLlama4TextDecoderLayer(MuiModule):
             prev_attn.k_proj = None
             prev_attn.v_proj = None
 
+            input_layernorm = prev_module.input_layernorm
             qkv_proj = MuiMultiLinear.replace(
                 prev_modules=[prev_q, prev_k, prev_v],
+                prev_layernorm_module=input_layernorm,
                 engine_config=engine_config,
                 device=device,
             )
@@ -131,8 +132,6 @@ class MuiLlama4TextDecoderLayer(MuiModule):
     ]:
         residual = hidden_states
 
-        hidden_states = self.input_layernorm(hidden_states)
-
         # Transform q, k, v
         # input layer norm is fused
         query_states, key_states, value_states = self.qkv_proj(hidden_states)
@@ -142,7 +141,7 @@ class MuiLlama4TextDecoderLayer(MuiModule):
             attention_mask = chunk_causal_mask
 
         # Self Attention
-        attention_states, self_attn_weights = self.self_attn(
+        hidden_states, self_attn_weights = self.self_attn(
             query_states=query_states,
             key_states=key_states,
             value_states=value_states,
@@ -152,13 +151,14 @@ class MuiLlama4TextDecoderLayer(MuiModule):
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
+            residual=residual,
             **kwargs,
         )
-        hidden_states = residual + attention_states
 
         # Fully Connected
         residual = hidden_states
 
+        # TODO: fuse this
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.feed_forward(hidden_states)
         if self.is_moe_layer:

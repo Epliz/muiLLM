@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
 
 from muillm.engineconfig import MuiEngineConfig
@@ -32,7 +31,6 @@ from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint
 
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
@@ -42,10 +40,9 @@ from transformers.processing_utils import Unpack
 from transformers.utils import logging
 from transformers.models.llama4.modeling_llama4 import (
     Llama4TextAttention,
-    Llama4TextL2Norm,
 )
-from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 
+from muillm.modules.parallellinear import MuiParallelLinear
 from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
 
 logger = logging.get_logger(__name__)
@@ -58,14 +55,30 @@ class MuiParallelLlama4TextAttention(MuiModule):
         self,
         engine_config: MuiEngineConfig,
         prev_module: Llama4TextAttention,
+        o_proj: MuiParallelMultiLinear,
     ):
         super().__init__(engine_config=engine_config)
+
+        self.cpp_engine = engine_config.cpp_engine
+        self.comms = engine_config.comms
+        self.tensor_parallelism = engine_config.tensor_parallelism
+
         self.config = prev_module.config
         self.layer_idx = prev_module.layer_idx
+
         self.head_dim = prev_module.head_dim
+
         self.num_attention_heads = prev_module.num_attention_heads
+        self.num_tp_attention_heads = (
+            self.num_attention_heads // self.tensor_parallelism
+        )
+
         self.num_key_value_groups = prev_module.num_key_value_groups
         self.num_key_value_heads = prev_module.num_key_value_heads
+        self.num_tp_key_value_heads = (
+            self.num_key_value_heads // self.tensor_parallelism
+        )
+
         self.scaling = prev_module.scaling
         self.attn_scale = prev_module.attn_scale
         self.floor_scale = prev_module.floor_scale
@@ -73,7 +86,7 @@ class MuiParallelLlama4TextAttention(MuiModule):
         self.attention_dropout = prev_module.attention_dropout
         self.is_causal = True
         self.use_rope = prev_module.use_rope
-        self.o_proj = prev_module.o_proj
+        self.o_proj = o_proj
         if self.config.use_qk_norm and self.use_rope:
             self.qk_norm = prev_module.qk_norm
 
@@ -82,22 +95,45 @@ class MuiParallelLlama4TextAttention(MuiModule):
         prev_module: Llama4TextAttention, engine_config: MuiEngineConfig, device=None
     ) -> "MuiParallelLlama4TextAttention":
 
+        new_o_proj = MuiParallelLinear.replace(
+            prev_module.o_proj,
+            engine_config=engine_config,
+            device=device,
+        )
+
         return MuiParallelLlama4TextAttention(
             engine_config=engine_config,
             prev_module=prev_module,
+            o_proj=new_o_proj,
         )
 
-    def forward(
+    def parallel_forward(
         self,
-        query_states: torch.Tensor,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
+        query_states: Union[torch.Tensor, List[torch.Tensor]],
+        key_states: Union[torch.Tensor, List[torch.Tensor]],
+        value_states: Union[torch.Tensor, List[torch.Tensor]],
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        residual: Optional[torch.Tensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[
+        List[torch.Tensor], List[Optional[torch.Tensor]], Optional[Tuple[torch.Tensor]]
+    ]:
+        # unwrap if needed
+        if isinstance(query_states, list):
+            query_states = query_states[0]
+        else:
+            raise ValueError("sharding not implemented")
+        if isinstance(key_states, list):
+            key_states = key_states[0]
+        else:
+            raise ValueError("sharding not implemented")
+        if isinstance(value_states, list):
+            value_states = value_states[0]
+        else:
+            raise ValueError("sharding not implemented")
 
         bsz, q_len, _ = query_states.size()
 
@@ -108,13 +144,13 @@ class MuiParallelLlama4TextAttention(MuiModule):
         ):
             # as q_len == 1, we can avoid the transposes
             query_states = query_states.view(
-                bsz, self.num_attention_heads, q_len, self.head_dim
+                bsz, self.num_tp_attention_heads, q_len, self.head_dim
             )
             key_states = key_states.view(
-                bsz, self.num_key_value_heads, q_len, self.head_dim
+                bsz, self.num_tp_key_value_heads, q_len, self.head_dim
             )
             value_states = value_states.view(
-                bsz, self.num_key_value_heads, q_len, self.head_dim
+                bsz, self.num_tp_key_value_heads, q_len, self.head_dim
             )
 
             if (
@@ -163,13 +199,13 @@ class MuiParallelLlama4TextAttention(MuiModule):
             attn_weights = None
         else:
             query_states = query_states.view(
-                bsz, q_len, self.num_attention_heads, self.head_dim
+                bsz, q_len, self.num_tp_attention_heads, self.head_dim
             )
             key_states = key_states.view(
-                bsz, q_len, self.num_key_value_heads, self.head_dim
+                bsz, q_len, self.num_tp_key_value_heads, self.head_dim
             )
             value_states = value_states.view(
-                bsz, q_len, self.num_key_value_heads, self.head_dim
+                bsz, q_len, self.num_tp_key_value_heads, self.head_dim
             )
 
             if (
@@ -231,5 +267,38 @@ class MuiParallelLlama4TextAttention(MuiModule):
             )
 
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        return attn_output, attn_weights
+        attn_output = self.o_proj.parallel_forward(
+            [attn_output],
+            residual=residual,
+        )[0]
+
+        return [attn_output], [attn_weights]
+
+    def forward(
+        self,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        residual: Optional[torch.Tensor] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> torch.Tensor:
+        if self.tensor_parallelism > 1:
+            attn_outputs, attn_weights = self.parallel_forward(
+                query_states=query_states,
+                key_states=key_states,
+                value_states=value_states,
+                position_embeddings=position_embeddings,
+                attention_mask=attention_mask,
+                past_key_value=past_key_value,
+                cache_position=cache_position,
+                residual=residual,
+                **kwargs,
+            )
+
+            return attn_outputs[0], attn_weights[0]
+
+        raise ValueError("Only parallel inference is supported")
