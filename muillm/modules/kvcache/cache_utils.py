@@ -8,6 +8,33 @@ import muillm_ext
 import torch
 
 
+def _set_sharded_attention_config(
+    config: PretrainedConfig, tensor_parallelism: int
+) -> None:
+    # hack to make the cache be the right size if we use tensor parallelism
+    if config.num_key_value_heads is not None:
+        config.num_key_value_heads = config.num_key_value_heads // tensor_parallelism
+    if config.num_attention_heads is not None:
+        config.num_attention_heads = config.num_attention_heads // tensor_parallelism
+    if not hasattr(config, "head_dim"):
+        # for some models, HF compute the head_dim as hidden_size / num_attention_heads
+        # but we lower num_attention_heads, so we need to compensate for that otherwise
+        # the head dim is wrong
+        config.hidden_size = config.hidden_size // tensor_parallelism
+
+
+def _reset_sharded_attention_config(
+    config: PretrainedConfig, tensor_parallelism: int
+) -> None:
+    # set back the right values in the config
+    if config.num_key_value_heads is not None:
+        config.num_key_value_heads = config.num_key_value_heads * tensor_parallelism
+    if config.num_attention_heads is not None:
+        config.num_attention_heads = config.num_attention_heads * tensor_parallelism
+    if not hasattr(config, "head_dim"):
+        config.hidden_size = config.hidden_size * tensor_parallelism
+
+
 class MuiCache:
     pass
 
@@ -79,19 +106,7 @@ class MuiStaticCache(StaticCache, MuiCache):
     ) -> None:
 
         # hack to make the cache be the right size if we use tensor parallelism
-        if config.num_key_value_heads is not None:
-            config.num_key_value_heads = (
-                config.num_key_value_heads // tensor_parallelism
-            )
-        if config.num_attention_heads is not None:
-            config.num_attention_heads = (
-                config.num_attention_heads // tensor_parallelism
-            )
-        if not hasattr(config, "head_dim"):
-            # for some models, HF compute the head_dim as hidden_size / num_attention_heads
-            # but we lower num_attention_heads, so we need to compensate for that otherwise
-            # the head dim is wrong
-            config.hidden_size = config.hidden_size // tensor_parallelism
+        _set_sharded_attention_config(config, tensor_parallelism)
 
         super().__init__(
             config=config,
@@ -102,12 +117,7 @@ class MuiStaticCache(StaticCache, MuiCache):
         )
 
         # set back the right values in the config
-        if config.num_key_value_heads is not None:
-            config.num_key_value_heads = config.num_key_value_heads * tensor_parallelism
-        if config.num_attention_heads is not None:
-            config.num_attention_heads = config.num_attention_heads * tensor_parallelism
-        if not hasattr(config, "head_dim"):
-            config.hidden_size = config.hidden_size * tensor_parallelism
+        _reset_sharded_attention_config(config, tensor_parallelism)
 
         self._seen_tokens = 0
 
@@ -250,8 +260,11 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
         device: Union[torch.device, str, None] = None,
         dtype: torch.dtype = torch.bfloat16,
         layer_device_map: Optional[Dict[int, Union[str, torch.device, int]]] = None,
+        tensor_parallelism: int = 1,
     ) -> None:
-        # TODO: support for tensor parallelism
+
+        # hack to make the cache be the right size if we use tensor parallelism
+        _set_sharded_attention_config(config, tensor_parallelism)
 
         super().__init__(
             config=config,
@@ -261,6 +274,9 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
             max_batch_size=max_batch_size,
             layer_device_map=layer_device_map,
         )
+
+        # set back the right values in the config
+        _reset_sharded_attention_config(config, tensor_parallelism)
 
         # _seen_tokens is incremented in the update function
         self._seen_tokens = 0
@@ -455,7 +471,7 @@ def create_hybrid_chunked_cache(
 ) -> MuiStaticCache:
     # to avoid frequent re-allocations of the cache, we use a power of 2 schedule
     max_cache_len = _next_pow2(seq_len)
-    # tensor_parallelism = engine_config.tensor_parallelism
+    tensor_parallelism = engine_config.tensor_parallelism
 
     return MuiHybridChunkedCache(
         engine_config=engine_config,
@@ -463,7 +479,7 @@ def create_hybrid_chunked_cache(
         max_cache_len=max_cache_len,
         device=device,
         dtype=dtype,
-        # tensor_parallelism=tensor_parallelism,
+        tensor_parallelism=tensor_parallelism,
         max_batch_size=max_batch_size,
     )
 
