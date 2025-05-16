@@ -57,6 +57,27 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
+def apply_temperature_tuning(
+    query_states: torch.Tensor,
+    cache_position: torch.LongTensor,
+    attn_scale: float,
+    floor_scale: float,
+) -> torch.Tensor:
+    bsz, num_attention_heads, q_len, head_dim = query_states.shape
+
+    attn_scales = (
+        torch.log(torch.floor((cache_position.float() + 1.0) / floor_scale) + 1.0)
+        * attn_scale
+        + 1.0
+    )
+    attn_scales = attn_scales.view((1, 1, q_len, 1)).expand(
+        (bsz, 1, q_len, 1)
+    )  # batch size > 1
+    query_states = (query_states * attn_scales).to(query_states.dtype)
+
+    return query_states
+
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -181,18 +202,12 @@ class MuiLlama4TextAttention(MuiModule):
 
             # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
             if self.attn_temperature_tuning and not self.use_rope:
-                attn_scales = (
-                    torch.log(
-                        torch.floor((cache_position.float() + 1.0) / self.floor_scale)
-                        + 1.0
-                    )
-                    * self.attn_scale
-                    + 1.0
+                query_states = apply_temperature_tuning(
+                    query_states,
+                    cache_position,
+                    self.attn_scale,
+                    self.floor_scale,
                 )
-                attn_scales = attn_scales.view((1, 1, q_len, 1)).expand(
-                    (bsz, 1, q_len, 1)
-                )  # batch size > 1
-                query_states = (query_states * attn_scales).to(query_states.dtype)
 
             query_states = query_states
             key_states = key_states
@@ -246,18 +261,12 @@ class MuiLlama4TextAttention(MuiModule):
 
             # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
             if self.attn_temperature_tuning and not self.use_rope:
-                attn_scales = (
-                    torch.log(
-                        torch.floor((cache_position.float() + 1.0) / self.floor_scale)
-                        + 1.0
-                    )
-                    * self.attn_scale
-                    + 1.0
+                query_states = apply_temperature_tuning(
+                    query_states,
+                    cache_position,
+                    self.attn_scale,
+                    self.floor_scale,
                 )
-                attn_scales = attn_scales.view((1, 1, q_len, 1)).expand(
-                    (bsz, 1, q_len, 1)
-                )  # batch size > 1
-                query_states = (query_states * attn_scales).to(query_states.dtype)
 
             if past_key_value is not None:
                 # sin and cos are specific to RoPE models; cache_position needed for the static cache
