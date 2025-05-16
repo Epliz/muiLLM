@@ -22,6 +22,12 @@ from muillm.modules.attention.causaltransformerdecoding import (
     mui_causally_decode,
     mui_causally_decode_masked,
 )
+from muillm.modules.attention.llama4attention import (
+    apply_rotary_emb,
+    apply_temperature_tuning,
+    eager_attention_forward,
+)
+
 from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
@@ -43,62 +49,6 @@ from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
 
 logger = logging.get_logger(__name__)
-
-
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    xq_out = torch.view_as_real(xq_ * freqs_cis[:, :, None, :]).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis[:, :, None, :]).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
-
-
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, num_key_value_heads, n_rep, slen, head_dim
-    )
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-
-def eager_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    scaling: float,
-    dropout: float = 0.0,
-    **kwargs,
-):
-
-    key_states = repeat_kv(key, module.num_key_value_groups)
-    value_states = repeat_kv(value, module.num_key_value_groups)
-    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) / math.sqrt(
-        module.head_dim
-    )
-    if attention_mask is not None:
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-        attn_weights = attn_weights + causal_mask
-
-    attn_weights = nn.functional.softmax(attn_weights.float(), dim=-1).to(query.dtype)
-    attn_weights = nn.functional.dropout(
-        attn_weights, p=dropout, training=module.training
-    )
-    attn_output = torch.matmul(attn_weights, value_states)
-    attn_output = attn_output.transpose(1, 2).contiguous()
-
-    return attn_output, attn_weights
 
 
 class MuiParallelLlama4TextAttention(MuiModule):
@@ -183,18 +133,12 @@ class MuiParallelLlama4TextAttention(MuiModule):
 
             # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
             if self.attn_temperature_tuning and not self.use_rope:
-                attn_scales = (
-                    torch.log(
-                        torch.floor((cache_position.float() + 1.0) / self.floor_scale)
-                        + 1.0
-                    )
-                    * self.attn_scale
-                    + 1.0
+                query_states = apply_temperature_tuning(
+                    query_states,
+                    cache_position,
+                    self.attn_scale,
+                    self.floor_scale,
                 )
-                attn_scales = attn_scales.view((1, 1, q_len, 1)).expand(
-                    (bsz, 1, q_len, 1)
-                )  # batch size > 1
-                query_states = (query_states * attn_scales).to(query_states.dtype)
 
             query_states = query_states
             key_states = key_states
@@ -248,18 +192,12 @@ class MuiParallelLlama4TextAttention(MuiModule):
 
             # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
             if self.attn_temperature_tuning and not self.use_rope:
-                attn_scales = (
-                    torch.log(
-                        torch.floor((cache_position.float() + 1.0) / self.floor_scale)
-                        + 1.0
-                    )
-                    * self.attn_scale
-                    + 1.0
+                query_states = apply_temperature_tuning(
+                    query_states,
+                    cache_position,
+                    self.attn_scale,
+                    self.floor_scale,
                 )
-                attn_scales = attn_scales.view((1, 1, q_len, 1)).expand(
-                    (bsz, 1, q_len, 1)
-                )  # batch size > 1
-                query_states = (query_states * attn_scales).to(query_states.dtype)
 
             if past_key_value is not None:
                 # sin and cos are specific to RoPE models; cache_position needed for the static cache
