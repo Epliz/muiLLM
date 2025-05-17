@@ -208,6 +208,10 @@ class MuiParallelLlama4TextAttention(MuiModule):
                 bsz, q_len, self.num_tp_key_value_heads, self.head_dim
             )
 
+            query_states = query_states.transpose(1, 2)
+            key_states = key_states.transpose(1, 2)
+            value_states = value_states.transpose(1, 2)
+
             if (
                 self.use_rope
             ):  # the 16E model skips rope for long context on certain layers
@@ -221,10 +225,6 @@ class MuiParallelLlama4TextAttention(MuiModule):
             if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
                 query_states = self.qk_norm(query_states)
                 key_states = self.qk_norm(key_states)
-
-            query_states = query_states.transpose(1, 2)
-            key_states = key_states.transpose(1, 2)
-            value_states = value_states.transpose(1, 2)
 
             # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
             if self.attn_temperature_tuning and not self.use_rope:

@@ -41,4 +41,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> muillm_rope_forward_static_cache(
     uint64_t seen_tokens
 );
 
+// out: query, key
+// Rotary embedding (complex multiply, like apply_rotary_emb)
+std::tuple<at::Tensor, at::Tensor> muillm_complex_rope_forward_no_cache(
+    torch::Tensor& q_in,
+    torch::Tensor& k_in,
+    torch::Tensor& position_embeds
+);
+
 #endif /* __MUILLM_ROTARY_KERNELS_H__ */

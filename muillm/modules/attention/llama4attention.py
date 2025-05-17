@@ -22,6 +22,7 @@ from muillm.modules.attention.causaltransformerdecoding import (
     mui_causally_decode,
     mui_causally_decode_masked,
 )
+from muillm.modules.attention.rotaryembedding import _MuiComplexRotaryNoCache
 from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
@@ -50,11 +51,19 @@ def apply_rotary_emb(
     xk: torch.Tensor,
     freqs_cis: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    xq_out = torch.view_as_real(xq_ * freqs_cis[:, :, None, :]).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis[:, :, None, :]).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
+    if (xq.dtype == torch.float16) and (xq.is_cuda):
+        # can dispatch to the custom kernel
+        return _MuiComplexRotaryNoCache.apply(
+            xq,
+            xk,
+            freqs_cis,
+        )
+    else:
+        xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+        xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+        xq_out = torch.view_as_real(xq_ * freqs_cis[:, None, :, :]).flatten(3)
+        xk_out = torch.view_as_real(xk_ * freqs_cis[:, None, :, :]).flatten(3)
+        return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
 def apply_temperature_tuning(
@@ -242,6 +251,10 @@ class MuiLlama4TextAttention(MuiModule):
                 bsz, q_len, self.num_key_value_heads, self.head_dim
             )
 
+            query_states = query_states.transpose(1, 2)
+            key_states = key_states.transpose(1, 2)
+            value_states = value_states.transpose(1, 2)
+
             if (
                 self.use_rope
             ):  # the 16E model skips rope for long context on certain layers
@@ -255,10 +268,6 @@ class MuiLlama4TextAttention(MuiModule):
             if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
                 query_states = self.qk_norm(query_states)
                 key_states = self.qk_norm(key_states)
-
-            query_states = query_states.transpose(1, 2)
-            key_states = key_states.transpose(1, 2)
-            value_states = value_states.transpose(1, 2)
 
             # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
             if self.attn_temperature_tuning and not self.use_rope:
