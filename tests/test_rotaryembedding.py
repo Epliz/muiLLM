@@ -1,5 +1,6 @@
-from typing import List
+from typing import List, Tuple
 from muillm.engineconfig import MuiEngineConfig
+from muillm.modules.attention.llama4attention import apply_rotary_emb
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
 import torch
@@ -169,6 +170,41 @@ def test_basic_llama4_rotary():
     tensors_equal(z, z_m)
 
 
-# TODO tests with bias and no bias
-# TODO tests with input norm
+# copied from Llama4
+def ref_apply_rotary_emb(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    xq_out = torch.view_as_real(xq_ * freqs_cis[:, None, :, :]).flatten(3)
+    xk_out = torch.view_as_real(xk_ * freqs_cis[:, None, :, :]).flatten(3)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
+def test_apply_rotary_emb():
+    device = "cuda"
+    dtype = torch.float16
+
+    T = 5
+    B = 1
+    H = 128
+    num_q_heads = 5
+    num_k_heads = 10
+
+    # x is just used for the type and device
+    xq = torch.randn((B, num_q_heads, T, H), dtype=dtype, device=device)
+    xk = torch.randn((B, num_k_heads, T, H), dtype=dtype, device=device)
+    freqs_cis = torch.randn((B, T, H), dtype=dtype, device=device)
+    freqs_cis = torch.view_as_complex(freqs_cis.reshape(*freqs_cis.shape[:-1], -1, 2))
+
+    xq_out, xk_out = ref_apply_rotary_emb(xq, xk, freqs_cis)
+
+    xq_out_m, xk_out_m = apply_rotary_emb(xq, xk, freqs_cis)
+
+    tensors_equal(xq_out, xq_out_m)
+    tensors_equal(xk_out, xk_out_m)
+
+
 # TODO tests with other data types

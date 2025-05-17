@@ -3,6 +3,7 @@
 #include <ATen/cuda/CUDAContext.h>
 
 #include <cuda_fp16.h>
+#include <cuComplex.h>
 
 #include <algorithm>
 
@@ -65,7 +66,6 @@ void __global__ apply_rope_kernel_no_cache(
   unsigned k_in_batch_stride,
   unsigned k_in_head_stride,
   unsigned k_in_tok_stride,
-  // v strides?
   //
   muillm_rotary_cache_layout_t cache_layout
 ) {
@@ -942,4 +942,198 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> muillm_rope_forward_static_cache(
   auto value_states = v_cache.narrow(/* dim */ 2, /* start */ 0, /* length */ seen_tokens);
 
   return std::make_tuple(q_out, key_states, value_states);
+}
+
+__global__ void apply_complex_rope_kernel_no_cache(
+  const half* __restrict__ q_in, // shape [B, num_q_heads, T, embed_dim]
+  const half* __restrict__ k_in, // shape [B, num_k_heads, T, embed_dim]
+  const half* __restrict__ position_embeds, // shape [B, T, embed_dim / 2, 2]
+  half* __restrict__ q_out, // shape [B, num_q_heads, T, embed_dim]
+  half* __restrict__ k_out, // shape [B, num_k_heads, T, embed_dim]
+  // tensor dimension sizes
+  unsigned B, // batch size
+  unsigned T, // num new tokens
+  unsigned num_q_heads, // number of heads for q
+  unsigned num_k_heads, // number of heads for k
+  unsigned embed_dim, // half of the size of embeddings in each head
+  // q strides
+  unsigned q_in_batch_stride,
+  unsigned q_in_head_stride,
+  unsigned q_in_tok_stride,
+  // k strides
+  unsigned k_in_batch_stride,
+  unsigned k_in_head_stride,
+  unsigned k_in_tok_stride
+) {
+    // one block does one head of a new token
+    unsigned head_idx = blockIdx.x;
+    unsigned tok_idx = blockIdx.y; // should be launched with max(PREV_T, T)
+    unsigned batch_idx = blockIdx.z;
+    unsigned pos_idx = batch_idx * T + tok_idx;
+
+    // determine if we are supposed to transform an embedding from q or k,
+    // and which head
+    const half* __restrict__ embeds_in;
+    half* __restrict__ embeds_out;
+    unsigned num_heads;
+
+    // strides
+    unsigned batch_stride;
+    unsigned head_stride;
+    unsigned tok_stride;
+
+    // TODO: !!!!!!!!!!!!!!!!
+    // q and v might not have the same number of heads, which causes issues due to how we launch the kernel
+    // if we apply rope to q, we copy the v cache with it
+    // launch with num_q_heads + num_k_heads + num_v_heads?
+    if (head_idx < num_q_heads) {
+        embeds_in = q_in;
+        embeds_out = q_out;
+        num_heads = num_q_heads;
+  
+        batch_stride = q_in_batch_stride;
+        head_stride = q_in_head_stride;
+        tok_stride = q_in_tok_stride;
+    } else {
+        embeds_in = k_in;
+        embeds_out = k_out;
+        num_heads = num_k_heads;
+
+        batch_stride = k_in_batch_stride;
+        head_stride = k_in_head_stride;
+        tok_stride = k_in_tok_stride;
+
+        head_idx -= num_q_heads;
+    }
+
+    // index for where to read into the cos/sin caches
+    // (try to trigger the read before the cache copy - need to check if done by the compiler)
+    uint64_t position_id;
+
+
+    // ROTARY_CACHE_BTE_LAYOUT
+    position_id = tok_idx < T ? pos_idx : 0;
+
+    // realign the pointer to where we are supposed to write out if needed
+
+    // realign the cos/sin caches to the position
+    position_embeds = &position_embeds[position_id * embed_dim];
+
+
+    // realign embeds_in and embeds_out
+    // q/k might be strided, but embedding dimension stride needs to be 1
+    unsigned embed_in_idx = batch_idx * batch_stride + head_idx * head_stride + tok_idx * tok_stride;
+    unsigned embed_out_idx = ((batch_idx * num_heads + head_idx)* T + tok_idx) * embed_dim + 0;
+    embeds_in = &embeds_in[embed_in_idx];
+    embeds_out = &embeds_out[embed_out_idx];
+
+    unsigned d = 2 * threadIdx.x;
+    for (; d + 1 < embed_dim; d += 2 * THREADS_PER_BLOCK) {
+        half2 cos_sin = *(const half2*)addr(position_embeds, d);
+        half cos = cos_sin.x;
+        half sin = cos_sin.y;
+
+        half2 embed = *(const half2*)addr(embeds_in, d);
+        half real_embed = embed.x;
+        half imag_embed = embed.y;
+
+        half real_rot_embed = __hfma(real_embed, cos, __hneg(__hmul(imag_embed, sin)));
+        half imag_rot_embed = __hfma(real_embed, sin, __hmul(imag_embed, cos));
+    
+        half2 rot_embed = make_half2(real_rot_embed, imag_rot_embed);
+
+        *(half2*)addr(embeds_out, d) = rot_embed;
+    }
+}
+
+std::tuple<at::Tensor, at::Tensor> muillm_complex_rope_forward_no_cache(
+  torch::Tensor& q_in, // shape [B, num_q_heads, T, embed_dim]
+  torch::Tensor& k_in, // shape [B, num_k_heads, T, embed_dim]
+  torch::Tensor& position_embeds // shape [B, T, embed_dim / 2, (2)]
+) {
+  CHECK_INPUT(position_embeds);
+  // q, k are expected to not be contiguous
+  // (due to the fact that we compute them packed as qkv and transposition afterwards)
+  CHECK_CUDA(q_in);
+  CHECK_CUDA(k_in);
+
+  auto device = q_in.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  auto dtype = torch::kFloat16;
+  auto output_options = at::TensorOptions()
+                            .dtype(dtype)
+                            .layout(at::kStrided)
+                            .device(device) // same output device as inputs
+                            .requires_grad(false);
+
+  auto cache_sizes = position_embeds.sizes().vec();
+
+  auto q_sizes = q_in.sizes().vec();
+  auto q_strides = q_in.strides().vec();
+  auto q_out = torch::empty(q_sizes, output_options);
+
+  auto k_sizes = k_in.sizes().vec();
+  auto k_strides = k_in.strides().vec();
+  auto k_out = torch::empty(k_sizes, output_options);
+
+  unsigned B = q_sizes[0];
+  unsigned T = q_sizes[2];
+  unsigned num_q_heads = q_sizes[1];
+  unsigned num_k_heads = k_sizes[1];
+  unsigned embed_dim = q_sizes[3];
+
+  // q strides
+  unsigned q_in_batch_stride = q_strides[0];
+  unsigned q_in_head_stride = q_strides[1];
+  unsigned q_in_tok_stride = q_strides[2];
+  // k strides
+  unsigned k_in_batch_stride = k_strides[0];
+  unsigned k_in_head_stride = k_strides[1];
+  unsigned k_in_tok_stride = k_strides[2];
+
+  muillm_rotary_cache_layout_t cache_layout;
+
+  auto cache_dim = cache_sizes.size();
+  if (cache_dim == 2) {
+    cache_layout = ROTARY_CACHE_SE_LAYOUT;
+  } else if (cache_dim == 3) {
+    cache_layout = ROTARY_CACHE_BTE_LAYOUT;
+  } else {
+    TORCH_CHECK(false, "Unknown rotary cache layout");
+  }
+
+  if (cache_layout != ROTARY_CACHE_BTE_LAYOUT) {
+    // we only support complex ROPE with BTE layout
+    TORCH_CHECK(false, "Complex ROPE only supported with BTE layout");
+  }
+
+  const dim3 threads_per_blocks = dim3(THREADS_PER_BLOCK);
+
+  // expected block dimensions: [x=num_q_heads+num_k_heads, y=max(PREV_T, T), z=B]
+  const dim3 num_blocks = dim3(num_q_heads + num_k_heads, T, B);
+
+  apply_complex_rope_kernel_no_cache<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    (const half*)q_in.data_ptr(),
+    (const half*)k_in.data_ptr(),
+    (const half*)position_embeds.data_ptr(),
+    (half*)q_out.data_ptr(),
+    (half*)k_out.data_ptr(),
+    // tensor dimension sizes
+    B,
+    T,
+    num_q_heads,
+    num_k_heads,
+    embed_dim,
+    // q strides
+    q_in_batch_stride,
+    q_in_head_stride,
+    q_in_tok_stride,
+    // k strides
+    k_in_batch_stride,
+    k_in_head_stride,
+    k_in_tok_stride
+  );
+
+  return std::make_tuple(q_out, k_out);
 }

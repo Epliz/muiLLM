@@ -79,6 +79,20 @@ class _MuiRotaryNoCache(torch.autograd.Function):
         raise NotImplementedError("rotary backward not implemented")
 
 
+class _MuiComplexRotaryNoCache(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, q, k, position_embeds):
+        output = muillm_ext.muillm_complex_rope_forward_no_cache(q, k, position_embeds)
+
+        ctx.save_for_backward(q, k, position_embeds)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("complex rotary backward not implemented")
+
+
 # Generic for all Mui cache modules
 class _MuiRotaryCacheModule(torch.autograd.Function):
     @staticmethod
