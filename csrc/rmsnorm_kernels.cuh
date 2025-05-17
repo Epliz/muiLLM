@@ -8,4 +8,4 @@ at::Tensor muillm_rmsnorm_forward(
     torch::Tensor inputs,
     float epsilon);
 
-#endif /**/
+#endif /* __MUILLM_RMSNORM_KERNELS_H__ */
