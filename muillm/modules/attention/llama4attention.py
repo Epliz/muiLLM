@@ -23,6 +23,7 @@ from muillm.modules.attention.causaltransformerdecoding import (
     mui_causally_decode_masked,
 )
 from muillm.modules.attention.rotaryembedding import _MuiComplexRotaryNoCache
+from muillm.modules.attention.temperaturetuning import _MuiTemperatureTuning
 from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
@@ -72,19 +73,28 @@ def apply_temperature_tuning(
     attn_scale: float,
     floor_scale: float,
 ) -> torch.Tensor:
-    bsz, num_attention_heads, q_len, head_dim = query_states.shape
+    if (query_states.dtype == torch.float16) and (query_states.is_cuda):
+        # can dispatch to the custom kernel
+        return _MuiTemperatureTuning.apply(
+            query_states,
+            cache_position,
+            attn_scale,
+            floor_scale,
+        )
+    else:
+        bsz, num_attention_heads, q_len, head_dim = query_states.shape
 
-    attn_scales = (
-        torch.log(torch.floor((cache_position.float() + 1.0) / floor_scale) + 1.0)
-        * attn_scale
-        + 1.0
-    )
-    attn_scales = attn_scales.view((1, 1, q_len, 1)).expand(
-        (bsz, 1, q_len, 1)
-    )  # batch size > 1
-    query_states = (query_states * attn_scales).to(query_states.dtype)
+        attn_scales = (
+            torch.log(torch.floor((cache_position.float() + 1.0) / floor_scale) + 1.0)
+            * attn_scale
+            + 1.0
+        )
+        attn_scales = attn_scales.view((1, 1, q_len, 1)).expand(
+            (bsz, 1, q_len, 1)
+        )  # batch size > 1
+        query_states = (query_states * attn_scales).to(query_states.dtype)
 
-    return query_states
+        return query_states
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:

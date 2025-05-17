@@ -23,7 +23,6 @@ muillm_engine_ptr muillm_engine_init_trampoline(
 
 #include "int8_linear_kernels.cuh"
 
-
 at::Tensor muillm_int8_dequantize_forward(
     torch::Tensor weights,
     torch::Tensor scales_min_vals,
@@ -75,6 +74,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
 #include "rmsnorm_kernels.cuh"
 #include "reduce_kernels.cuh"
 #include "rotary_kernels.h"
+#include "temperature_tuning_kernels.cuh"
 
 #include "causal_transformer_decoding.cuh"
 
@@ -256,6 +256,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_rotary_embedding_module_init", &muillm_rotary_embedding_module_init_trampoline, "muillm rotary embedding module init", py::arg("engine"), py::arg("layer_idx"), py::arg("cos_cached"), py::arg("sin_cached"));
   m.def("muillm_rotary_embedding_module_deinit", &muillm_rotary_embedding_module_deinit_trampoline, "muillm rotary embedding module deinit", py::arg("module"));
   m.def("muillm_rotary_embedding_module_forward", &muillm_rotary_embedding_module_forward_trampoline, "muillm rotary embedding module forward", py::arg("module"), py::arg("cache"), py::arg("q_in"), py::arg("k_in"), py::arg("v_in"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+
+  // temperature tuning
+  m.def("muillm_apply_temperature_tuning", &muillm_apply_temperature_tuning, "muillm apply temperature tuning",
+        py::arg("query_states"), py::arg("cache_position"), py::arg("attn_scale"), py::arg("floor_scale"));
 
   // parallel attention
   pybind11::class_<muillm_parallel_attention_module_ptr_t> cl_parallel_attention_module(m, "muillm_parallel_attention_module_ptr");

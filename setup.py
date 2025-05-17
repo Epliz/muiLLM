@@ -58,6 +58,7 @@ setup(
                 "csrc/int8_gateup_dequantization_kernel.cu",
                 "csrc/l2norm_kernels.cu",
                 "csrc/rmsnorm_kernels.cu",
+                "csrc/temperature_tuning_kernels.cu",
                 "csrc/rotary_kernels.cu",
                 "csrc/causal_transformer_decoding.cu",
                 "csrc/half_fused_decoding.cu",
