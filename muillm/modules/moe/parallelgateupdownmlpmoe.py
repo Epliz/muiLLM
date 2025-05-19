@@ -1,51 +1,100 @@
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
+from muillm.comms.communicator import MuiCommunicator
 from muillm.engineconfig import MuiEngineConfig
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
 
-from muillm.modules.moe.gateupdownmlpmoe import _MuiGateUpDownMoe
-from muillm.modules.parallelgateupdownmlp import MuiParallelGateUpDownMLP
 from muillm.modules.parallellinear import MuiParallelLinear
 from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
 import torch
 import torch.nn as nn
 
-from transformers.models.llama4.modeling_llama4 import Llama4TextExperts, Llama4TextMoe
+from transformers.models.llama4.modeling_llama4 import (
+    Llama4TextMoe,
+    Llama4TextRMSNorm,
+)
+
+from muillm.modules.rmsnorm import _MuiRMSNorm, MuiRMSNorm
+
+import muillm_ext
+
+from muillm.modules.topk import topk_sigmoid
 
 
-class MuiParallelExperts(MuiModule):
+class _MuiParallelGateUpDownMoe(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        module,
+        inputs,
+        residual,
+        reduce=True,
+    ):
+
+        output = muillm_ext.muillm_parallel_gateupdownmlpmoe_module_forward(
+            module, inputs, residual, reduce
+        )
+
+        ctx.save_for_backward(inputs)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("Gate/Up Down MoE MLP backward is not implemented")
+
+
+class MuiParallelGateUpDownMLPMoe(MuiModule):
     def __init__(
         self,
         engine_config: MuiEngineConfig,
-        num_experts: int,
+        num_dynamic_experts: int,
+        top_k: int,
         hidden_size: int,
         intermediate_size: int,
         activation_function: nn.Module,
+        normalize: bool = False,
         device=None,
         dtype=None,
     ):
         super().__init__(engine_config=engine_config)
 
+        self.cpp_engine = engine_config.cpp_engine
         self.comms = engine_config.comms
         self.tensor_parallelism = engine_config.tensor_parallelism
 
-        self.num_experts = num_experts
+        self.top_k = top_k
+        self.hidden_dim = hidden_size
         self.intermediate_size = intermediate_size
-        self.hidden_size = hidden_size
-        self.expert_dim = intermediate_size
+        self.activation_function = activation_function
 
+        self.num_shared_experts = 1
+        self.num_dynamic_experts = num_dynamic_experts
+        self.num_experts = self.num_shared_experts + self.num_dynamic_experts
+
+        # We fuse the layernorm into the router
+        # We do not shard the router, as it is small
+        self.router = MuiLinear(
+            engine_config=engine_config,
+            in_features=hidden_size,
+            out_features=self.num_dynamic_experts,
+            bias=False,
+            normalize=normalize,
+            device=device,
+            dtype=dtype,
+        )
+        # we don't want the router to be sharded, so mark as not a target for further
+        # replacements
+        self.router._muillm_no_further_replacement = True
+
+        # BEGIN: MuiParallelExperts logic inlined here
+        self.expert_dim = intermediate_size
         self.tp_expert_dim = self.expert_dim // self.tensor_parallelism
 
-        # use the storage (num_experts, out_features, in_features)
-        # which is better for the custom kernels
-
-        # We shard the gate and up projections by row so that we don't have to
-        # do an all reduce before the down projection
-
         self.gate_projs = MuiParallelMultiLinear(
-            engine_config=self.engine_config,
-            in_features=self.hidden_size,
+            engine_config=engine_config,
+            in_features=hidden_size,
             out_features=self.num_experts * [self.expert_dim],
             bias=False,
             sharding_dim=0,
@@ -54,8 +103,8 @@ class MuiParallelExperts(MuiModule):
         )
 
         self.up_projs = MuiParallelMultiLinear(
-            engine_config=self.engine_config,
-            in_features=self.hidden_size,
+            engine_config=engine_config,
+            in_features=hidden_size,
             out_features=self.num_experts * [self.expert_dim],
             bias=False,
             sharding_dim=0,
@@ -64,18 +113,17 @@ class MuiParallelExperts(MuiModule):
         )
 
         self.down_projs = MuiParallelMultiLinear(
-            engine_config=self.engine_config,
+            engine_config=engine_config,
             in_features=self.expert_dim,
-            out_features=self.num_experts * [self.hidden_size],
+            out_features=self.num_experts * [hidden_size],
             bias=False,
             sharding_dim=1,
             device=device,
             dtype=dtype,
         )
 
-        self.activation_function = activation_function
+        self.cpp_module = None
 
-        # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
     def _check_dispatchable(self):
@@ -85,46 +133,84 @@ class MuiParallelExperts(MuiModule):
         self.dispatchable = dispatchable_device and dispatchable_type
 
     def finalize_init(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_gateupdownmlpmoe_module_deinit(self.cpp_module)
+
+        norm_weights = (
+            self.router.norm_weights[0]
+            if self.router.norm_weights is not None
+            else None
+        )
+
+        # make sure the router is initialized
+        self.router.finalize_init()
+
+        self.cpp_module = muillm_ext.muillm_parallel_gateupdownmlpmoe_module_init(
+            self.cpp_engine,
+            self.comms.comms,
+            self.router.cpp_module,
+            self.num_shared_experts,
+            self.num_dynamic_experts,
+            self.top_k,
+            norm_weights,
+            self.gate_projs.linear.weights[0],
+            self.up_projs.linear.weights[0],
+            self.down_projs.linear.weights[0],
+            self.router.variance_epsilon,
+        )
+
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
+    def finalize_deinit(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_gateupdownmlpmoe_module_deinit(self.cpp_module)
+            self.cpp_module = None
+
     @staticmethod
     def replace(
-        prev_module: Llama4TextExperts,
+        prev_module: Llama4TextMoe,
         engine_config: MuiEngineConfig,
+        prev_layernorm_module: Union[MuiRMSNorm, Llama4TextRMSNorm] = None,
         device=None,
-    ) -> "MuiParallelExperts":
+    ) -> "MuiParallelGateUpDownMLPMoe":
 
         if device is None:
             raise ValueError("device was None")
 
-        device = prev_module.gate_up_proj.device if device is None else device
-        dtype = prev_module.gate_up_proj.dtype
+        device = prev_module.router.weight.device if device is None else device
+        dtype = prev_module.router.weight.dtype
 
-        # put on the end device to accelerate things
-        # (ok as we are replacing the module entirely so we can change its device)
-        if device is not None:
-            prev_module = prev_module.to(device)
+        num_dynamic_experts = prev_module.num_experts
+        top_k = prev_module.top_k
 
-        num_experts = prev_module.num_experts
-        hidden_size = prev_module.hidden_size
-        intermediate_size = prev_module.intermediate_size
-        activation_function = prev_module.act_fn
+        # the shared expert and the MoE experts have the same shapes
+        hidden_size = prev_module.shared_expert.gate_proj.in_features
+        intermediate_size = prev_module.shared_expert.gate_proj.out_features
 
-        new_module = MuiParallelExperts(
+        activation_function = prev_module.experts.act_fn
+
+        new_module = MuiParallelGateUpDownMLPMoe(
             engine_config=engine_config,
-            num_experts=num_experts,
+            num_dynamic_experts=num_dynamic_experts,
+            top_k=top_k,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             activation_function=activation_function,
+            normalize=prev_layernorm_module is not None,
             device=device,
             dtype=dtype,
         )
 
-        new_module.copy_module(prev_module=prev_module, device=device)
+        new_module.copy_module(
+            prev_module=prev_module,
+            prev_layernorm_module=prev_layernorm_module,
+            device=device,
+        )
 
         # delete the previous module to save memory
         del prev_module
+
         # trigger GC to save memory
         trigger_gc()
 
@@ -163,106 +249,123 @@ class MuiParallelExperts(MuiModule):
 
         return all_linears
 
-    def copy_module(self, prev_module: Llama4TextExperts, device=None):
+    def copy_module(
+        self,
+        prev_module: Llama4TextMoe,
+        prev_layernorm_module: Union[MuiRMSNorm, Llama4TextRMSNorm] = None,
+        device=None,
+    ):
         if device is None:
             raise ValueError("device was None")
 
-        # TODO: the sharding of linear actually makes us have 2 experts per rank rather
-        # than all ranks having all experts but only some rows
+        variance_epsilon = 0.0
+        norm_weights = None
+        if prev_layernorm_module is not None:
+            variance_epsilon = MuiRMSNorm._extract_eps(prev_layernorm_module)
+            norm_weights = prev_layernorm_module.weight
 
-        device = prev_module.gate_up_proj.device if device is None else device
-        dtype = prev_module.gate_up_proj.dtype
+        # copy the router
 
-        # copy the shared expert
+        self.router.copy_module(
+            prev_module=prev_module.router,
+            norm_weights=norm_weights,
+            variance_epsilon=variance_epsilon,
+            device=device,
+        )
 
-        # the original storage layyout is:
-        # gate_up_proj  shape (num_experts, hidden_size, 2 * expert_dim)
-        # down_proj shape (num_experts, expert_dim, hidden_size)
+        prev_experts = prev_module.experts
 
-        gate_proj, up_proj = prev_module.gate_up_proj.chunk(2, dim=2)
-        down_proj = prev_module.down_proj
+        device = prev_experts.gate_up_proj.device if device is None else device
+        dtype = prev_experts.gate_up_proj.dtype
 
-        # we need to transpose the weights to match the new layout
-        # which is (num_experts, expert_dim, hidden_size) for gate/up
-        # and (num_experts, hidden_size, expert_dim) for down
+        # Shared expert weights
+        shared_gate_weight = prev_module.shared_expert.gate_proj.weight.view(
+            1, self.expert_dim, self.hidden_dim
+        )
+        shared_up_weight = prev_module.shared_expert.up_proj.weight.view(
+            1, self.expert_dim, self.hidden_dim
+        )
+        shared_down_weight = prev_module.shared_expert.down_proj.weight.view(
+            1, self.hidden_dim, self.expert_dim
+        )
+
+        # dynamic expert weights
+        gate_chunk, up_chunk = prev_experts.gate_up_proj.chunk(2, dim=2)
+        down_proj = prev_experts.down_proj
+        gate_weights = gate_chunk.reshape(
+            self.num_dynamic_experts, self.hidden_dim, self.expert_dim
+        ).transpose(1, 2)
+        up_weights = up_chunk.reshape(
+            self.num_dynamic_experts, self.hidden_dim, self.expert_dim
+        ).transpose(1, 2)
+        down_weights = down_proj.reshape(
+            self.num_dynamic_experts, self.expert_dim, self.hidden_dim
+        ).transpose(1, 2)
+
+        # pack all the weights together
+        all_gate_weights = torch.cat(
+            [
+                shared_gate_weight,
+                gate_weights,
+            ],
+            dim=0,
+        )
+        all_up_weights = torch.cat(
+            [
+                shared_up_weight,
+                up_weights,
+            ],
+            dim=0,
+        )
+        all_down_weights = torch.cat(
+            [
+                shared_down_weight,
+                down_weights,
+            ],
+            dim=0,
+        )
+
         gate_linears = self._extract_expert_linears(
-            tensor=gate_proj.reshape(
-                self.num_experts, self.hidden_size, self.expert_dim
-            )
-            .transpose(1, 2)
-            .contiguous(),
+            tensor=all_gate_weights,
             device=device,
             dtype=dtype,
         )
 
         up_linears = self._extract_expert_linears(
-            tensor=up_proj.reshape(self.num_experts, self.hidden_size, self.expert_dim)
-            .transpose(1, 2)
-            .contiguous(),
+            tensor=all_up_weights,
             device=device,
             dtype=dtype,
         )
 
         down_linears = self._extract_expert_linears(
-            tensor=down_proj.reshape(
-                self.num_experts, self.expert_dim, self.hidden_size
-            )
-            .transpose(1, 2)
-            .contiguous(),
+            tensor=all_down_weights,
             device=device,
             dtype=dtype,
         )
 
-        # Copy the gate_proj weights
         self.gate_projs.copy_modules(prev_modules=gate_linears, device=device)
-
-        # delete the previous module to save memory
         for gate_linear in gate_linears:
             del gate_linear
-        # trigger GC to save memory
         trigger_gc()
 
-        # Copy the up_proj weights
         self.up_projs.copy_modules(prev_modules=up_linears, device=device)
-
-        # delete the previous module to save memory
         for up_linear in up_linears:
             del up_linear
-        # trigger GC to save memory
         trigger_gc()
 
-        # Copy the down_proj weights
         self.down_projs.copy_modules(prev_modules=down_linears, device=device)
-
-        # delete the previous module to save memory
         for down_linear in down_linears:
             del down_linear
-        # trigger GC to save memory
         trigger_gc()
 
-        # Need to synchronize after copying the tensors to make sure the transfers
-        # completed
         MuiParallelLinear._sync_all(engine_config=self.engine_config)
+        # END: MuiParallelExperts.copy_module logic
 
     def parallel_forward(
         self,
         hidden_states: Union[torch.Tensor, List[torch.Tensor]],
-        router_top_values: torch.Tensor,
-        router_indices: torch.Tensor,
-        shared_expert_output: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        """
-        This should really not be run on a single machine, as we are reaching compute bound:
-        - the inputs are expected to be "sorted" per expert already.
-        - the weights are viewed with another dim, to match num_expert, 1, shape * num_tokens, shape
-
-        Args:
-            hidden_states (torch.Tensor): (batch_size * token_num, hidden_size)
-            selected_experts (torch.Tensor): (batch_size * token_num, top_k)
-            routing_weights (torch.Tensor): (batch_size * token_num, top_k)
-        Returns:
-            torch.Tensor
-        """
         sharded_inputs = isinstance(hidden_states, list)
         if sharded_inputs:
             hidden_states = hidden_states[0]
@@ -270,274 +373,139 @@ class MuiParallelExperts(MuiModule):
             raise ValueError("not implemented")
 
         batch, seq_len, hidden_dim = hidden_states.shape
-        tokens_per_expert = batch * seq_len
+        num_tokens = batch * seq_len
 
-        if self.dispatchable and (batch * seq_len) == 1:
-
-            # we are running on a single token, so we can use the custom kernel
-            router_scores = torch.sigmoid(router_top_values.float()).to(
-                hidden_states.dtype
-            )
-
-            moe_out = _MuiGateUpDownMoe.apply(
-                self.engine_config,
-                self.num_experts,
+        if self.dispatchable and num_tokens == 1:
+            moe_out = _MuiParallelGateUpDownMoe.apply(
+                self.cpp_module,
                 hidden_states,
-                router_scores,
-                router_indices,
-                None,  # norm_weights
-                self.gate_projs.linear.weights[0],
-                self.up_projs.linear.weights[0],
-                self.down_projs.linear.weights[0],
-                None,  # residual
-                0,  # epsilon
+                residual,
+                True,  # reduce
             )
-
-            # reduce across all the ranks the moe output
-            moe_out = self.comms.all_reduce_sum(moe_out)
-
-            # TODO: fuse the shared expert and the MoE computations
-            out = shared_expert_output + moe_out
-
-            return out, router_scores
+            return [moe_out], [None]
         else:
-            shared_expert_output = shared_expert_output.view(-1, hidden_dim)
+            router_logits = self.router(hidden_states)
+            router_top_values, router_indices = topk_sigmoid(router_logits, self.top_k)
+
+            # normalize the hidden states if needed
+            if self.router.normalize:
+                hidden_states = _MuiRMSNorm.apply(
+                    hidden_states,
+                    self.router.norm_weights,
+                    self.router.variance_epsilon,
+                )
+
+            out_shape = hidden_states.shape
 
             router_scores = (
                 torch.full(
-                    size=(batch, seq_len, self.num_experts),
-                    fill_value=float("-inf"),
+                    size=(batch, seq_len, self.num_dynamic_experts),
+                    fill_value=0.0,
                     dtype=router_top_values.dtype,
                     device=router_top_values.device,
                 )
                 .scatter_(2, router_indices, router_top_values)
-                .view(-1, self.num_experts)
+                .view(-1, self.num_dynamic_experts)
                 .transpose(0, 1)
             )
-            # We do this to make sure we have -inf for non topK tokens before going through the !
-            # Here we are just creating a tensor to index each and every single one of the hidden states. Let s maybe register a buffer for this!
-            router_indices = (
-                torch.arange(tokens_per_expert, device=hidden_states.device)
+            router_indices_tensor = (
+                torch.arange(num_tokens, device=hidden_states.device)
                 .view(1, -1)
                 .expand(router_scores.size(0), -1)
             )
-            router_scores = torch.sigmoid(router_scores.float()).to(hidden_states.dtype)
-
-            router_indices = router_indices.reshape(-1, 1).expand(-1, hidden_dim)
+            router_indices_tensor = router_indices_tensor.reshape(-1, 1).expand(
+                -1, hidden_dim
+            )
 
             routed_in = torch.gather(
-                input=hidden_states.view(-1, self.hidden_size),
+                input=hidden_states.view(-1, self.hidden_dim),
                 dim=0,
-                index=router_indices,
+                index=router_indices_tensor,
             ).to(hidden_states.device)
-            # we gather inputs corresponding to each expert based on the router indices
             routed_in = routed_in * router_scores.reshape(-1, 1)
 
-            hidden_states = routed_in.view(self.num_experts, -1, self.hidden_size)
+            hidden_states_expert = routed_in.view(
+                self.num_dynamic_experts, -1, self.hidden_dim
+            )
 
-            # the bmm operation requires the weights to be in the shape of (num_experts, expert_dim, hidden_size)
-            # so we need to transpose them
+            # concatenate the hidden states for the shared expert
+            hidden_states_expert = torch.cat(
+                [
+                    hidden_states.view(1, -1, self.hidden_dim).expand(
+                        self.num_shared_experts, -1, -1
+                    ),
+                    hidden_states_expert,
+                ],
+                dim=0,
+            )
+
             gate_proj_weights = (
                 self.gate_projs.linear.weights[0]
-                .view(self.num_experts, self.tp_expert_dim, self.hidden_size)
+                .view(self.num_experts, self.tp_expert_dim, self.hidden_dim)
                 .transpose(1, 2)
             )
 
             up_proj_weights = (
                 self.up_projs.linear.weights[0]
-                .view(self.num_experts, self.tp_expert_dim, self.hidden_size)
+                .view(self.num_experts, self.tp_expert_dim, self.hidden_dim)
                 .transpose(1, 2)
             )
 
             down_proj_weights = (
                 self.down_projs.linear.weights[0]
-                .view(self.num_experts, self.hidden_size, self.tp_expert_dim)
+                .view(self.num_experts, self.hidden_dim, self.tp_expert_dim)
                 .transpose(1, 2)
             )
 
             g = torch.bmm(
-                hidden_states,
+                hidden_states_expert,
                 gate_proj_weights,
             )
 
             u = torch.bmm(
-                hidden_states,
+                hidden_states_expert,
                 up_proj_weights,
             )
 
             next_states = torch.bmm(
-                (
-                    self.activation_function(g) * u
-                ),  # shape (num_experts, -1, tp_expert_dim)
+                (self.activation_function(g) * u),
                 down_proj_weights,
             )
 
-            # reduce across all the ranks
-            next_states = self.comms.all_reduce_sum(next_states)
+            # extract the shared expert output
+            shared_expert_output = next_states[: self.num_shared_experts, :, :]
 
-            next_states = next_states.view(-1, self.hidden_size)
+            shared_expert_output = shared_expert_output.view(-1, hidden_dim)
 
-            # now that we finished expert computation -> we scatter add because we gathered previously
-            # we have to do this because we used all experts on all tokens. This is faster than the for loop, tho you are compute bound
-            # this scales a lot better if you do EP!
+            # extract the dynamic expert output
+            next_states = next_states[self.num_shared_experts :, :, :]
+
+            next_states = next_states.view(-1, self.hidden_dim)
+
             shared_expert_output.scatter_add_(
-                dim=0, index=router_indices, src=next_states.view(-1, hidden_dim)
+                dim=0, index=router_indices_tensor, src=next_states.view(-1, hidden_dim)
             )
 
-            return [shared_expert_output], [router_scores]
+            out = shared_expert_output.view(out_shape)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.tensor_parallelism > 1:
-            out, score = self.parallel_forward([hidden_states])
-            return out[0], score[0]
+            # apply the residual if provided
+            if (residual is not None) and self.comms.rank == 0:
+                out = out + residual
 
-        raise ValueError("Only parallel inference is supported")
+            out = self.comms.all_reduce_sum(out)
 
+            return [out], [router_scores]
 
-class MuiParallelGateUpDownMLPMoe(MuiModule):
-    def __init__(
+    def forward(
         self,
-        engine_config: MuiEngineConfig,
-        num_experts: int,
-        top_k: int,
-        hidden_size: int,
-        intermediate_size: int,
-        activation_function: nn.Module,
-        device=None,
-        dtype=None,
-    ):
-        super().__init__(engine_config=engine_config)
-
-        self.comms = engine_config.comms
-        self.tensor_parallelism = engine_config.tensor_parallelism
-
-        self.top_k = top_k
-        self.hidden_dim = hidden_size
-        self.intermediate_size = intermediate_size
-        self.activation_function = activation_function
-
-        self.num_experts = num_experts
-
-        # We do not shard the router, as it is small
-        self.router = MuiLinear(
-            engine_config=engine_config,
-            in_features=hidden_size,
-            out_features=num_experts,
-            bias=False,
-            device=device,
-            dtype=dtype,
-        )
-        # we don't want the router to be sharded, so mark as not a target for further
-        # replacements
-        self.router._muillm_no_further_replacement = True
-
-        self.shared_expert = MuiParallelGateUpDownMLP(
-            engine_config=engine_config,
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            activation_function=activation_function,
-            device=device,
-            dtype=dtype,
-        )
-
-        self.experts = MuiParallelExperts(
-            engine_config=engine_config,
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            activation_function=activation_function,
-            device=device,
-            dtype=dtype,
-        )
-
-    def finalize_init(self):
-        self.experts.finalize_init()
-
-    @staticmethod
-    def replace(
-        prev_module: Llama4TextMoe,
-        engine_config: MuiEngineConfig,
-        device=None,
-    ) -> "MuiParallelGateUpDownMLPMoe":
-
-        if device is None:
-            raise ValueError("device was None")
-
-        device = prev_module.router.weight.device if device is None else device
-        dtype = prev_module.router.weight.dtype
-
-        num_experts = prev_module.num_experts
-        top_k = prev_module.top_k
-
-        # the shared expert and the MoE experts have the same shapes
-        hidden_size = prev_module.shared_expert.gate_proj.in_features
-        intermediate_size = prev_module.shared_expert.gate_proj.out_features
-
-        activation_function = prev_module.experts.act_fn
-
-        new_module = MuiParallelGateUpDownMLPMoe(
-            engine_config=engine_config,
-            num_experts=num_experts,
-            top_k=top_k,
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            activation_function=activation_function,
-            device=device,
-            dtype=dtype,
-        )
-
-        new_module.copy_module(prev_module=prev_module, device=device)
-
-        # delete the previous module to save memory
-        del prev_module
-
-        # trigger GC to save memory
-        trigger_gc()
-
-        return new_module
-
-    def copy_module(self, prev_module: Llama4TextMoe, device=None):
-        if device is None:
-            raise ValueError("device was None")
-
-        # copy the router
-
-        self.router.copy_module(prev_module=prev_module.router, device=device)
-
-        # copy the shared expert
-        self.shared_expert.copy_module(
-            prev_module=prev_module.shared_expert, device=device
-        )
-
-        # copy the experts
-        self.experts.copy_module(prev_module=prev_module.experts, device=device)
-
-    def parallel_forward(
-        self, hidden_states: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        sharded_inputs = isinstance(hidden_states, list)
-        if sharded_inputs:
-            hidden_states = hidden_states[0]
-        else:
-            raise ValueError("not implemented")
-
-        router_logits = self.router(hidden_states)
-        router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)
-
-        shared_expert_out = self.shared_expert.parallel_forward([hidden_states])[0]
-
-        out, scores_out = self.experts.parallel_forward(
-            [hidden_states],
-            router_top_values=router_top_value,
-            router_indices=router_indices,
-            shared_expert_output=shared_expert_out,
-        )
-
-        return out, scores_out
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if self.tensor_parallelism > 1:
-            outs, scores = self.parallel_forward([hidden_states])
+            outs, scores = self.parallel_forward(
+                [hidden_states],
+                residual=residual,
+            )
             return outs[0], scores[0]
 
         raise ValueError("Only parallel inference is supported")

@@ -60,6 +60,10 @@ class MuiMultiLinear(MuiModule):
 
             current_start = current_end
 
+    def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self.linear.finalize_init()
+
     @staticmethod
     def replace(
         prev_modules: List[Union[MuiLinear, nn.Linear]],

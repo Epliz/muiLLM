@@ -144,11 +144,15 @@ at::Tensor muillm_to_cpu_trampoline(
 
 #include "comm_torch.h"
 
+#include "modules/linear_module.h"
+
 #include "parallel_linear_kernels.cuh"
+#include "parallel_gateupmoe_kernels.cuh"
 
 #include "modules/parallel_linear_module.h"
 #include "modules/parallel_multilinear_module.h"
 #include "modules/parallel_gateup_module.h"
+#include "modules/parallel_gateupmoe_module.h"
 #include "modules/parallel_attention_module.h"
 #include "modules/parallel_decoder_module.h"
 #include "modules/parallel_decoder_stack.h"
@@ -168,9 +172,69 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_int8_linear_forward", &muillm_int8_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("scales_min_vals"), py::arg("group_size_shift"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_gateupsilu_forward", &muillm_gateupsilu_forward_trampoline, "muillm gate up silu forward");
   m.def("muillm_gateupsilumoe_forward", &muillm_gateupsilumoe_forward_trampoline, "muillm gate up silu moe forward");
-  m.def("muillm_parallel_gateupsilu_forward", &muillm_parallel_gateupsilu_forward_trampoline, "muillm parallel gate up silu forward");
+  m.def("muillm_parallel_gateupsilu_forward", &muillm_parallel_gateupsilu_forward_trampoline, "muillm parallel gate up silu forward",
+    // args
+    py::arg("engine"),
+    py::arg("comm"),
+    py::arg("norm_weights"),
+    py::arg("epsilon"),
+    py::arg("gate_weights"),
+    py::arg("up_weights"),
+    py::arg("down_weights"),
+    py::arg("residual"),
+    py::arg("x"),
+    py::arg("reduce") = true
+  );
+  m.def("muillm_parallel_gateupsilumoe_forward", &muillm_parallel_gateupsilumoe_forward_trampoline, "muillm parallel gate up silu moe forward",
+    // args
+    py::arg("engine"),
+    py::arg("comm"),
+    py::arg("num_shared_experts"),
+    py::arg("num_dynamic_experts"),
+    py::arg("norm_weights"),
+    py::arg("epsilon"),
+    py::arg("gate_weights"),
+    py::arg("up_weights"),
+    py::arg("down_weights"),
+    py::arg("residual"),
+    py::arg("x"),
+    py::arg("router_scores"),
+    py::arg("router_indices"),
+    py::arg("reduce") = true
+  );
+
   m.def("muillm_gateupsilu_split_forward", &muillm_gateupsilu_split_forward_trampoline, "muillm gate up silu split K forward");
-  m.def("muillm_parallel_gateupsilu_split_forward", &muillm_parallel_gateupsilu_split_forward_trampoline, "muillm parallel gate up silu split K forward");
+  m.def("muillm_parallel_gateupsilu_split_forward", &muillm_parallel_gateupsilu_split_forward_trampoline, "muillm parallel gate up silu split K forward", 
+    // args
+    py::arg("engine"),
+    py::arg("comm"),
+    py::arg("norm_weights"),
+    py::arg("epsilon"),
+    py::arg("gate_weights"),
+    py::arg("up_weights"),
+    py::arg("down_weights"),
+    py::arg("residual"),
+    py::arg("x"),
+    py::arg("reduce") = true
+  );
+  m.def("muillm_parallel_gateupsilumoe_split_forward", &muillm_parallel_gateupsilumoe_split_forward_trampoline, "muillm parallel gate up silu moe split K forward",
+    // args
+    py::arg("engine"),
+    py::arg("comm"),
+    py::arg("num_shared_experts"),
+    py::arg("num_dynamic_experts"),
+    py::arg("norm_weights"),
+    py::arg("epsilon"),
+    py::arg("gate_weights"),
+    py::arg("up_weights"),
+    py::arg("down_weights"),
+    py::arg("residual"),
+    py::arg("x"),
+    py::arg("router_scores"),
+    py::arg("router_indices"),
+    py::arg("reduce") = true
+  );
+
   m.def("muillm_int8_gateupsilu_dequantize_forward", &muillm_int8_gateupsilu_dequantize_forward, "muillm int8 gate up dequantize");
   m.def("muillm_int8_gateupsilu_forward", &muillm_int8_gateupsilu_forward, "muillm int8 gate up silu forward");
   m.def("muillm_l2norm_forward", &muillm_l2norm_forward, "muillm l2norm forward");
@@ -213,6 +277,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // modules
 
+  // linear
+  pybind11::class_<muillm_linear_module_ptr_t> cl_linear_module(m, "muillm_linear_module_ptr");
+  cl_linear_module.def(pybind11::init<>());
+
+  m.def("muillm_linear_module_init", &muillm_linear_module_init_trampoline, "muillm linear module init", py::arg("engine"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
+  m.def("muillm_linear_module_deinit", &muillm_linear_module_deinit_trampoline, "muillm linear module deinit", py::arg("module"));
+  m.def("muillm_linear_module_forward", &muillm_linear_module_forward_trampoline, "muillm linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none());
+
+
   // parallel linear
   pybind11::class_<muillm_parallel_linear_module_ptr_t> cl_parallel_linear_module(m, "muillm_parallel_linear_module_ptr");
   cl_parallel_linear_module.def(pybind11::init<>());
@@ -233,7 +306,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<muillm_parallel_gateupdownmlp_module_ptr_t> cl_parallel_gateupdownmlp_module(m, "muillm_parallel_gateupdownmlp_module_ptr");
   m.def("muillm_parallel_gateupdownmlp_module_init", &muillm_parallel_gateupdownmlp_module_init_trampoline, "muillm parallel gateupdown mlp module init", py::arg("engine"), py::arg("comm"), py::arg("method"), py::arg("norm_weights"), py::arg("gate_weights"), py::arg("up_weights"), py::arg("down_weights"), py::arg("variance_epsilon"));
   m.def("muillm_parallel_gateupdownmlp_module_deinit", &muillm_parallel_gateupdownmlp_module_deinit_trampoline, "muillm parallel gateupdown mlp module deinit", py::arg("module"));
-  m.def("muillm_parallel_gateupdownmlp_module_forward", &muillm_parallel_gateupdownmlp_module_forward_trampoline, "muillm parallel gateupdown mlp module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none());
+  m.def("muillm_parallel_gateupdownmlp_module_forward", &muillm_parallel_gateupdownmlp_module_forward_trampoline, "muillm parallel gateupdown mlp module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("reduce") = true);
+
+  // parallel gateup/down mlp moe
+  pybind11::class_<muillm_parallel_gateupdownmlpmoe_module_ptr_t> cl_parallel_gateupdownmlpmoe_module(m, "muillm_parallel_gateupdownmlpmoe_module_ptr");
+  m.def("muillm_parallel_gateupdownmlpmoe_module_init", &muillm_parallel_gateupdownmlpmoe_module_init_trampoline, "muillm parallel gateupdown mlp moe module init", py::arg("engine"), py::arg("comm"), py::arg("router"), py::arg("num_shared_experts"), py::arg("num_dynamic_experts"), py::arg("num_routed_experts"), py::arg("norm_weights"), py::arg("gate_weights"), py::arg("up_weights"), py::arg("down_weights"), py::arg("variance_epsilon"));
+  m.def("muillm_parallel_gateupdownmlpmoe_module_deinit", &muillm_parallel_gateupdownmlpmoe_module_deinit_trampoline, "muillm parallel gateupdown mlp moe module deinit", py::arg("module"));
+  m.def("muillm_parallel_gateupdownmlpmoe_module_forward", &muillm_parallel_gateupdownmlpmoe_module_forward_trampoline, "muillm parallel gateupdown mlp moe module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("reduce") = true);
+
 
   // KV cache
   pybind11::class_<muillm_kvcache_module_ptr_t> cl_kvcache_module(m, "muillm_kvcache_module_ptr");

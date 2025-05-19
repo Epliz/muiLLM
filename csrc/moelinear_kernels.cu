@@ -4,12 +4,14 @@
 #include <cuda_fp16.h>
 
 #include "moelinear_kernels.cuh"
+#include "reduce_kernels.cuh"
 
 // Python trampoline
 
 at::Tensor muillm_moelinear_forward_trampoline(
   muillm_engine_ptr engine,
-  int num_experts,
+  int num_shared_experts,
+  int num_dynamic_experts,
   torch::Tensor x,
   torch::Tensor router_indices,
   torch::Tensor weights,
@@ -26,7 +28,8 @@ at::Tensor muillm_moelinear_forward_trampoline(
   torch::Tensor residual = residual_.has_value() ? residual_.value() : undef_tensor;
   return muillm_moelinear_activ_forward(
       engine.engine_ptr,
-      num_experts,
+      num_shared_experts,
+      num_dynamic_experts,
       norm_weights,
       epsilon,
       weights,
@@ -199,14 +202,15 @@ static inline float __device__ silu(float x) {
 
 template<int THREADS_PER_BLOCK>
 __global__ void muillm_moegemv_kernel(
-    const half* __restrict__ W, // weight matrix - size Exp x N x K
-    const half* __restrict__ X, // input = size ExpTok x K
-    const int64_t* __restrict__ router_indices, // size ExpToks
+    const half* __restrict__ W, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
+    const half* __restrict__ X, // input = size (num_shared_experts + num_routed_experts) x K
+    const int64_t* __restrict__ router_indices, // size num_routed_experts
     mui_activation activation, // activation function 
     const half* __restrict__ MB, // optional multiplicative bias - size N (applied before additive bias)
     const half* __restrict__ AB, // optional additive bias - size N
     const half* __restrict__ RB, // optional residual - size N
-    half* __restrict__ Y, // output - size ExpTok x N
+    half* __restrict__ Y, // output - size (num_shared_experts + num_routed_experts) x N
+    unsigned num_shared_experts,
     unsigned N,
     unsigned K
 ) {
@@ -217,7 +221,15 @@ __global__ void muillm_moegemv_kernel(
   // blockIdx.x is to divide the weight matrices rows
   // blockIdx.y is for each expert to compute
   int exp_tok = blockIdx.y;
-  int exp_idx = (int) router_indices[exp_tok];
+  int exp_idx;
+  if (blockIdx.y < num_shared_experts) {
+    // shared expert
+    exp_idx = exp_tok;
+  } else {
+    // routed expert
+    int routed_exp_tok = exp_tok - num_shared_experts;
+    exp_idx = ((int) router_indices[routed_exp_tok]) + num_shared_experts;
+  }
 
   // can process ROWS_PER_BLOCK rows
   // shared state to do the reductions
@@ -386,15 +398,22 @@ __global__ void muillm_moegemv_kernel(
       }
 
       if (MB != nullptr) { // apply the multipicative bias if there is one
+        // all expert contributions are multiplied by the same multiplicative bias
+        // so we can apply it here
+        // (we will reduce all expert contributions later)
         acc *= __half2float(MB[current_row]);
       }
 
-      if (AB != nullptr) { // apply the additive bias if there is one
-        acc += __half2float(AB[current_row]);
+      // only apply the additive bias and residual if it is the first expert being processed
+      if (exp_tok == 0) {
+        if (AB != nullptr) { // apply the additive bias if there is one
+          acc += __half2float(AB[current_row]);
+        }
+        if (RB != nullptr) { // apply the residual if there is one
+          acc += __half2float(RB[current_row]);
+        }
       }
-      if (RB != nullptr) { // apply the residual if there is one
-        acc += __half2float(RB[current_row]);
-      }
+
       // write the output value
       Y[(exp_tok * N) + current_row] = __float2half(acc);
     }
@@ -404,14 +423,15 @@ __global__ void muillm_moegemv_kernel(
 template<int THREADS_PER_BLOCK>
 __global__ void muillm_moegemv_norm_inputs_kernel(
     const half* __restrict__ NW, // input normalization weights matrix - size K
-    const half* __restrict__ W, // weight matrix - size Exp x N x K
-    const half* __restrict__ X, // input = size ExpTok x K
-    const int64_t* __restrict__ router_indices, // size ExpToks
+    const half* __restrict__ W, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
+    const half* __restrict__ X, // input = size (num_shared_experts + num_routed_experts) x K
+    const int64_t* __restrict__ router_indices, // size num_routed_experts
     mui_activation activation, // activation function 
     const half* __restrict__ MB, // optional multiplicative bias - size N (applied before additive bias)
     const half* __restrict__ AB, // optional additive bias - size N
     const half* __restrict__ RB, // optional residual - size N
-    half* __restrict__ Y, // output - size ExpTok x N
+    half* __restrict__ Y, // output - size (num_shared_experts + num_routed_experts) x N
+    unsigned num_shared_experts,
     unsigned N,
     unsigned K,
     float epsilon,
@@ -424,7 +444,15 @@ __global__ void muillm_moegemv_norm_inputs_kernel(
   // blockIdx.x is to divide the weight matrices rows
   // blockIdx.y is for each expert to compute
   int exp_tok = blockIdx.y;
-  int exp_idx = (int) router_indices[exp_tok];
+  int exp_idx;
+  if (blockIdx.y < num_shared_experts) {
+    // shared expert
+    exp_idx = exp_tok;
+  } else {
+    // routed expert
+    int routed_exp_tok = exp_tok - num_shared_experts;
+    exp_idx = ((int) router_indices[routed_exp_tok]) + num_shared_experts;
+  }
 
   float var_x = 0.f;
 
@@ -665,15 +693,22 @@ __global__ void muillm_moegemv_norm_inputs_kernel(
       }
 
       if (MB != nullptr) { // apply the multipicative bias if there is one
+        // all expert contributions are multiplied by the same multiplicative bias
+        // so we can apply it here
+        // (we will reduce all expert contributions later)
         acc *= __half2float(MB[current_row]);
       }
 
-      if (AB != nullptr) { // apply the additive bias if there is one
-        acc += __half2float(AB[current_row]);
+      // only apply the additive bias and residual if it is the first expert being processed
+      if (exp_tok == 0) {
+        if (AB != nullptr) { // apply the additive bias if there is one
+          acc += __half2float(AB[current_row]);
+        }
+        if (RB != nullptr) { // apply the residual if there is one
+          acc += __half2float(RB[current_row]);
+        }
       }
-      if (RB != nullptr) { // apply the residual if there is one
-        acc += __half2float(RB[current_row]);
-      }
+
       // write the output value
       Y[(exp_tok * N) + current_row] = __float2half(acc);
     }
@@ -686,16 +721,17 @@ __global__ void muillm_moegemv_norm_inputs_kernel(
 
 void muillm_moelinear_activ_forward_placed_output(
     muillm_engine_t* engine,
-    int num_experts,
+    int num_shared_experts,
+    int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
-    torch::Tensor& weights, // size (Exp * N) x K
+    torch::Tensor& weights, // size ((num_shared_experts + num_dynamic_experts) * N) x K
     mui_activation activ,
     torch::Tensor& mul_bias,
     torch::Tensor& add_bias,
     torch::Tensor& residual,
-    torch::Tensor& x, // size B x T x ExpTok x K
-    torch::Tensor& router_indices, // size B x T x ExpTok
+    torch::Tensor& x, // size B x T x (num_shared_experts + num_routed_experts) x K
+    torch::Tensor& router_indices, // size B x T x num_routed_experts
     void* output_ptr, // size B x T x N
     hipStream_t stream) {
 
@@ -715,17 +751,30 @@ void muillm_moelinear_activ_forward_placed_output(
   }
   CHECK_INPUT(x);
 
-  const auto N = weights.size(0) / num_experts;
+  const auto N = weights.size(0) / (num_shared_experts + num_dynamic_experts);
   const auto K = weights.size(1);
-  const auto ExpToks = router_indices.size(2);
+  const auto num_routed_experts = router_indices.size(2);
 
-  if (ExpToks != 1) {
-    // for ExpToks > 1, we need to do a reduction on the output of the MoE gemv
-    TORCH_CHECK(ExpToks == 1, "only one expert is supported at the moment");
-  }
+  const int num_computed_experts = num_shared_experts + num_routed_experts;
+
+  auto device = x.device();
+  auto dtype = torch::kFloat16;
+  auto output_options = at::TensorOptions()
+                            .dtype(dtype)
+                            .layout(at::kStrided)
+                            .device(device) // same output device as inputs
+                            .requires_grad(false);
+
+  // y has the same dimensions as x, except the last dim that is given by
+  // the out_features of weights
+  auto output_sizes = x.sizes().vec();
+  output_sizes[output_sizes.size() - 1] = N;
+
+  bool needs_reduction = (num_computed_experts > 1);
+  auto reduction_buffer = needs_reduction ? torch::empty(output_sizes, output_options) : torch::Tensor();
 
   const int num_blocks_x = DIV_ROUND_UP(N, ROWS_PER_BLOCK);
-  const int num_blocks_y = ExpToks; // one y block per expert to compute
+  const int num_blocks_y = num_computed_experts; // one y block per expert to compute
   const dim3 num_blocks = dim3(num_blocks_x, num_blocks_y);
 
   int threads_per_blocks = GEMV_THREADS_PER_BLOCK;
@@ -738,6 +787,8 @@ void muillm_moelinear_activ_forward_placed_output(
     threads_per_blocks *= 2;
   }
   */
+
+  half* linear_output_ptr = needs_reduction ? (half*) reduction_buffer.data_ptr() : (half*)output_ptr;
 
   if (normalize) {
     const auto NORM_K = norm_weights.size(0);
@@ -755,7 +806,8 @@ void muillm_moelinear_activ_forward_placed_output(
         mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
         add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
         residual.defined() ? (const half*)residual.data_ptr() : nullptr,
-        (half*) output_ptr,
+        linear_output_ptr,
+        num_shared_experts,
         N,
         K,
         epsilon,
@@ -771,7 +823,8 @@ void muillm_moelinear_activ_forward_placed_output(
         mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
         add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
         residual.defined() ? (const half*)residual.data_ptr() : nullptr,
-        (half*) output_ptr,
+        linear_output_ptr,
+        num_shared_experts,
         N,
         K,
         epsilon,
@@ -787,7 +840,8 @@ void muillm_moelinear_activ_forward_placed_output(
         mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
         add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
         residual.defined() ? (const half*)residual.data_ptr() : nullptr,
-        (half*) output_ptr,
+        linear_output_ptr,
+        num_shared_experts,
         N,
         K,
         epsilon,
@@ -807,7 +861,8 @@ void muillm_moelinear_activ_forward_placed_output(
         mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
         add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
         residual.defined() ? (const half*)residual.data_ptr() : nullptr,
-        (half*) output_ptr,
+        linear_output_ptr,
+        num_shared_experts,
         N,
         K
       );
@@ -820,7 +875,8 @@ void muillm_moelinear_activ_forward_placed_output(
         mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
         add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
         residual.defined() ? (const half*)residual.data_ptr() : nullptr,
-        (half*) output_ptr,
+        linear_output_ptr,
+        num_shared_experts,
         N,
         K
       );
@@ -833,7 +889,8 @@ void muillm_moelinear_activ_forward_placed_output(
         mul_bias.defined() ? (const half*)mul_bias.data_ptr() : nullptr,
         add_bias.defined() ? (const half*)add_bias.data_ptr() : nullptr,
         residual.defined() ? (const half*)residual.data_ptr() : nullptr,
-        (half*) output_ptr,
+        linear_output_ptr,
+        num_shared_experts,
         N,
         K
       );
@@ -841,27 +898,40 @@ void muillm_moelinear_activ_forward_placed_output(
       TORCH_CHECK(false, "unsupported threads_per_blocks");
     }
   }
+
+  // reduce if necessary
+  if (needs_reduction) {
+    // we need to reduce the output across experts
+    muillm_reduce_sum_forward_placed_output(
+      reduction_buffer,
+      -2 /* dim */,
+      false /* keep_dim */,
+      output_ptr,
+      stream
+    );
+  }
 }
 
 at::Tensor muillm_moelinear_activ_forward(
     muillm_engine_t* engine,
-    int num_experts,
+    int num_shared_experts,
+    int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
-    torch::Tensor& weights, // size (Exp x N) x K
+    torch::Tensor& weights, // size ((num_shared_experts + num_dynamic_experts) x N) x K
     mui_activation activ,
     torch::Tensor& mul_bias,
     torch::Tensor& add_bias,
     torch::Tensor& residual,
-    torch::Tensor& x, // size B x T x ExpTok x K
-    torch::Tensor& router_indices // size B x T x ExpTok
+    torch::Tensor& x, // size B x T x (num_shared_experts + num_routed_experts) x K
+    torch::Tensor& router_indices // size B x T x num_routed_experts
 ) {
   CHECK_INPUT(x);
 
   auto device = x.device();
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
-  const auto N = weights.size(0) / num_experts;
+  const auto N = weights.size(0) / (num_shared_experts + num_dynamic_experts);
 
   auto dtype = torch::kFloat16;
   auto output_options = at::TensorOptions()
@@ -881,7 +951,8 @@ at::Tensor muillm_moelinear_activ_forward(
 
   muillm_moelinear_activ_forward_placed_output(
     engine,
-    num_experts,
+    num_shared_experts,
+    num_dynamic_experts,
     norm_weights,
     epsilon,
     weights,

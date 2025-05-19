@@ -16,26 +16,10 @@ import muillm_ext
 
 class _MuiLinear(torch.autograd.Function):
     @staticmethod
-    def forward(
-        ctx, engine, x, weights, norm_weights, variance_epsilon, add_bias, residual
-    ):
-        if (add_bias is not None) and (residual is not None):
-            raise ValueError("bias and residual at the same time is not supported")
+    def forward(ctx, module, x, residual):
+        output = muillm_ext.muillm_linear_module_forward(module, x, residual=residual)
 
-        if residual is not None:
-            add_bias = residual
-
-        output = muillm_ext.muillm_linear_forward(
-            engine,
-            x,
-            weights,
-            norm_weights,
-            variance_epsilon,
-            mul_bias=None,
-            add_bias=add_bias,
-        )
-
-        ctx.save_for_backward(x, weights, norm_weights, add_bias)
+        ctx.save_for_backward(x)
 
         return output
 
@@ -89,6 +73,9 @@ class MuiLinear(MuiModule, nn.Linear):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
+        # the cpp module will be created at the end of all layer replacements
+        self.cpp_module = None
+
     def _check_dispatchable(self):
         wdtype = self.weight.dtype
         dispatchable_type = wdtype == torch.float16
@@ -96,6 +83,21 @@ class MuiLinear(MuiModule, nn.Linear):
         self.dispatchable = dispatchable_device and dispatchable_type
 
     def finalize_init(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_linear_module_deinit(self.cpp_module)
+
+        norm_weights = self.norm_weights if self.norm_weights is not None else None
+        bias = self.bias if self.bias is not None else None
+
+        self.cpp_module = muillm_ext.muillm_linear_module_init(
+            self.cpp_engine,
+            self.weight,
+            norm_weights,
+            self.variance_epsilon,
+            None,  # mul_bias
+            bias,
+        )
+
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
@@ -114,6 +116,11 @@ class MuiLinear(MuiModule, nn.Linear):
             norm_weights = self.norm_weights
             self.norm_weights = None
             del norm_weights
+
+        # destroy the C++ module as well to severe the ties to tensors
+        if self.cpp_module is not None:
+            muillm_ext.muillm_linear_module_deinit(self.cpp_module)
+            self.cpp_module = None
 
     def finalize_deinit(self):
         self._severe_ties()
@@ -169,7 +176,7 @@ class MuiLinear(MuiModule, nn.Linear):
                 norm_weights = None  # needs to be None for copy_module
             elif prev_layernorm_module is not None:
                 normalize = True
-                variance_epsilon = prev_layernorm_module.variance_epsilon
+                variance_epsilon = MuiRMSNorm._extract_eps(prev_layernorm_module)
                 norm_weights = prev_layernorm_module.weight
             else:
                 normalize = False
@@ -179,7 +186,7 @@ class MuiLinear(MuiModule, nn.Linear):
         elif isinstance(prev_module, nn.Linear):
             normalize = prev_layernorm_module is not None
             variance_epsilon = (
-                prev_layernorm_module.variance_epsilon if normalize else 0.0
+                MuiRMSNorm._extract_eps(prev_layernorm_module) if normalize else 0.0
             )
             norm_weights = prev_layernorm_module.weight if normalize else None
         else:
@@ -281,6 +288,7 @@ class MuiLinear(MuiModule, nn.Linear):
         if norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities
             self._set_norm_weights(norm_weights)
+            self.variance_epsilon = variance_epsilon
 
         # put ourselves on the right device
         self.to(device=device)
@@ -289,16 +297,10 @@ class MuiLinear(MuiModule, nn.Linear):
         self._check_dispatchable()
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
-
-        if self.dispatchable and (input.numel() == input.shape[-1]):
-            # input is effectively 1D, and we support the type
+        if self.cpp_module is not None:
             return _MuiLinear.apply(
-                self.cpp_engine,
+                self.cpp_module,
                 input,
-                self.weight,
-                self.norm_weights,
-                self.variance_epsilon,
-                self.bias,
                 residual,
             )
         else:

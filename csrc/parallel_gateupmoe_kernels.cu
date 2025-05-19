@@ -1,11 +1,13 @@
-#include "gateup_kernels.cuh"
+#include "gateupmoe_kernels.cuh"
 #include "comm_torch.h"
 
 #include <ATen/cuda/CUDAContext.h>
 
-at::Tensor muillm_parallel_gateupsilu_forward(
+at::Tensor muillm_parallel_gateupsilumoe_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
+    int num_shared_experts,
+    int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -13,6 +15,8 @@ at::Tensor muillm_parallel_gateupsilu_forward(
     torch::Tensor& down_weights,
     torch::Tensor& residual,
     torch::Tensor& x,
+    torch::Tensor& router_scores,
+    torch::Tensor& router_indices,
     bool reduce
 ) {
   int rank = comm->rank;
@@ -32,7 +36,7 @@ at::Tensor muillm_parallel_gateupsilu_forward(
   // by making the GEMV operation write into the reduction buffers
   muillm_comm_error_t muillm_error;
 
-  const auto N = down_weights.size(0);
+  const auto N = down_weights.size(0) / (num_shared_experts + num_dynamic_experts);
 
   size_t count = N;
   muillm_comm_datatype_t datatype = MUILLM_COMM_FP16;
@@ -58,8 +62,10 @@ at::Tensor muillm_parallel_gateupsilu_forward(
       TORCH_CHECK(false, "failed to get reduction buffers");
     }
 
-    muillm_gateupsilu_forward_placed_output(
+    muillm_gateupsilumoe_forward_placed_output(
       engine,
+      num_shared_experts,
+      num_dynamic_experts,
       norm_weights,
       epsilon,
       gate_weights,
@@ -68,6 +74,8 @@ at::Tensor muillm_parallel_gateupsilu_forward(
       // we apply the residual only on device 0
       rank == 0 ? residual : undef_tensor,
       x,
+      router_scores,
+      router_indices,
       buffers[rank]
     );
 
@@ -83,8 +91,10 @@ at::Tensor muillm_parallel_gateupsilu_forward(
       TORCH_CHECK(false, "reduction failed");
     }
   } else {
-    muillm_gateupsilu_forward_placed_output(
+    muillm_gateupsilumoe_forward_placed_output(
       engine,
+      num_shared_experts,
+      num_dynamic_experts,
       norm_weights,
       epsilon,
       gate_weights,
@@ -93,6 +103,8 @@ at::Tensor muillm_parallel_gateupsilu_forward(
       // we apply the residual only on device 0
       rank == 0 ? residual : undef_tensor,
       x,
+      router_scores,
+      router_indices,
       output_ptr
     );
   }
@@ -100,9 +112,11 @@ at::Tensor muillm_parallel_gateupsilu_forward(
   return output;
 }
 
-at::Tensor muillm_parallel_gateupsilu_split_forward(
+at::Tensor muillm_parallel_gateupsilumoe_split_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
+    int num_shared_experts,
+    int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -110,6 +124,8 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
     torch::Tensor& down_weights,
     torch::Tensor& residual,
     torch::Tensor& x,
+    torch::Tensor& router_scores,
+    torch::Tensor& router_indices,
     bool reduce
 ) {
   int rank = comm->rank;
@@ -129,7 +145,7 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
   // by making the GEMV operation write into the reduction buffers
   muillm_comm_error_t muillm_error;
 
-  const auto N = down_weights.size(0);
+  const auto N = down_weights.size(0) / (num_shared_experts + num_dynamic_experts);
 
   size_t count = N;
   muillm_comm_datatype_t datatype = MUILLM_COMM_FP16;
@@ -155,8 +171,10 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
       TORCH_CHECK(false, "failed to get reduction buffers");
     }
 
-    muillm_gateupsilu_split_forward_placed_output(
+    muillm_gateupsilumoe_split_forward_placed_output(
       engine,
+      num_shared_experts,
+      num_dynamic_experts,
       norm_weights,
       epsilon,
       gate_weights,
@@ -165,6 +183,8 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
       // we apply the residual only on device 0
       rank == 0 ? residual : undef_tensor,
       x,
+      router_scores,
+      router_indices,
       buffers[rank]
     );
 
@@ -180,8 +200,10 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
       TORCH_CHECK(false, "reduction failed");
     }
   } else {
-    muillm_gateupsilu_split_forward_placed_output(
+    muillm_gateupsilumoe_split_forward_placed_output(
       engine,
+      num_shared_experts,
+      num_dynamic_experts,
       norm_weights,
       epsilon,
       gate_weights,
@@ -190,6 +212,8 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
       // we apply the residual only on device 0
       rank == 0 ? residual : undef_tensor,
       x,
+      router_scores,
+      router_indices,
       output_ptr
     ); 
   }
@@ -197,21 +221,29 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
   return output;
 }
 
-at::Tensor muillm_parallel_gateupsilu_forward_trampoline(
+at::Tensor muillm_parallel_gateupsilumoe_forward_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
-  torch::Tensor norm_weights,
+  int num_shared_experts,
+  int num_dynamic_experts,
+  std::optional<torch::Tensor> norm_weights_,
   float epsilon,
   torch::Tensor gate_weights,
   torch::Tensor up_weights,
   torch::Tensor down_weights,
-  torch::Tensor residual,
+  std::optional<torch::Tensor> residual_,
   torch::Tensor x,
+  torch::Tensor router_scores,
+  torch::Tensor router_indices,
   bool reduce
 ) {
-  return muillm_parallel_gateupsilu_forward(
+  torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
+  torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
+  return muillm_parallel_gateupsilumoe_forward(
     engine.engine_ptr,
     comm.comm_ptr,
+    num_shared_experts,
+    num_dynamic_experts,
     norm_weights,
     epsilon,
     gate_weights,
@@ -219,25 +251,35 @@ at::Tensor muillm_parallel_gateupsilu_forward_trampoline(
     down_weights,
     residual,
     x,
+    router_scores,
+    router_indices,
     reduce
   );
 }
 
-at::Tensor muillm_parallel_gateupsilu_split_forward_trampoline(
+at::Tensor muillm_parallel_gateupsilumoe_split_forward_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
-  torch::Tensor norm_weights,
+  int num_shared_experts,
+  int num_dynamic_experts,
+  std::optional<torch::Tensor> norm_weights_,
   float epsilon,
   torch::Tensor gate_weights,
   torch::Tensor up_weights,
   torch::Tensor down_weights,
-  torch::Tensor residual,
+  std::optional<torch::Tensor> residual_,
   torch::Tensor x,
+  torch::Tensor router_scores,
+  torch::Tensor router_indices,
   bool reduce
 ) {
-  return muillm_parallel_gateupsilu_split_forward(
+  torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
+  torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
+  return muillm_parallel_gateupsilumoe_split_forward(
     engine.engine_ptr,
     comm.comm_ptr,
+    num_shared_experts,
+    num_dynamic_experts,
     norm_weights,
     epsilon,
     gate_weights,
@@ -245,6 +287,8 @@ at::Tensor muillm_parallel_gateupsilu_split_forward_trampoline(
     down_weights,
     residual,
     x,
+    router_scores,
+    router_indices,
     reduce
   );
 }

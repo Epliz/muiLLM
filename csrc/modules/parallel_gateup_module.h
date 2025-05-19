@@ -51,7 +51,8 @@ struct MuiLLMParallelGateUpDownMLP: torch::nn::Module {
 
   torch::Tensor forward(
     torch::Tensor& inputs,
-    torch::Tensor& residual
+    torch::Tensor& residual,
+    bool reduce
   );
 };
 
@@ -82,7 +83,8 @@ void muillm_parallel_gateupdownmlp_module_deinit_trampoline(
 at::Tensor muillm_parallel_gateupdownmlp_module_forward_trampoline(
   muillm_parallel_gateupdownmlp_module_ptr_t module_ptr,
   torch::Tensor& inputs,
-  std::optional<torch::Tensor> residual_
+  std::optional<torch::Tensor> residual_,
+  bool reduce
 );
 
 #endif /* __MUILLM_PARALLEL_GATEUPDOWN_MODULE_H__ */

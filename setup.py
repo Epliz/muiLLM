@@ -76,7 +76,9 @@ setup(
                 # parallel
                 "csrc/parallel_linear_kernels.cu",
                 "csrc/parallel_gateup_kernels.cu",
+                "csrc/parallel_gateupmoe_kernels.cu",
                 # modules
+                "csrc/modules/linear_module.cpp",
                 "csrc/modules/kvcache.cpp",
                 "csrc/modules/static_kvcache.cpp",
                 "csrc/modules/dynamic_kvcache.cpp",
@@ -85,6 +87,7 @@ setup(
                 "csrc/modules/parallel_linear_module.cpp",
                 "csrc/modules/parallel_multilinear_module.cpp",
                 "csrc/modules/parallel_gateup_module.cpp",
+                "csrc/modules/parallel_gateupmoe_module.cpp",
                 "csrc/modules/parallel_attention_module.cpp",
                 "csrc/modules/parallel_decoder_module.cpp",
                 "csrc/modules/parallel_decoder_stack.cpp",

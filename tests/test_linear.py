@@ -23,6 +23,7 @@ def _test_basic_linear(in_features: int, device: str):
         engine_config=engine_config,
         device=device,
     )
+    muilinear.finalize_init()
 
     input_tensor = torch.rand(size=(4, in_features), device=device)
 
@@ -59,6 +60,7 @@ def _test_linear_bias(in_features: int, device: str):
         engine_config=engine_config,
         device=device,
     )
+    muilinear.finalize_init()
 
     input_tensor = torch.rand(size=(4, in_features), device=device)
 

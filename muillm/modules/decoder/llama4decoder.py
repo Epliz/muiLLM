@@ -2,6 +2,7 @@ from typing import Optional, Tuple, Union
 from muillm.engineconfig import MuiEngineConfig
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.attention.llama4attention import MuiLlama4TextAttention
+from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
 from muillm.modules.module import MuiModule
 
 import torch
@@ -9,8 +10,11 @@ import torch
 from transformers.models.llama4.modeling_llama4 import (
     Llama4TextAttention,
     Llama4TextDecoderLayer,
+    Llama4TextMoe,
+    Llama4TextMLP,
 )
 
+from muillm.modules.moe.gateupdownmlpmoe import MuiGateUpDownMLPMoe
 from muillm.modules.multilinear import MuiMultiLinear
 
 
@@ -21,6 +25,7 @@ class MuiLlama4TextDecoderLayer(MuiModule):
         prev_module: Llama4TextDecoderLayer,
         qkv_proj: MuiMultiLinear,
         self_attn: MuiLlama4TextAttention,
+        feed_forward: Union[MuiGateUpDownMLP, MuiGateUpDownMLPMoe],
     ):
         super().__init__(engine_config=engine_config)
 
@@ -31,11 +36,9 @@ class MuiLlama4TextDecoderLayer(MuiModule):
             prev_module.is_moe_layer
         )  # the 128E model interleaves dense / sparse
 
-        self.feed_forward = prev_module.feed_forward
+        self.feed_forward = feed_forward
 
         self.qkv_proj = qkv_proj
-        # TODO: fuse this
-        self.post_attention_layernorm = prev_module.post_attention_layernorm
 
         self.layer_idx = prev_module.layer_idx
 
@@ -97,11 +100,39 @@ class MuiLlama4TextDecoderLayer(MuiModule):
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
 
+        post_attention_layernorm = prev_module.post_attention_layernorm
+        feed_forward = None
+        if isinstance(prev_module.feed_forward, Llama4TextMoe) or isinstance(
+            prev_module.feed_forward, MuiGateUpDownMLPMoe
+        ):
+            # MoE layer
+            feed_forward = MuiGateUpDownMLPMoe.replace(
+                prev_module=prev_module.feed_forward,
+                engine_config=engine_config,
+                prev_layernorm_module=post_attention_layernorm,
+                device=device,
+            )
+        elif isinstance(prev_module.feed_forward, Llama4TextMLP) or isinstance(
+            prev_module.feed_forward, MuiGateUpDownMLP
+        ):
+            # dense layer
+            feed_forward = MuiGateUpDownMLP.replace(
+                prev_module=prev_module.feed_forward,
+                engine_config=engine_config,
+                prev_layernorm_module=post_attention_layernorm,
+                device=device,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported replacement {type(prev_module.feed_forward)}"
+            )
+
         new_module = MuiLlama4TextDecoderLayer(
             engine_config=engine_config,
             prev_module=prev_module,
             qkv_proj=qkv_proj,
             self_attn=new_attention,
+            feed_forward=feed_forward,
         )
 
         # delete the previous module to save memory
@@ -158,14 +189,12 @@ class MuiLlama4TextDecoderLayer(MuiModule):
         # Fully Connected
         residual = hidden_states
 
-        # TODO: fuse this
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.feed_forward(hidden_states)
+        # the post layer norm & residual are fused in the feed forward
+        hidden_states = self.feed_forward(hidden_states, residual=residual)
         if self.is_moe_layer:
             hidden_states, router_logits = hidden_states
         else:
             router_logits = None
-        hidden_states = residual + hidden_states.view(residual.shape)
         outputs = (hidden_states,)
 
         if output_attentions:

@@ -62,6 +62,7 @@ def test_basic_mistral_mlp():
         engine_config=engine_config,
         device="cpu",
     )
+    muimlp.finalize_init()
 
     input_tensor = torch.rand(size=(4, hidden_size))
 
@@ -116,6 +117,7 @@ def test_basic_llama3_mlp():
         engine_config=engine_config,
         device="cpu",
     )
+    muimlp.finalize_init()
 
     input_tensor = torch.rand(size=(4, hidden_size))
 
@@ -170,6 +172,7 @@ def test_basic_llama4_mlp():
         engine_config=engine_config,
         device="cpu",
     )
+    muimlp.finalize_init()
 
     input_tensor = torch.rand(size=(4, hidden_size))
 

@@ -23,6 +23,7 @@ def test_basic_linears():
         engine_config=engine_config,
         device=device,
     )
+    multilinear.finalize_init()
 
     input_tensor = torch.rand(size=(4, in_features))
 

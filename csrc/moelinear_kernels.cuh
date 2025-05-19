@@ -14,7 +14,8 @@ enum mui_activation {
 // (used when fusing reductions by parallel linear)
 void muillm_moelinear_activ_forward_placed_output(
     muillm_engine_t* engine,
-    int num_experts,
+    int num_shared_experts,
+    int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& weights,
@@ -30,7 +31,8 @@ void muillm_moelinear_activ_forward_placed_output(
 
 at::Tensor muillm_moelinear_activ_forward(
     muillm_engine_t* engine,
-    int num_experts,
+    int num_shared_experts,
+    int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& weights,
@@ -45,7 +47,8 @@ at::Tensor muillm_moelinear_activ_forward(
 // python trampoline
 at::Tensor muillm_moelinear_forward_trampoline(
     muillm_engine_ptr engine,
-    int num_experts,
+    int num_shared_experts,
+    int num_dynamic_experts,
     torch::Tensor x,
     torch::Tensor router_indices,
     torch::Tensor weights,

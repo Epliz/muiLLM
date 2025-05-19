@@ -181,6 +181,10 @@ class MuiGateUpDownMLP(MuiModule):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
+        self.gate_proj.finalize_init()
+        self.up_proj.finalize_init()
+        self.down_proj.finalize_init()
+
     @staticmethod
     def replace(
         prev_module: Union["MuiGateUpDownMLP", LlamaMLP, MistralMLP, Llama4TextMLP],

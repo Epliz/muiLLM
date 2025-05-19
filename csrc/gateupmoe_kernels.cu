@@ -10,7 +10,8 @@
 
 at::Tensor muillm_gateupsilumoe_forward_trampoline(
   muillm_engine_ptr engine,
-  int num_experts,
+  int num_shared_experts,
+  int num_dynamic_experts,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
   torch::Tensor gate_weights,
@@ -25,7 +26,8 @@ at::Tensor muillm_gateupsilumoe_forward_trampoline(
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
   return muillm_gateupsilumoe_forward(
       engine.engine_ptr,
-      num_experts,
+      num_shared_experts,
+      num_dynamic_experts,
       norm_weights,
       epsilon,
       gate_weights,
@@ -40,7 +42,8 @@ at::Tensor muillm_gateupsilumoe_forward_trampoline(
 
 at::Tensor muillm_gateupsilumoe_split_forward_trampoline(
   muillm_engine_ptr engine,
-  int num_experts,
+  int num_shared_experts,
+  int num_dynamic_experts,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
   torch::Tensor gate_weights,
@@ -55,7 +58,8 @@ at::Tensor muillm_gateupsilumoe_split_forward_trampoline(
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
   return muillm_gateupsilumoe_split_forward(
       engine.engine_ptr,
-      num_experts,
+      num_shared_experts,
+      num_dynamic_experts,
       norm_weights,
       epsilon,
       gate_weights,
@@ -231,12 +235,13 @@ static inline float __device__ silu(float x) {
 
 template<int THREADS_PER_BLOCK>
 __global__ void muillm_gateupsilumoe_gemv_kernel(
-    const half* __restrict__ GW, // weight matrix - size Exp x N x K
-    const half* __restrict__ UW, // weight matrix - size Exp x N x K
+    const half* __restrict__ GW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
+    const half* __restrict__ UW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
     const half* __restrict__ X, // input = size K
-    const half* __restrict__ router_scores, // size ExpToks
-    const int64_t* __restrict__ router_indices, // size ExpToks
-    half* __restrict__ Y, // output - size ExpToks x N
+    const half* __restrict__ router_scores, // size num_routed_experts
+    const int64_t* __restrict__ router_indices, // size num_routed_experts
+    half* __restrict__ Y, // output - size (num_shared_experts + num_routed_experts) x N
+    unsigned num_shared_experts,
     unsigned N,
     unsigned K
 ) {
@@ -247,8 +252,18 @@ __global__ void muillm_gateupsilumoe_gemv_kernel(
   // blockIdx.x is to divide the weight matrices rows
   // blockIdx.y is for each expert to compute
   int exp_tok = blockIdx.y;
-  int exp_idx = (int) router_indices[exp_tok];
-  float exp_score = __half2float(router_scores[exp_tok]);
+  int exp_idx;
+  float exp_score;
+  if (blockIdx.y < num_shared_experts) {
+    // shared expert
+    exp_idx = exp_tok;
+    exp_score = 1.0f;
+  } else {
+    // routed expert
+    int routed_exp_tok = exp_tok - num_shared_experts;
+    exp_idx = ((int) router_indices[routed_exp_tok]) + num_shared_experts;
+    exp_score = __half2float(router_scores[routed_exp_tok]);
+  }
 
   __shared__ float shared_gaccs[FUSED_ROWS_PER_BLOCK];
   __shared__ float shared_uaccs[FUSED_ROWS_PER_BLOCK];
@@ -429,12 +444,13 @@ __global__ void muillm_gateupsilumoe_gemv_kernel(
 template<int THREADS_PER_BLOCK>
 __global__ void muillm_gateupsilumoe_gemv_norm_inputs_kernel(
     const half* __restrict__ NW, // input normalization weights matrix - size K
-    const half* __restrict__ GW, // weight matrix - size Exp x N x K
-    const half* __restrict__ UW, // weight matrix - size Exp x N x K
+    const half* __restrict__ GW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
+    const half* __restrict__ UW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
     const half* __restrict__ X, // input = size K
-    const half* __restrict__ router_scores, // size ExpToks
-    const int64_t* __restrict__ router_indices, // size ExpToks
-    half* __restrict__ Y, // output - size ExpToks x N
+    const half* __restrict__ router_scores, // size num_routed_experts
+    const int64_t* __restrict__ router_indices, // size num_routed_experts
+    half* __restrict__ Y, // output - size (num_shared_experts + num_routed_experts) x N
+    unsigned num_shared_experts,
     unsigned N,
     unsigned K,
     float epsilon,
@@ -447,8 +463,18 @@ __global__ void muillm_gateupsilumoe_gemv_norm_inputs_kernel(
   // blockIdx.x is to divide the weight matrices rows
   // blockIdx.y is for each expert to compute
   int exp_tok = blockIdx.y;
-  int exp_idx = (int) router_indices[exp_tok];
-  float exp_score = __half2float(router_scores[exp_tok]);
+  int exp_idx;
+  float exp_score;
+  if (blockIdx.y < num_shared_experts) {
+    // shared expert
+    exp_idx = exp_tok;
+    exp_score = 1.0f;
+  } else {
+    // routed expert
+    int routed_exp_tok = exp_tok - num_shared_experts;
+    exp_idx = ((int) router_indices[routed_exp_tok]) + num_shared_experts;
+    exp_score = __half2float(router_scores[routed_exp_tok]);
+  }
 
   float var_x = 0.f;
 
@@ -708,16 +734,17 @@ __global__ void muillm_gateupsilumoe_gemv_norm_inputs_kernel(
 
 void muillm_gateupsilumoe_forward_placed_output(
     muillm_engine_t* engine,
-    int num_experts,
+    int num_shared_experts,
+    int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
-    torch::Tensor& gate_weights, // size (Exp * N) x K
-    torch::Tensor& up_weights, // size (Exp * N) x K
-    torch::Tensor& down_weights, // size (Exp * K) x N
+    torch::Tensor& gate_weights, // size ((num_shared_experts + num_dynamic_experts) * N) x K
+    torch::Tensor& up_weights, // size ((num_shared_experts + num_dynamic_experts) * N) x K
+    torch::Tensor& down_weights, // size ((num_shared_experts + num_dynamic_experts) * K) x N
     torch::Tensor& residual,
     torch::Tensor& x, // size B x T x K
-    torch::Tensor& router_scores, // size B x T x ExpToks
-    torch::Tensor& router_indices, // size B x T x ExpToks
+    torch::Tensor& router_scores, // size B x T x num_routed_experts
+    torch::Tensor& router_indices, // size B x T x num_routed_experts
     void* output_ptr) { // size B x T x K
   bool normalize = norm_weights.defined();
   if (normalize) {
@@ -741,15 +768,17 @@ void muillm_gateupsilumoe_forward_placed_output(
 
   const auto B = x.size(0);
   const auto T = x.size(1);
-  const auto N = gate_weights.size(0) / num_experts;
+  const auto N = gate_weights.size(0) / (num_shared_experts + num_dynamic_experts);
   const auto K = gate_weights.size(1);
-  const auto ExpToks = router_scores.size(2);
+  const auto num_routed_experts = router_scores.size(2);
+
+  const int num_computed_experts = num_shared_experts + num_routed_experts;
    
-  // y is the output of the gate/up part, and has shape B x T x ExpToks x N
-  auto y = torch::empty({B, T, ExpToks, N}, output_options);
+  // y is the output of the gate/up part, and has shape B x T x num_computed_experts x N
+  auto y = torch::empty({B, T, num_computed_experts, N}, output_options);
 
   const int num_blocks_x = DIV_ROUND_UP(N, FUSED_ROWS_PER_BLOCK);
-  const int num_blocks_y = ExpToks; // one y block per expert to compute
+  const int num_blocks_y = num_computed_experts; // one y block per expert to compute
   const dim3 num_blocks = dim3(num_blocks_x, num_blocks_y);
 
   int threads_per_blocks = GEMV_THREADS_PER_BLOCK;
@@ -775,6 +804,7 @@ void muillm_gateupsilumoe_forward_placed_output(
         (const half*)router_scores.data_ptr(),
         (const int64_t*)router_indices.data_ptr(),
         (half*)y.data_ptr(),
+        num_shared_experts,
         N,
         K,
         epsilon,
@@ -789,6 +819,7 @@ void muillm_gateupsilumoe_forward_placed_output(
         (const half*)router_scores.data_ptr(),
         (const int64_t*)router_indices.data_ptr(),
         (half*)y.data_ptr(),
+        num_shared_experts,
         N,
         K,
         epsilon,
@@ -803,6 +834,7 @@ void muillm_gateupsilumoe_forward_placed_output(
         (const half*)router_scores.data_ptr(),
         (const int64_t*)router_indices.data_ptr(),
         (half*)y.data_ptr(),
+        num_shared_experts,
         N,
         K,
         epsilon,
@@ -821,6 +853,7 @@ void muillm_gateupsilumoe_forward_placed_output(
         (const half*)router_scores.data_ptr(),
         (const int64_t*)router_indices.data_ptr(),
         (half*)y.data_ptr(),
+        num_shared_experts,
         N,
         K
       );
@@ -832,6 +865,7 @@ void muillm_gateupsilumoe_forward_placed_output(
         (const half*)router_scores.data_ptr(),
         (const int64_t*)router_indices.data_ptr(),
         (half*)y.data_ptr(),
+        num_shared_experts,
         N,
         K
       );
@@ -843,6 +877,7 @@ void muillm_gateupsilumoe_forward_placed_output(
         (const half*)router_scores.data_ptr(),
         (const int64_t*)router_indices.data_ptr(),
         (half*)y.data_ptr(),
+        num_shared_experts,
         N,
         K
       );
@@ -856,13 +891,14 @@ void muillm_gateupsilumoe_forward_placed_output(
 
   muillm_moelinear_activ_forward_placed_output(
       engine,
-      num_experts,
+      num_shared_experts,
+      num_dynamic_experts,
       undef_tensor /*norm_weights*/,
       epsilon,
       down_weights,
       mui_activation::Identity,
       undef_tensor /*mul_bias*/,
-      undef_tensor/*add_bias*/,
+      undef_tensor /*add_bias*/,
       residual,
       y,
       router_indices,
@@ -873,7 +909,8 @@ void muillm_gateupsilumoe_forward_placed_output(
 
 at::Tensor muillm_gateupsilumoe_forward(
     muillm_engine_t* engine,
-    int num_experts,
+    int num_shared_experts,
+    int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -894,7 +931,7 @@ at::Tensor muillm_gateupsilumoe_forward(
                             .device(device) // same output device as inputs
                             .requires_grad(false);
 
-  const auto N = down_weights.size(0) / num_experts;
+  const auto N = down_weights.size(0) / (num_shared_experts + num_dynamic_experts);
 
   // output has the same dimensions as x, except the last dim that is given by
   // the out_features of weights
@@ -907,7 +944,8 @@ at::Tensor muillm_gateupsilumoe_forward(
 
   muillm_gateupsilumoe_forward_placed_output(
     engine,
-    num_experts,
+    num_shared_experts,
+    num_dynamic_experts,
     norm_weights,
     epsilon,
     gate_weights,
@@ -927,13 +965,14 @@ at::Tensor muillm_gateupsilumoe_forward(
 template<int THREADS_PER_BLOCK>
 __global__ void muillm_gateupsilumoe_gemv_norm_inputs_split_kernel(
     const half* __restrict__ NW, // input normalization weights matrix - size K
-    const half* __restrict__ GW, // weight matrix - size N x K
-    const half* __restrict__ UW, // weight matrix - size N x K
+    const half* __restrict__ GW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
+    const half* __restrict__ UW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
     const half* __restrict__ X, // input = size K
-    const half* __restrict__ router_scores, // size ExpToks
-    const int64_t* __restrict__ router_indices, // size ExpToks
-    half* __restrict__ GY, // output - size ExpToks x N
-    half* __restrict__ UY, // output - size ExpToks x N
+    const half* __restrict__ router_scores, // size num_routed_experts
+    const int64_t* __restrict__ router_indices, // size num_routed_experts
+    half* __restrict__ GY, // output - size (num_shared_experts + num_routed_experts) x N
+    half* __restrict__ UY, // output - size (num_shared_experts + num_routed_experts) x N
+    unsigned num_shared_experts,
     unsigned N,
     unsigned K,
     float epsilon,
@@ -946,8 +985,18 @@ __global__ void muillm_gateupsilumoe_gemv_norm_inputs_split_kernel(
   // blockIdx.x is to divide the weight matrices rows
   // blockIdx.y is for each expert to compute
   int exp_tok = blockIdx.y;
-  int exp_idx = (int) router_indices[exp_tok];
-  float exp_score = __half2float(router_scores[exp_tok]);
+  int exp_idx;
+  float exp_score;
+  if (blockIdx.y < num_shared_experts) {
+    // shared expert
+    exp_idx = exp_tok;
+    exp_score = 1.0f;
+  } else {
+    // routed expert
+    int routed_exp_tok = exp_tok - num_shared_experts;
+    exp_idx = ((int) router_indices[routed_exp_tok]) + num_shared_experts;
+    exp_score = __half2float(router_scores[routed_exp_tok]);
+  }
 
   const half* __restrict__ W = blockIdx.z == 0 ? GW : UW; // weight matrix - size N x K
   half* __restrict__ Y = blockIdx.z == 0 ? GY : UY; // output - size N
@@ -1187,13 +1236,14 @@ __global__ void muillm_gateupsilumoe_gemv_norm_inputs_split_kernel(
 
 template<int THREADS_PER_BLOCK>
 __global__ void muillm_gateupsilumoe_gemv_split_kernel(
-    const half* __restrict__ GW, // weight matrix - size N x K
-    const half* __restrict__ UW, // weight matrix - size N x K
+    const half* __restrict__ GW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
+    const half* __restrict__ UW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
     const half* __restrict__ X, // input = size K
-    const half* __restrict__ router_scores, // size ExpToks
-    const int64_t* __restrict__ router_indices, // size ExpToks
-    half* __restrict__ GY, // output - size ExpToks x N
-    half* __restrict__ UY, // output - size ExpToks x N
+    const half* __restrict__ router_scores, // size num_routed_experts
+    const int64_t* __restrict__ router_indices, // size num_routed_experts
+    half* __restrict__ GY, // output - size (num_shared_experts + num_routed_experts) x N
+    half* __restrict__ UY, // output - size (num_shared_experts + num_routed_experts) x N
+    unsigned num_shared_experts,
     unsigned N,
     unsigned K
 ) {
@@ -1204,8 +1254,18 @@ __global__ void muillm_gateupsilumoe_gemv_split_kernel(
   // blockIdx.x is to divide the weight matrices rows
   // blockIdx.y is for each expert to compute
   int exp_tok = blockIdx.y;
-  int exp_idx = (int) router_indices[exp_tok];
-  float exp_score = __half2float(router_scores[exp_tok]);
+  int exp_idx;
+  float exp_score;
+  if (blockIdx.y < num_shared_experts) {
+    // shared expert
+    exp_idx = exp_tok;
+    exp_score = 1.0f;
+  } else {
+    // routed expert
+    int routed_exp_tok = exp_tok - num_shared_experts;
+    exp_idx = ((int) router_indices[routed_exp_tok]) + num_shared_experts;
+    exp_score = __half2float(router_scores[routed_exp_tok]);
+  }
 
   const half* __restrict__ W = blockIdx.z == 0 ? GW : UW;
   half* __restrict__ Y = blockIdx.z == 0 ? GY : UY;
@@ -1368,10 +1428,10 @@ __global__ void muillm_gateupsilumoe_gemv_split_kernel(
 
 template<int THREADS_PER_BLOCK>
 __global__ void muillm_gateupsilumoe_combine_kernel(
-    const half* __restrict__ GY, // input - size ExpToks * N
-    const half* __restrict__ UY, // input - size ExpToks * N
-    half* __restrict__ Y, // output - size ExpToks * N
-    unsigned S // S = ExpToks * N
+    const half* __restrict__ GY, // input - size (num_shared_experts + num_routed_experts) * N
+    const half* __restrict__ UY, // input - size (num_shared_experts + num_routed_experts) * N
+    half* __restrict__ Y, // output - size (num_shared_experts + num_routed_experts) * N
+    unsigned S // S = (num_shared_experts + num_routed_experts) * N
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
   int warpId = threadIdx.x / warpSize;
@@ -1392,16 +1452,17 @@ __global__ void muillm_gateupsilumoe_combine_kernel(
 
 void muillm_gateupsilumoe_split_forward_placed_output(
     muillm_engine_t* engine,
-    int num_experts,
+    int num_shared_experts,
+    int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
-    torch::Tensor& gate_weights, // size Exp x N x K
-    torch::Tensor& up_weights, // size Exp x N x K
-    torch::Tensor& down_weights, // size Exp x K x N
+    torch::Tensor& gate_weights, // size (num_shared_experts + num_dynamic_experts) x N x K
+    torch::Tensor& up_weights, // size (num_shared_experts + num_dynamic_experts) x N x K
+    torch::Tensor& down_weights, // size (num_shared_experts + num_dynamic_experts) x K x N
     torch::Tensor& residual,
     torch::Tensor& x, // size B x T x K
-    torch::Tensor& router_scores, // size B x T x ExpToks
-    torch::Tensor& router_indices, // size B x T x ExpToks
+    torch::Tensor& router_scores, // size B x T x num_routed_experts
+    torch::Tensor& router_indices, // size B x T x num_routed_experts
     void* output_ptr) { // size B x T x K
   bool normalize = norm_weights.defined();
   if (normalize) {
@@ -1419,9 +1480,11 @@ void muillm_gateupsilumoe_split_forward_placed_output(
 
   const auto B = x.size(0);
   const auto T = x.size(1);
-  const auto N = gate_weights.size(0) / num_experts;
+  const auto N = gate_weights.size(0) / (num_shared_experts + num_dynamic_experts);
   const auto K = gate_weights.size(1);
-  const auto ExpToks = router_scores.size(2);
+  const auto num_routed_experts = router_scores.size(2);
+
+  const int num_computed_experts = num_shared_experts + num_routed_experts;
 
   auto dtype = torch::kFloat16;
   auto output_options = at::TensorOptions()
@@ -1431,14 +1494,14 @@ void muillm_gateupsilumoe_split_forward_placed_output(
                             .requires_grad(false);
 
   // output for gate projections
-  auto gy = torch::empty({B, T, ExpToks, N}, output_options);
+  auto gy = torch::empty({B, T, num_computed_experts, N}, output_options);
   // output for up projection
-  auto uy = torch::empty({B, T, ExpToks, N}, output_options);
+  auto uy = torch::empty({B, T, num_computed_experts, N}, output_options);
   // output for the reduction
-  auto y = torch::empty({B, T, ExpToks, N}, output_options);
+  auto y = torch::empty({B, T, num_computed_experts, N}, output_options);
 
   const int num_blocks_x = DIV_ROUND_UP(N, SPLIT_ROWS_PER_BLOCK);
-  const int num_blocks_y = ExpToks; // one y block per expert to compute
+  const int num_blocks_y = num_computed_experts; // one y block per expert to compute
   const int num_blocks_z = 2;
   const dim3 num_blocks = dim3(num_blocks_x, num_blocks_y);
   int threads_per_blocks = GEMV_THREADS_PER_BLOCK;
@@ -1466,6 +1529,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
         (const int64_t*)router_indices.data_ptr(),
         (half*)gy.data_ptr(),
         (half*)uy.data_ptr(),
+        num_shared_experts,
         N,
         K,
         epsilon,
@@ -1481,6 +1545,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
         (const int64_t*)router_indices.data_ptr(),
         (half*)gy.data_ptr(),
         (half*)uy.data_ptr(),
+        num_shared_experts,
         N,
         K,
         epsilon,
@@ -1496,6 +1561,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
         (const int64_t*)router_indices.data_ptr(),
         (half*)gy.data_ptr(),
         (half*)uy.data_ptr(),
+        num_shared_experts,
         N,
         K,
         epsilon,
@@ -1515,6 +1581,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
         (const int64_t*)router_indices.data_ptr(),
         (half*)gy.data_ptr(),
         (half*)uy.data_ptr(),
+        num_shared_experts,
         N,
         K
       );
@@ -1527,6 +1594,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
         (const int64_t*)router_indices.data_ptr(),
         (half*)gy.data_ptr(),
         (half*)uy.data_ptr(),
+        num_shared_experts,
         N,
         K
       );
@@ -1539,6 +1607,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
         (const int64_t*)router_indices.data_ptr(),
         (half*)gy.data_ptr(),
         (half*)uy.data_ptr(),
+        num_shared_experts,
         N,
         K
       );
@@ -1548,7 +1617,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
   }
 
   // do final reduction
-  const int S = ExpToks * N;
+  const int S = num_computed_experts * N;
   const int num_blocks_combine = DIV_ROUND_UP(S, threads_per_blocks);
   if (threads_per_blocks == 64) {
     muillm_gateupsilumoe_combine_kernel<64><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
@@ -1579,13 +1648,14 @@ void muillm_gateupsilumoe_split_forward_placed_output(
   auto undef_tensor = torch::Tensor();
   muillm_moelinear_activ_forward_placed_output(
       engine,
-      num_experts,
+      num_shared_experts,
+      num_dynamic_experts,
       undef_tensor /*norm_weights*/,
       epsilon,
       down_weights,
       mui_activation::Identity,
       undef_tensor /*mul_bias*/,
-      undef_tensor/*add_bias*/,
+      undef_tensor /*add_bias*/,
       residual,
       y,
       router_indices,
@@ -1596,7 +1666,8 @@ void muillm_gateupsilumoe_split_forward_placed_output(
 
 at::Tensor muillm_gateupsilumoe_split_forward(
     muillm_engine_t* engine,
-    int num_experts,
+    int num_shared_experts,
+    int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -1618,7 +1689,7 @@ at::Tensor muillm_gateupsilumoe_split_forward(
                             .device(device) // same output device as inputs
                             .requires_grad(false);
 
-  const auto N = down_weights.size(0) / num_experts;
+  const auto N = down_weights.size(0) / (num_shared_experts + num_dynamic_experts);
 
   // output has the same dimensions as x, except the last dim that is given by
   // the out_features of weights
@@ -1631,7 +1702,8 @@ at::Tensor muillm_gateupsilumoe_split_forward(
   
   muillm_gateupsilumoe_split_forward_placed_output(
     engine,
-    num_experts,
+    num_shared_experts,
+    num_dynamic_experts,
     norm_weights,
     epsilon,
     gate_weights,
