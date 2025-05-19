@@ -1,4 +1,4 @@
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 from muillm.engineconfig import MuiEngineConfig
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
@@ -10,7 +10,13 @@ import muillm_ext
 import torch
 import torch.nn as nn
 
-from transformers.models.llama4.modeling_llama4 import Llama4TextExperts, Llama4TextMoe
+from transformers.models.llama4.modeling_llama4 import (
+    Llama4TextExperts,
+    Llama4TextMoe,
+    Llama4TextRMSNorm,
+)
+
+from muillm.modules.rmsnorm import MuiRMSNorm
 
 
 class _MuiGateUpDownMoe(torch.autograd.Function):
@@ -239,6 +245,8 @@ class MuiExperts(MuiModule):
             return out, router_scores
         else:
 
+            out_shape = hidden_states.shape
+
             shared_expert_output = shared_expert_output.view(-1, hidden_dim)
 
             router_scores = (
@@ -313,6 +321,8 @@ class MuiExperts(MuiModule):
                 dim=0, index=router_indices, src=next_states.view(-1, hidden_dim)
             )
 
+            shared_expert_output = shared_expert_output.view(out_shape)
+
             return shared_expert_output, router_scores
 
 
@@ -325,6 +335,7 @@ class MuiGateUpDownMLPMoe(MuiModule):
         hidden_size: int,
         intermediate_size: int,
         activation_function: nn.Module,
+        layernorm: Optional[MuiRMSNorm] = None,
         device=None,
         dtype=None,
     ):
@@ -336,6 +347,8 @@ class MuiGateUpDownMLPMoe(MuiModule):
         self.activation_function = activation_function
 
         self.num_experts = num_experts
+
+        self.layernorm = layernorm
 
         self.router = MuiLinear(
             engine_config=engine_config,
@@ -375,6 +388,7 @@ class MuiGateUpDownMLPMoe(MuiModule):
     def replace(
         prev_module: Llama4TextMoe,
         engine_config: MuiEngineConfig,
+        prev_layernorm_module: Union[MuiRMSNorm, Llama4TextRMSNorm] = None,
         device=None,
     ) -> "MuiGateUpDownMLPMoe":
 
@@ -393,8 +407,17 @@ class MuiGateUpDownMLPMoe(MuiModule):
 
         activation_function = prev_module.experts.act_fn
 
+        layernorm = None
+        if prev_layernorm_module is not None:
+            layernorm = MuiRMSNorm.replace(
+                prev_module=prev_layernorm_module,
+                engine_config=engine_config,
+                device=device,
+            )
+
         new_module = MuiGateUpDownMLPMoe(
             engine_config=engine_config,
+            layernorm=layernorm,
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
@@ -414,9 +437,24 @@ class MuiGateUpDownMLPMoe(MuiModule):
 
         return new_module
 
-    def copy_module(self, prev_module: Llama4TextMoe, device=None):
+    def copy_module(
+        self,
+        prev_module: Llama4TextMoe,
+        prev_layernorm_module: Union[MuiRMSNorm, Llama4TextRMSNorm] = None,
+        device=None,
+    ):
         if device is None:
             raise ValueError("device was None")
+
+        if prev_layernorm_module is not None:
+            if self.layernorm is not None:
+                self.layernorm.copy_module(
+                    prev_module=prev_layernorm_module, device=device
+                )
+            else:
+                raise ValueError(
+                    "prev_layernorm_module was not None, but self.layernorm is None"
+                )
 
         # copy the router
 
@@ -430,11 +468,22 @@ class MuiGateUpDownMLPMoe(MuiModule):
         # copy the experts
         self.experts.copy_module(prev_module=prev_module.experts, device=device)
 
-    def forward(self, hidden_states):
+    def forward(
+        self,
+        hidden_states,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        if self.layernorm is not None:
+            hidden_states = self.layernorm(hidden_states)
+
         router_logits = self.router(hidden_states)
         router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)
 
-        shared_expert_out = self.shared_expert(hidden_states)
+        shared_expert_out = self.shared_expert(
+            hidden_states,
+            residual=residual,
+        )
 
         out, router_scores = self.experts(
             hidden_states,

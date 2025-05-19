@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 from muillm.engineconfig import MuiEngineConfig
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.linear import MuiLinear
@@ -11,7 +11,13 @@ from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
 import torch
 import torch.nn as nn
 
-from transformers.models.llama4.modeling_llama4 import Llama4TextExperts, Llama4TextMoe
+from transformers.models.llama4.modeling_llama4 import (
+    Llama4TextExperts,
+    Llama4TextMoe,
+    Llama4TextRMSNorm,
+)
+
+from muillm.modules.rmsnorm import MuiRMSNorm
 
 
 class MuiParallelExperts(MuiModule):
@@ -299,8 +305,10 @@ class MuiParallelExperts(MuiModule):
             # TODO: fuse the shared expert and the MoE computations
             out = shared_expert_output + moe_out
 
-            return out, router_scores
+            return [out], [router_scores]
         else:
+            out_shape = hidden_states.shape
+
             shared_expert_output = shared_expert_output.view(-1, hidden_dim)
 
             router_scores = (
@@ -384,6 +392,8 @@ class MuiParallelExperts(MuiModule):
                 dim=0, index=router_indices, src=next_states.view(-1, hidden_dim)
             )
 
+            shared_expert_output = shared_expert_output.view(out_shape)
+
             return [shared_expert_output], [router_scores]
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -403,6 +413,7 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         hidden_size: int,
         intermediate_size: int,
         activation_function: nn.Module,
+        layernorm: Optional[MuiRMSNorm] = None,
         device=None,
         dtype=None,
     ):
@@ -417,6 +428,8 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         self.activation_function = activation_function
 
         self.num_experts = num_experts
+
+        self.layernorm = layernorm
 
         # We do not shard the router, as it is small
         self.router = MuiLinear(
@@ -457,6 +470,7 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
     def replace(
         prev_module: Llama4TextMoe,
         engine_config: MuiEngineConfig,
+        prev_layernorm_module: Union[MuiRMSNorm, Llama4TextRMSNorm] = None,
         device=None,
     ) -> "MuiParallelGateUpDownMLPMoe":
 
@@ -475,8 +489,17 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
 
         activation_function = prev_module.experts.act_fn
 
+        layernorm = None
+        if prev_layernorm_module is not None:
+            layernorm = MuiRMSNorm.replace(
+                prev_module=prev_layernorm_module,
+                engine_config=engine_config,
+                device=device,
+            )
+
         new_module = MuiParallelGateUpDownMLPMoe(
             engine_config=engine_config,
+            layernorm=layernorm,
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
@@ -496,9 +519,24 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
 
         return new_module
 
-    def copy_module(self, prev_module: Llama4TextMoe, device=None):
+    def copy_module(
+        self,
+        prev_module: Llama4TextMoe,
+        prev_layernorm_module: Union[MuiRMSNorm, Llama4TextRMSNorm] = None,
+        device=None,
+    ):
         if device is None:
             raise ValueError("device was None")
+
+        if prev_layernorm_module is not None:
+            if self.layernorm is not None:
+                self.layernorm.copy_module(
+                    prev_module=prev_layernorm_module, device=device
+                )
+            else:
+                raise ValueError(
+                    "prev_layernorm_module was not None, but self.layernorm is None"
+                )
 
         # copy the router
 
@@ -513,7 +551,9 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         self.experts.copy_module(prev_module=prev_module.experts, device=device)
 
     def parallel_forward(
-        self, hidden_states: Union[torch.Tensor, List[torch.Tensor]]
+        self,
+        hidden_states: Union[torch.Tensor, List[torch.Tensor]],
+        residual: Optional[torch.Tensor] = None,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         sharded_inputs = isinstance(hidden_states, list)
         if sharded_inputs:
@@ -521,10 +561,16 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         else:
             raise ValueError("not implemented")
 
+        if self.layernorm is not None:
+            hidden_states = self.layernorm(hidden_states)
+
         router_logits = self.router(hidden_states)
         router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)
 
-        shared_expert_out = self.shared_expert.parallel_forward([hidden_states])[0]
+        shared_expert_out = self.shared_expert.parallel_forward(
+            [hidden_states],
+            residual=residual,
+        )[0]
 
         out, scores_out = self.experts.parallel_forward(
             [hidden_states],
@@ -535,9 +581,16 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
 
         return out, scores_out
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if self.tensor_parallelism > 1:
-            outs, scores = self.parallel_forward([hidden_states])
+            outs, scores = self.parallel_forward(
+                [hidden_states],
+                residual=residual,
+            )
             return outs[0], scores[0]
 
         raise ValueError("Only parallel inference is supported")
