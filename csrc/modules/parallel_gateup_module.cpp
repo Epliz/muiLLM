@@ -35,7 +35,8 @@ MuiLLMParallelGateUpDownMLP::~MuiLLMParallelGateUpDownMLP() {
 
 torch::Tensor MuiLLMParallelGateUpDownMLP::forward(
   torch::Tensor& inputs,
-  torch::Tensor& residual
+  torch::Tensor& residual,
+  bool reduce
 ) {
   if (!this->dispatchable) {
     TORCH_CHECK(false, "MuiLLMParallelGateUpDownMLP not dispatchable");
@@ -51,7 +52,8 @@ torch::Tensor MuiLLMParallelGateUpDownMLP::forward(
       this->up_weights,
       this->down_weights,
       residual,
-      inputs
+      inputs,
+      reduce
     );
   } else if (this->method == GATEUPSILU_SPLIT) {
     return muillm_parallel_gateupsilu_split_forward(
@@ -63,7 +65,8 @@ torch::Tensor MuiLLMParallelGateUpDownMLP::forward(
       this->up_weights,
       this->down_weights,
       residual,
-      inputs
+      inputs,
+      reduce
     );
   } else {
     TORCH_CHECK(false, "Unsupported method");
@@ -110,10 +113,11 @@ void muillm_parallel_gateupdownmlp_module_deinit_trampoline(
 at::Tensor muillm_parallel_gateupdownmlp_module_forward_trampoline(
     muillm_parallel_gateupdownmlp_module_ptr_t module_ptr,
     torch::Tensor& inputs,
-    std::optional<torch::Tensor> residual_
+    std::optional<torch::Tensor> residual_,
+    bool reduce
 ) {
   auto undef_tensor = torch::Tensor();
   torch::Tensor& residual = residual_.has_value() ? residual_.value() : undef_tensor;
 
-  return module_ptr.ptr->forward(inputs, residual);
+  return module_ptr.ptr->forward(inputs, residual, reduce);
 }

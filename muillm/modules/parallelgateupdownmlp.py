@@ -35,9 +35,9 @@ class _MuiParallelGateUpSiLUMethod(IntEnum):
 
 class _MuiParallelGateUpSiLU(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, module, inputs, residual):
+    def forward(ctx, module, inputs, residual, collect_outputs):
         output = muillm_ext.muillm_parallel_gateupdownmlp_module_forward(
-            module, inputs, residual
+            module, inputs, residual, collect_outputs
         )
 
         ctx.save_for_backward(inputs, residual)
@@ -330,7 +330,10 @@ class MuiParallelGateUpDownMLP(MuiModule):
         )
 
     def _parallel_forward_unfused(
-        self, inputs: Tensor, residual: Optional[Tensor] = None
+        self,
+        inputs: Tensor,
+        residual: Optional[Tensor] = None,
+        collect_outputs: bool = True,
     ) -> List[Tensor]:
         if self.normalize:
             norm_weights = (
@@ -343,12 +346,17 @@ class MuiParallelGateUpDownMLP(MuiModule):
         u = self.up_proj.parallel_forward([inputs], collect_outputs=False)[0]
 
         gus = [self.activation_function(g) * u]
-        outputs = self.down_proj.parallel_forward(gus, residual=residual)
+        outputs = self.down_proj.parallel_forward(
+            gus, residual=residual, collect_outputs=collect_outputs
+        )
 
         return outputs
 
     def parallel_forward(
-        self, inputs: Union[Tensor, List[Tensor]], residual: Optional[Tensor] = None
+        self,
+        inputs: Union[Tensor, List[Tensor]],
+        residual: Optional[Tensor] = None,
+        collect_outputs: bool = True,
     ) -> List[Tensor]:
         sharded_inputs = isinstance(inputs, list)
         if sharded_inputs:
@@ -357,10 +365,14 @@ class MuiParallelGateUpDownMLP(MuiModule):
             raise ValueError("not implemented")
 
         if self.dispatchable and (inputs.numel() == inputs.shape[-1]):
-            output = _MuiParallelGateUpSiLU.apply(self.cpp_module, inputs, residual)
+            output = _MuiParallelGateUpSiLU.apply(
+                self.cpp_module, inputs, residual, collect_outputs
+            )
             return [output]
         else:
-            return self._parallel_forward_unfused(inputs=inputs, residual=residual)
+            return self._parallel_forward_unfused(
+                inputs=inputs, residual=residual, collect_outputs=collect_outputs
+            )
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.tensor_parallelism > 1:

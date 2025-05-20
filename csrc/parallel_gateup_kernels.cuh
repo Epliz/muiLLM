@@ -17,7 +17,9 @@ at::Tensor muillm_parallel_gateupsilu_forward(
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
     torch::Tensor& residual,
-    torch::Tensor& x);
+    torch::Tensor& x,
+    bool reduce
+);
 
 at::Tensor muillm_parallel_gateupsilu_split_forward(
     muillm_engine_t* engine,
@@ -28,7 +30,9 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
     torch::Tensor& residual,
-    torch::Tensor& x);
+    torch::Tensor& x,
+    bool reduce
+);
 
 at::Tensor muillm_parallel_gateupsilu_forward_trampoline(
     muillm_engine_ptr engine,
@@ -39,7 +43,8 @@ at::Tensor muillm_parallel_gateupsilu_forward_trampoline(
     torch::Tensor up_weights,
     torch::Tensor down_weights,
     torch::Tensor residual,
-    torch::Tensor x
+    torch::Tensor x,
+    bool reduce
 );
 
 at::Tensor muillm_parallel_gateupsilu_split_forward_trampoline(
@@ -51,7 +56,8 @@ at::Tensor muillm_parallel_gateupsilu_split_forward_trampoline(
     torch::Tensor up_weights,
     torch::Tensor down_weights,
     torch::Tensor residual,
-    torch::Tensor x
+    torch::Tensor x,
+    bool reduce
 );
 
 #endif /* __MUILLM_PARALLEL_GATEUP_KERNELS_CUH__ */

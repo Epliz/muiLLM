@@ -299,11 +299,13 @@ class MuiParallelExperts(MuiModule):
                 0,  # epsilon
             )
 
-            # reduce across all the ranks the moe output
-            moe_out = self.comms.all_reduce_sum(moe_out)
-
             # TODO: fuse the shared expert and the MoE computations
-            out = shared_expert_output + moe_out
+            # we did not do an all reduce on the shared expert output,
+            # so we need to add its contribution before the all reduce
+            moe_out = shared_expert_output + moe_out
+
+            # reduce across all the ranks the moe output
+            out = self.comms.all_reduce_sum(moe_out)
 
             return [out], [router_scores]
         else:
@@ -380,9 +382,6 @@ class MuiParallelExperts(MuiModule):
                 down_proj_weights,
             )
 
-            # reduce across all the ranks
-            next_states = self.comms.all_reduce_sum(next_states)
-
             next_states = next_states.view(-1, self.hidden_size)
 
             # now that we finished expert computation -> we scatter add because we gathered previously
@@ -393,6 +392,11 @@ class MuiParallelExperts(MuiModule):
             )
 
             shared_expert_output = shared_expert_output.view(out_shape)
+
+            # reduce across all the ranks
+            # we did not do an all reduce on the shared expert output,
+            # so we need to add its contribution before the all reduce
+            shared_expert_output = self.comms.all_reduce_sum(shared_expert_output)
 
             return [shared_expert_output], [router_scores]
 
@@ -570,6 +574,8 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         shared_expert_out = self.shared_expert.parallel_forward(
             [hidden_states],
             residual=residual,
+            # we don't need to reduce here, we can do a single all reduce in the expert module
+            collect_outputs=False,
         )[0]
 
         out, scores_out = self.experts.parallel_forward(

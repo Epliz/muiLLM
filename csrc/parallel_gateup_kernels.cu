@@ -12,7 +12,9 @@ at::Tensor muillm_parallel_gateupsilu_forward(
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
     torch::Tensor& residual,
-    torch::Tensor& x) {
+    torch::Tensor& x,
+    bool reduce
+) {
   int rank = comm->rank;
   // TODO: change this once we support interleaving
   size_t tp_level = comm->local_size;
@@ -35,11 +37,6 @@ at::Tensor muillm_parallel_gateupsilu_forward(
   size_t count = N;
   muillm_comm_datatype_t datatype = MUILLM_COMM_FP16;
 
-  void** buffers;
-  if ((muillm_error = muillm_comm_get_buffers(comm, count, datatype, &buffers, stream)) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "failed to get reduction buffers");
-  }
-
   auto dtype = torch::kFloat16;
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
@@ -55,29 +52,49 @@ at::Tensor muillm_parallel_gateupsilu_forward(
   auto output = torch::empty(output_sizes, output_options);
   void* output_ptr = output.data_ptr();
 
-  muillm_gateupsilu_forward_placed_output(
-    engine,
-    norm_weights,
-    epsilon,
-    gate_weights,
-    up_weights,
-    down_weights,
-    // we apply the residual only on device 0
-    rank == 0 ? residual : undef_tensor,
-    x,
-    buffers[rank]
-  );
+  if (reduce) {
+    void** buffers;
+    if ((muillm_error = muillm_comm_get_buffers(comm, count, datatype, &buffers, stream)) != MUILLM_COMM_SUCCESS) {
+      TORCH_CHECK(false, "failed to get reduction buffers");
+    }
 
-  // finish the reduction
-  if ((muillm_error = muillm_comm_placed_all_reduce_sum(
-    comm,
-    (const void**) buffers,
-    output_ptr,
-    count,
-    datatype,
-    stream
-    )) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "reduction failed");
+    muillm_gateupsilu_forward_placed_output(
+      engine,
+      norm_weights,
+      epsilon,
+      gate_weights,
+      up_weights,
+      down_weights,
+      // we apply the residual only on device 0
+      rank == 0 ? residual : undef_tensor,
+      x,
+      buffers[rank]
+    );
+
+    // finish the reduction
+    if ((muillm_error = muillm_comm_placed_all_reduce_sum(
+      comm,
+      (const void**) buffers,
+      output_ptr,
+      count,
+      datatype,
+      stream
+      )) != MUILLM_COMM_SUCCESS) {
+      TORCH_CHECK(false, "reduction failed");
+    }
+  } else {
+    muillm_gateupsilu_forward_placed_output(
+      engine,
+      norm_weights,
+      epsilon,
+      gate_weights,
+      up_weights,
+      down_weights,
+      // we apply the residual only on device 0
+      rank == 0 ? residual : undef_tensor,
+      x,
+      output_ptr
+    );
   }
 
   return output;
@@ -92,7 +109,9 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
     torch::Tensor& residual,
-    torch::Tensor& x) {
+    torch::Tensor& x,
+    bool reduce
+) {
   int rank = comm->rank;
   // TODO: change this once we support interleaving
   size_t tp_level = comm->local_size;
@@ -115,12 +134,6 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
   size_t count = N;
   muillm_comm_datatype_t datatype = MUILLM_COMM_FP16;
 
-  void** buffers;
-  if ((muillm_error = muillm_comm_get_buffers(comm, count, datatype, &buffers, stream)) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "failed to get reduction buffers");
-  }
-
-
   auto dtype = torch::kFloat16;
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
@@ -136,29 +149,49 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
   auto output = torch::empty(output_sizes, output_options);
   void* output_ptr = output.data_ptr();
 
-  muillm_gateupsilu_split_forward_placed_output(
-    engine,
-    norm_weights,
-    epsilon,
-    gate_weights,
-    up_weights,
-    down_weights,
-    // we apply the residual only on device 0
-    rank == 0 ? residual : undef_tensor,
-    x,
-    buffers[rank]
-  );
+  if (reduce) {
+    void** buffers;
+    if ((muillm_error = muillm_comm_get_buffers(comm, count, datatype, &buffers, stream)) != MUILLM_COMM_SUCCESS) {
+      TORCH_CHECK(false, "failed to get reduction buffers");
+    }
 
-  // finish the reduction
-  if ((muillm_error = muillm_comm_placed_all_reduce_sum(
-    comm,
-    (const void**) buffers,
-    output_ptr,
-    count,
-    datatype,
-    stream
-    )) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "reduction failed");
+    muillm_gateupsilu_split_forward_placed_output(
+      engine,
+      norm_weights,
+      epsilon,
+      gate_weights,
+      up_weights,
+      down_weights,
+      // we apply the residual only on device 0
+      rank == 0 ? residual : undef_tensor,
+      x,
+      buffers[rank]
+    );
+
+    // finish the reduction
+    if ((muillm_error = muillm_comm_placed_all_reduce_sum(
+      comm,
+      (const void**) buffers,
+      output_ptr,
+      count,
+      datatype,
+      stream
+      )) != MUILLM_COMM_SUCCESS) {
+      TORCH_CHECK(false, "reduction failed");
+    }
+  } else {
+    muillm_gateupsilu_split_forward_placed_output(
+      engine,
+      norm_weights,
+      epsilon,
+      gate_weights,
+      up_weights,
+      down_weights,
+      // we apply the residual only on device 0
+      rank == 0 ? residual : undef_tensor,
+      x,
+      output_ptr
+    ); 
   }
 
   return output;
@@ -173,7 +206,9 @@ at::Tensor muillm_parallel_gateupsilu_forward_trampoline(
   torch::Tensor up_weights,
   torch::Tensor down_weights,
   torch::Tensor residual,
-  torch::Tensor x) {
+  torch::Tensor x,
+  bool reduce
+) {
   return muillm_parallel_gateupsilu_forward(
     engine.engine_ptr,
     comm.comm_ptr,
@@ -183,7 +218,8 @@ at::Tensor muillm_parallel_gateupsilu_forward_trampoline(
     up_weights,
     down_weights,
     residual,
-    x
+    x,
+    reduce
   );
 }
 
@@ -196,7 +232,9 @@ at::Tensor muillm_parallel_gateupsilu_split_forward_trampoline(
   torch::Tensor up_weights,
   torch::Tensor down_weights,
   torch::Tensor residual,
-  torch::Tensor x) {
+  torch::Tensor x,
+  bool reduce
+) {
   return muillm_parallel_gateupsilu_split_forward(
     engine.engine_ptr,
     comm.comm_ptr,
@@ -206,6 +244,7 @@ at::Tensor muillm_parallel_gateupsilu_split_forward_trampoline(
     up_weights,
     down_weights,
     residual,
-    x
+    x,
+    reduce
   );
 }
