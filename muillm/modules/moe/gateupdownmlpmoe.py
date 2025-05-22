@@ -221,15 +221,12 @@ class MuiExperts(MuiModule):
 
         if self.dispatchable and (batch * seq_len) == 1:
             # we are running on a single token, so we can use the custom kernel
-            router_scores = torch.sigmoid(router_top_values.float()).to(
-                hidden_states.dtype
-            )
 
             moe_out = _MuiGateUpDownMoe.apply(
                 self.engine_config,
                 self.num_experts,
                 hidden_states,
-                router_scores,
+                router_top_values,
                 router_indices,
                 None,  # norm_weights
                 self.gate_projs.weight,
@@ -252,7 +249,7 @@ class MuiExperts(MuiModule):
             router_scores = (
                 torch.full(
                     size=(batch, seq_len, self.num_experts),
-                    fill_value=float("-inf"),
+                    fill_value=0.0,
                     dtype=router_top_values.dtype,
                     device=router_top_values.device,
                 )
@@ -267,7 +264,6 @@ class MuiExperts(MuiModule):
                 .view(1, -1)
                 .expand(router_scores.size(0), -1)
             )
-            router_scores = torch.sigmoid(router_scores.float()).to(hidden_states.dtype)
 
             router_indices = router_indices.reshape(-1, 1).expand(-1, hidden_dim)
 
@@ -478,7 +474,13 @@ class MuiGateUpDownMLPMoe(MuiModule):
             hidden_states = self.layernorm(hidden_states)
 
         router_logits = self.router(hidden_states)
-        router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)
+        # TODO: custom kernel for topk+sigmoid
+        router_top_values, router_indices = torch.topk(
+            router_logits, self.top_k, dim=-1
+        )
+        router_top_values = torch.sigmoid(router_top_values.float()).to(
+            router_top_values.dtype
+        )
 
         shared_expert_out = self.shared_expert(
             hidden_states,
@@ -487,7 +489,7 @@ class MuiGateUpDownMLPMoe(MuiModule):
 
         out, router_scores = self.experts(
             hidden_states,
-            router_top_values=router_top_value,
+            router_top_values=router_top_values,
             router_indices=router_indices,
             shared_expert_output=shared_expert_out,
         )
