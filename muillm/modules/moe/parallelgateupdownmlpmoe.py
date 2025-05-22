@@ -380,12 +380,11 @@ class MuiParallelExperts(MuiModule):
 
             next_states = next_states.view(-1, self.hidden_size)
 
-            # now that we finished expert computation -> we scatter add because we gathered previously
-            # we have to do this because we used all experts on all tokens. This is faster than the for loop, tho you are compute bound
-            # this scales a lot better if you do EP!
-            shared_expert_output.scatter_add_(
-                dim=0, index=router_indices, src=next_states.view(-1, hidden_dim)
-            )
+            # now that we finished expert computation -> we just aggregate all the expert contributions
+            # with a sum reduction (works because we scaled inputs with 0 where not selected)
+            shared_expert_output = shared_expert_output + next_states.view(
+                -1, hidden_dim
+            ).sum(dim=0)
 
             shared_expert_output = shared_expert_output.view(out_shape)
 
