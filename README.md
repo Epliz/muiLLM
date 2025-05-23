@@ -91,7 +91,19 @@ pip install wheel
 python -m build --no-isolation && pip install ./dist/muillm-0.0.1-cp310-cp310-linux_x86_64.whl
 ```
 
-Then you can run one of the examples
+Then you can run the tests, or one of the examples
+
+## Tests
+
+To run the tests, you will need `pytest-forked`:
+```shell
+pip install pytest-forked
+```
+
+And you can run them with:
+```shell
+pytest --forked ./tests
+```
 
 ## Examples
 
