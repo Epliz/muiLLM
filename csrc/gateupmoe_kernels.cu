@@ -10,6 +10,7 @@
 
 at::Tensor muillm_gateupsilumoe_forward_trampoline(
   muillm_engine_ptr engine,
+  torch::Tensor& shared_expert_output,
   int num_experts,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
@@ -25,6 +26,7 @@ at::Tensor muillm_gateupsilumoe_forward_trampoline(
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
   return muillm_gateupsilumoe_forward(
       engine.engine_ptr,
+      shared_expert_output,
       num_experts,
       norm_weights,
       epsilon,
@@ -40,6 +42,7 @@ at::Tensor muillm_gateupsilumoe_forward_trampoline(
 
 at::Tensor muillm_gateupsilumoe_split_forward_trampoline(
   muillm_engine_ptr engine,
+  torch::Tensor& shared_expert_output,
   int num_experts,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
@@ -55,6 +58,7 @@ at::Tensor muillm_gateupsilumoe_split_forward_trampoline(
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
   return muillm_gateupsilumoe_split_forward(
       engine.engine_ptr,
+      shared_expert_output,
       num_experts,
       norm_weights,
       epsilon,
@@ -708,6 +712,7 @@ __global__ void muillm_gateupsilumoe_gemv_norm_inputs_kernel(
 
 void muillm_gateupsilumoe_forward_placed_output(
     muillm_engine_t* engine,
+    torch::Tensor& shared_expert_output,
     int num_experts,
     torch::Tensor& norm_weights,
     float epsilon,
@@ -862,7 +867,7 @@ void muillm_gateupsilumoe_forward_placed_output(
       down_weights,
       mui_activation::Identity,
       undef_tensor /*mul_bias*/,
-      undef_tensor/*add_bias*/,
+      shared_expert_output/*add_bias*/,
       residual,
       y,
       router_indices,
@@ -873,6 +878,7 @@ void muillm_gateupsilumoe_forward_placed_output(
 
 at::Tensor muillm_gateupsilumoe_forward(
     muillm_engine_t* engine,
+    torch::Tensor& shared_expert_output,
     int num_experts,
     torch::Tensor& norm_weights,
     float epsilon,
@@ -907,6 +913,7 @@ at::Tensor muillm_gateupsilumoe_forward(
 
   muillm_gateupsilumoe_forward_placed_output(
     engine,
+    shared_expert_output,
     num_experts,
     norm_weights,
     epsilon,
@@ -1392,6 +1399,7 @@ __global__ void muillm_gateupsilumoe_combine_kernel(
 
 void muillm_gateupsilumoe_split_forward_placed_output(
     muillm_engine_t* engine,
+    torch::Tensor& shared_expert_output,
     int num_experts,
     torch::Tensor& norm_weights,
     float epsilon,
@@ -1585,7 +1593,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
       down_weights,
       mui_activation::Identity,
       undef_tensor /*mul_bias*/,
-      undef_tensor/*add_bias*/,
+      shared_expert_output/*add_bias*/,
       residual,
       y,
       router_indices,
@@ -1596,6 +1604,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
 
 at::Tensor muillm_gateupsilumoe_split_forward(
     muillm_engine_t* engine,
+    torch::Tensor& shared_expert_output,
     int num_experts,
     torch::Tensor& norm_weights,
     float epsilon,
@@ -1631,6 +1640,7 @@ at::Tensor muillm_gateupsilumoe_split_forward(
   
   muillm_gateupsilumoe_split_forward_placed_output(
     engine,
+    shared_expert_output,
     num_experts,
     norm_weights,
     epsilon,

@@ -1,4 +1,5 @@
 from typing import List, Optional, Tuple, Union
+from muillm.comms.communicator import MuiCommunicator
 from muillm.engineconfig import MuiEngineConfig
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.linear import MuiLinear
@@ -18,6 +19,55 @@ from transformers.models.llama4.modeling_llama4 import (
 )
 
 from muillm.modules.rmsnorm import MuiRMSNorm
+
+
+import muillm_ext
+
+
+class _MuiParallelGateUpDownMoe(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        engine: MuiEngineConfig,
+        comms: MuiCommunicator,
+        shared_expert_output: torch.Tensor,
+        num_experts: int,
+        inputs: torch.Tensor,
+        router_scores: torch.Tensor,
+        router_indices: torch.Tensor,
+        norm_weights: Optional[torch.Tensor],
+        gate_weights: torch.Tensor,
+        up_weights: torch.Tensor,
+        down_weights: torch.Tensor,
+        residual: Optional[torch.Tensor],
+        epsilon,
+        reduce: Optional[bool] = True,
+    ):
+
+        output = muillm_ext.muillm_parallel_gateupsilumoe_forward(
+            engine.cpp_engine,
+            comms.comms,
+            shared_expert_output,
+            num_experts,
+            norm_weights,
+            epsilon,
+            gate_weights,
+            up_weights,
+            down_weights,
+            residual,
+            inputs,
+            router_scores,
+            router_indices,
+            reduce,
+        )
+
+        ctx.save_for_backward(inputs)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("Gate/Up Down MoE MLP backward is not implemented")
 
 
 class MuiParallelExperts(MuiModule):
@@ -282,8 +332,9 @@ class MuiParallelExperts(MuiModule):
 
             # we are running on a single token, so we can use the custom kernel
 
-            moe_out = _MuiGateUpDownMoe.apply(
+            out = _MuiGateUpDownMoe.apply(
                 self.engine_config,
+                shared_expert_output,
                 self.num_experts,
                 hidden_states,
                 router_top_values,
@@ -296,15 +347,9 @@ class MuiParallelExperts(MuiModule):
                 0,  # epsilon
             )
 
-            # TODO: fuse the shared expert and the MoE computations
-            # we did not do an all reduce on the shared expert output,
-            # so we need to add its contribution before the all reduce
-            moe_out = shared_expert_output + moe_out
+            out = self.comms.all_reduce_sum(out)
 
-            # reduce across all the ranks the moe output
-            out = self.comms.all_reduce_sum(moe_out)
-
-            return [out], [router_scores]
+            return [out], [None]
         else:
             out_shape = hidden_states.shape
 

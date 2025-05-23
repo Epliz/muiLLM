@@ -74,6 +74,7 @@ setup(
                 # parallel
                 "csrc/parallel_linear_kernels.cu",
                 "csrc/parallel_gateup_kernels.cu",
+                "csrc/parallel_gateupmoe_kernels.cu",
                 # modules
                 "csrc/modules/kvcache.cpp",
                 "csrc/modules/static_kvcache.cpp",

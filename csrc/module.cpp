@@ -144,6 +144,7 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "comm_torch.h"
 
 #include "parallel_linear_kernels.cuh"
+#include "parallel_gateupmoe_kernels.cuh"
 
 #include "modules/parallel_linear_module.h"
 #include "modules/parallel_multilinear_module.h"
@@ -178,6 +179,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("down_weights"),
     py::arg("residual"),
     py::arg("x"),
+    py::arg("reduce") = true
+  );
+  m.def("muillm_parallel_gateupsilumoe_forward", &muillm_parallel_gateupsilumoe_forward_trampoline, "muillm parallel gate up silu moe forward",
+    // args
+    py::arg("engine"),
+    py::arg("comm"),
+    py::arg("shared_expert_output"),
+    py::arg("num_experts"),
+    py::arg("norm_weights"),
+    py::arg("epsilon"),
+    py::arg("gate_weights"),
+    py::arg("up_weights"),
+    py::arg("down_weights"),
+    py::arg("residual"),
+    py::arg("x"),
+    py::arg("router_scores"),
+    py::arg("router_indices"),
     py::arg("reduce") = true
   );
 

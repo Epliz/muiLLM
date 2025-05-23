@@ -24,20 +24,22 @@ class _MuiGateUpDownMoe(torch.autograd.Function):
     def forward(
         ctx,
         engine: MuiEngineConfig,
+        shared_expert_output: torch.Tensor,
         num_experts: int,
-        inputs,
-        router_scores,
-        router_indices,
-        norm_weights,
-        gate_weights,
-        up_weights,
-        down_weights,
-        residual,
+        inputs: torch.Tensor,
+        router_scores: torch.Tensor,
+        router_indices: torch.Tensor,
+        norm_weights: Optional[torch.Tensor],
+        gate_weights: torch.Tensor,
+        up_weights: torch.Tensor,
+        down_weights: torch.Tensor,
+        residual: Optional[torch.Tensor],
         epsilon,
     ):
 
         output = muillm_ext.muillm_gateupsilumoe_forward(
             engine.cpp_engine,
+            shared_expert_output,
             num_experts,
             norm_weights,
             epsilon,
@@ -222,8 +224,9 @@ class MuiExperts(MuiModule):
         if self.dispatchable and (batch * seq_len) == 1:
             # we are running on a single token, so we can use the custom kernel
 
-            moe_out = _MuiGateUpDownMoe.apply(
+            out = _MuiGateUpDownMoe.apply(
                 self.engine_config,
+                shared_expert_output,
                 self.num_experts,
                 hidden_states,
                 router_top_values,
@@ -236,10 +239,7 @@ class MuiExperts(MuiModule):
                 0,  # epsilon
             )
 
-            # TODO: fuse the shared expert and the MoE computations
-            out = shared_expert_output + moe_out
-
-            return out, router_scores
+            return out, None
         else:
 
             out_shape = hidden_states.shape
