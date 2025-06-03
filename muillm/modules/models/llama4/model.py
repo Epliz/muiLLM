@@ -66,7 +66,7 @@ from transformers.models.llama4.modeling_llama4 import (
 )
 
 from muillm.modules.parallellinear import MuiParallelLinear
-from muillm.modules.rmsnorm import MuiRMSNorm
+from muillm.modules.norm.rmsnorm import MuiRMSNorm
 from muillm.sampling.generation import MuiGenerationMixin
 
 if is_torch_flex_attn_available():

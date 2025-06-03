@@ -15,7 +15,7 @@ from transformers.models.llama4.modeling_llama4 import (
     Llama4TextRMSNorm,
 )
 
-from muillm.modules.rmsnorm import _MuiRMSNorm, MuiRMSNorm
+from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 
 import muillm_ext
 
@@ -359,7 +359,6 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         trigger_gc()
 
         MuiParallelLinear._sync_all(engine_config=self.engine_config)
-        # END: MuiParallelExperts.copy_module logic
 
     def parallel_forward(
         self,

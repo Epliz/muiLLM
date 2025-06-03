@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.linear import MuiLinear
-from muillm.modules.rmsnorm import _MuiRMSNorm
+from muillm.modules.norm.rmsnorm import _MuiRMSNorm
 from muillm.quantization.quantizationmethod import Int8WeightOnlyQuantizationMethod
 from muillm.quantization.rtnquantizer import RTNQuantizer
 import muillm_ext

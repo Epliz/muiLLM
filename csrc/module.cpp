@@ -71,6 +71,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
     torch::Tensor x);
 
 #include "l2norm_kernels.cuh"
+#include "qkl2norm_kernels.cuh"
 #include "rmsnorm_kernels.cuh"
 #include "reduce_kernels.cuh"
 #include "topk_kernels.cuh"
@@ -238,6 +239,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_int8_gateupsilu_dequantize_forward", &muillm_int8_gateupsilu_dequantize_forward, "muillm int8 gate up dequantize");
   m.def("muillm_int8_gateupsilu_forward", &muillm_int8_gateupsilu_forward, "muillm int8 gate up silu forward");
   m.def("muillm_l2norm_forward", &muillm_l2norm_forward, "muillm l2norm forward");
+  m.def("muillm_qkl2norm_forward", &muillm_qkl2norm_forward, "muillm qkl2norm forward");
   m.def("muillm_rmsnorm_forward", &muillm_rmsnorm_forward, "muillm rmsnorm forward");
   m.def("muillm_reduce_sum_forward", &muillm_reduce_sum_forward, "muillm reduce sum forward");
   m.def("muillm_topk_sigmoid_forward", &muillm_topk_sigmoid_forward, "muillm topk sigmoid forward");

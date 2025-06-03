@@ -44,6 +44,7 @@ from transformers.models.llama4.modeling_llama4 import (
 
 from muillm.modules.parallellinear import MuiParallelLinear
 from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
+from muillm.modules.norm.qkl2norm import MuiQKL2Norm
 
 logger = logging.get_logger(__name__)
 
@@ -56,6 +57,7 @@ class MuiParallelLlama4TextAttention(MuiModule):
         engine_config: MuiEngineConfig,
         prev_module: Llama4TextAttention,
         o_proj: MuiParallelMultiLinear,
+        qk_norm: Optional[MuiQKL2Norm],
     ):
         super().__init__(engine_config=engine_config)
 
@@ -88,12 +90,17 @@ class MuiParallelLlama4TextAttention(MuiModule):
         self.use_rope = prev_module.use_rope
         self.o_proj = o_proj
         if self.config.use_qk_norm and self.use_rope:
-            self.qk_norm = prev_module.qk_norm
+            self.qk_norm = qk_norm
 
     @staticmethod
     def replace(
         prev_module: Llama4TextAttention, engine_config: MuiEngineConfig, device=None
     ) -> "MuiParallelLlama4TextAttention":
+        qk_norm = None
+        if hasattr(prev_module, "qk_norm"):
+            qk_norm = MuiQKL2Norm.replace(
+                prev_module.qk_norm, engine_config, device=device
+            )
 
         new_o_proj = MuiParallelLinear.replace(
             prev_module.o_proj,
@@ -105,6 +112,7 @@ class MuiParallelLlama4TextAttention(MuiModule):
             engine_config=engine_config,
             prev_module=prev_module,
             o_proj=new_o_proj,
+            qk_norm=qk_norm,
         )
 
     def parallel_forward(
@@ -164,8 +172,7 @@ class MuiParallelLlama4TextAttention(MuiModule):
 
             # (rope and qk_norm commute as rope is a rotation)
             if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
-                query_states = self.qk_norm(query_states)
-                key_states = self.qk_norm(key_states)
+                query_states, key_states = self.qk_norm(query_states, key_states)
 
             # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
             if self.attn_temperature_tuning and not self.use_rope:
@@ -223,8 +230,7 @@ class MuiParallelLlama4TextAttention(MuiModule):
 
             # (rope and qk_norm commute as rope is a rotation)
             if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
-                query_states = self.qk_norm(query_states)
-                key_states = self.qk_norm(key_states)
+                query_states, key_states = self.qk_norm(query_states, key_states)
 
             # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
             if self.attn_temperature_tuning and not self.use_rope:

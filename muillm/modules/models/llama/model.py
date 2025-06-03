@@ -37,7 +37,7 @@ from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
 
 from muillm.modules.parallellinear import MuiParallelLinear
-from muillm.modules.rmsnorm import MuiRMSNorm
+from muillm.modules.norm.rmsnorm import MuiRMSNorm
 import muillm_ext
 
 import torch

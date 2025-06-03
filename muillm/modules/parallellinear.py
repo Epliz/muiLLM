@@ -11,7 +11,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.rmsnorm import _MuiRMSNorm
+from muillm.modules.norm.rmsnorm import _MuiRMSNorm
 import muillm_ext
 
 

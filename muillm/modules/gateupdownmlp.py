@@ -15,7 +15,7 @@ from transformers.models.mistral.modeling_mistral import MistralMLP, MistralRMSN
 
 from muillm.modules.linear import MuiLinear
 
-from muillm.modules.rmsnorm import _MuiRMSNorm, MuiRMSNorm
+from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 import muillm_ext
 
 

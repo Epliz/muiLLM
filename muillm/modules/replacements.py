@@ -4,7 +4,7 @@ from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
 from muillm.modules.decoder.parallelllama4decoder import (
     MuiParallelLlama4TextDecoderLayer,
 )
-from muillm.modules.l2norm import MuiL2Norm
+from muillm.modules.norm.l2norm import MuiL2Norm
 from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
 from muillm.modules.models.llama4.model import (
     MuiLlama4ForCausalLM,
@@ -23,7 +23,7 @@ import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.linear import MuiLinear
-from muillm.modules.rmsnorm import MuiRMSNorm
+from muillm.modules.norm.rmsnorm import MuiRMSNorm
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
 from muillm.modules.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
 from muillm.memorymanagement.gc import trigger_gc

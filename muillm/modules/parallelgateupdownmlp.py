@@ -18,7 +18,7 @@ from transformers.models.llama4.modeling_llama4 import (
     Llama4TextRMSNorm,
 )
 
-from muillm.modules.rmsnorm import _MuiRMSNorm, MuiRMSNorm
+from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 import muillm_ext
 
 

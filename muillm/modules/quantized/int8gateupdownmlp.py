@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.quantized.int8linear import MuiInt8Linear
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
-from muillm.modules.rmsnorm import _MuiRMSNorm
+from muillm.modules.norm.rmsnorm import _MuiRMSNorm
 from muillm.quantization.rtnquantizer import RTNQuantizer
 from muillm.quantization.quantizationmethod import Int8WeightOnlyQuantizationMethod
 

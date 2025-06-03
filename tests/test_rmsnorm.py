@@ -12,7 +12,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from transformers.models.llama4.modeling_llama4 import Llama4TextRMSNorm
 
-from muillm.modules.rmsnorm import MuiRMSNorm
+from muillm.modules.norm.rmsnorm import MuiRMSNorm
 from .test_utils import tensors_equal
 
 

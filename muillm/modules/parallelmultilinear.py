@@ -13,7 +13,7 @@ from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
 import muillm_ext
 
-from muillm.modules.rmsnorm import MuiRMSNorm
+from muillm.modules.norm.rmsnorm import MuiRMSNorm
 
 
 class _MuiParallelMultiLinear(torch.autograd.Function):

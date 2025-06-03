@@ -1,6 +1,6 @@
 from typing import Iterable, List, Tuple, Union
 from muillm.modules.module import MuiModule
-from muillm.modules.rmsnorm import MuiRMSNorm
+from muillm.modules.norm.rmsnorm import MuiRMSNorm
 import torch
 from torch import Tensor
 import torch.nn as nn
