@@ -54,6 +54,7 @@ setup(
                 "csrc/int8_linear_kernels.cu",
                 "csrc/gateup_kernels.cu",
                 "csrc/gateupmoe_kernels.cu",
+                "csrc/topk_kernels.cu",
                 "csrc/int8_gateup_kernels.cu",
                 "csrc/int8_gateup_dequantization_kernel.cu",
                 "csrc/l2norm_kernels.cu",

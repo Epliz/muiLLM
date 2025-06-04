@@ -73,6 +73,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
 #include "l2norm_kernels.cuh"
 #include "rmsnorm_kernels.cuh"
 #include "reduce_kernels.cuh"
+#include "topk_kernels.cuh"
 #include "rotary_kernels.h"
 #include "temperature_tuning_kernels.cuh"
 
@@ -175,6 +176,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_l2norm_forward", &muillm_l2norm_forward, "muillm l2norm forward");
   m.def("muillm_rmsnorm_forward", &muillm_rmsnorm_forward, "muillm rmsnorm forward");
   m.def("muillm_reduce_sum_forward", &muillm_reduce_sum_forward, "muillm reduce sum forward");
+  m.def("muillm_topk_sigmoid_forward", &muillm_topk_sigmoid_forward, "muillm topk sigmoid forward");
   // rotary
   m.def("muillm_rope_forward_no_cache", &muillm_rope_forward_no_cache, "muillm rotary forward no cache");
   m.def("muillm_rope_forward_dynamic_cache", &muillm_rope_forward_dynamic_cache, "muillm rotary forward dynamic cache");
