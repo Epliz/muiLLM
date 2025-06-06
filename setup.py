@@ -62,6 +62,8 @@ setup(
                 "csrc/rmsnorm_kernels.cu",
                 "csrc/temperature_tuning_kernels.cu",
                 "csrc/rotary_kernels.cu",
+                "csrc/kvcaches/static_kvcache_kernels.cu",
+                "csrc/kvcaches/sliding_kvcache_kernels.cu",
                 "csrc/causal_transformer_decoding.cu",
                 "csrc/half_fused_decoding.cu",
                 "csrc/flash_decoding.cu",

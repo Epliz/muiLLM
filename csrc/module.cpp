@@ -76,6 +76,8 @@ at::Tensor muillm_int8_gateupsilu_forward(
 #include "reduce_kernels.cuh"
 #include "topk_kernels.cuh"
 #include "rotary_kernels.h"
+#include "kvcaches/static_kvcache_kernels.cuh"
+#include "kvcaches/sliding_kvcache_kernels.cuh"
 #include "temperature_tuning_kernels.cuh"
 
 #include "causal_transformer_decoding.cuh"
@@ -248,6 +250,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_rope_forward_dynamic_cache", &muillm_rope_forward_dynamic_cache, "muillm rotary forward dynamic cache");
   m.def("muillm_rope_forward_static_cache", &muillm_rope_forward_static_cache, "muillm rotary forward static cache");
   m.def("muillm_complex_rope_forward_no_cache", &muillm_complex_rope_forward_no_cache, "muillm complex rotary forward no cache");
+
+  // kv caches
+  m.def("muillm_static_kvcache_update", &muillm_static_kvcache_update, "muillm static kvcache update");
+  m.def("muillm_sliding_kvcache_update", &muillm_sliding_kvcache_update, "muillm sliding kvcache update");
+
   // causal transformer decoding
   m.def("muillm_causal_transformer_decoding_no_mask", &muillm_causal_transformer_decoding_no_mask, "muillm causal transformer decoding no mask");
   m.def("muillm_causal_transformer_decoding_masked", &muillm_causal_transformer_decoding_masked, "muillm causal transformer decoding masked");
