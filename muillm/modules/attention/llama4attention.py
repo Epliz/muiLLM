@@ -219,7 +219,7 @@ class MuiLlama4TextAttention(MuiModule):
                 query_states, key_states = apply_rotary_emb(
                     query_states,
                     key_states,
-                    position_embeddings.to(query_states.device),
+                    position_embeddings,
                 )
 
             # (rope and qk_norm commute as rope is a rotation)
@@ -246,9 +246,8 @@ class MuiLlama4TextAttention(MuiModule):
                 )
 
             if attention_mask is not None:
-                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
                 attn_output = mui_causally_decode_masked(
-                    query_states, key_states, value_states, causal_mask
+                    query_states, key_states, value_states, attention_mask
                 )
             else:
                 attn_output = mui_causally_decode(
@@ -277,7 +276,7 @@ class MuiLlama4TextAttention(MuiModule):
                 query_states, key_states = apply_rotary_emb(
                     query_states,
                     key_states,
-                    position_embeddings.to(query_states.device),
+                    position_embeddings,
                 )
 
             # (rope and qk_norm commute as rope is a rotation)

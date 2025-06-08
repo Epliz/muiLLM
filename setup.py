@@ -93,6 +93,7 @@ setup(
                 "csrc/modules/parallel_gateup_module.cpp",
                 "csrc/modules/parallel_gateupmoe_module.cpp",
                 "csrc/modules/parallel_attention_module.cpp",
+                "csrc/modules/parallel_llama4_attention_module.cpp",
                 "csrc/modules/parallel_decoder_module.cpp",
                 "csrc/modules/parallel_decoder_stack.cpp",
                 # other

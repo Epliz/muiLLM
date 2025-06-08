@@ -157,6 +157,7 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "modules/parallel_gateup_module.h"
 #include "modules/parallel_gateupmoe_module.h"
 #include "modules/parallel_attention_module.h"
+#include "modules/parallel_llama4_attention_module.h"
 #include "modules/parallel_decoder_module.h"
 #include "modules/parallel_decoder_stack.h"
 
@@ -367,6 +368,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_parallel_attention_module_deinit", &muillm_parallel_attention_module_deinit_trampoline, "muillm parallel attention module deinit", py::arg("module"));
   m.def("muillm_parallel_attention_module_forward", &muillm_parallel_attention_module_forward_trampoline, "muillm parallel attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none(), py::arg("residual") = py::none());
   m.def("muillm_parallel_attention_module_rope_forward", &muillm_parallel_attention_module_rope_forward_trampoline, "muillm parallel attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+  
+  // parallel attention
+  pybind11::class_<muillm_parallel_llama4_attention_module_ptr_t> cl_parallel_llama4_attention_module(m, "muillm_parallel_llama4_attention_module_ptr");
+  cl_parallel_llama4_attention_module.def(pybind11::init<>());
+
+  m.def("muillm_parallel_llama4_attention_module_init", &muillm_parallel_llama4_attention_module_init_trampoline, "muillm parallel llama4 attention module init", py::arg("engine"), py::arg("comm"), py::arg("o_proj"), py::arg("num_tp_heads"), py::arg("num_tp_key_value_heads"), py::arg("head_dim"), py::arg("use_rope"), py::arg("use_qk_norm"), py::arg("norm_epsilon"), py::arg("use_temperature_tuning"), py::arg("attention_scale"), py::arg("floor_scale"), py::arg("layer_index"));
+  m.def("muillm_parallel_llama4_attention_module_deinit", &muillm_parallel_llama4_attention_module_deinit_trampoline, "muillm parallel llama4 attention module deinit", py::arg("module"));
+  m.def("muillm_parallel_llama4_attention_module_forward", &muillm_parallel_llama4_attention_module_forward_trampoline, "muillm parallel llama4 attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none(), py::arg("residual") = py::none());
+  m.def("muillm_parallel_llama4_attention_module_rope_forward", &muillm_parallel_llama4_attention_module_rope_forward_trampoline, "muillm parallel llama4 attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_embeds"), py::arg("cache_positions"));
 
   // parallel decoder
   pybind11::class_<muillm_parallel_decoder_module_ptr_t> cl_parallel_decoder_module(m, "muillm_parallel_decoder_module_ptr");
