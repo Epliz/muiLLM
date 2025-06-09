@@ -440,6 +440,7 @@ std::tuple<at::Tensor, at::Tensor> muillm_sliding_kvcache_update(
       v_in_tok_stride
     );
 
+    // caller needs to use these as new caches
     return std::make_tuple(k_cache_out, v_cache_out);
   } else {
     // not full, not becoming full -> similar to a static cache update

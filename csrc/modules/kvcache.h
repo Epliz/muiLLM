@@ -6,7 +6,8 @@
 typedef enum muillm_kvcache_type {
   MUILLM_NO_KVCACHE = 0,
   MUILLM_STATIC_KVCACHE,
-  MUILLM_DYNAMIC_KVCACHE
+  MUILLM_DYNAMIC_KVCACHE,
+  MUILLM_HYBRID_CHUNKED_KVCACHE
 } muillm_kvcache_type_t;
 
 struct MuillmKVCache {

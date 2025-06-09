@@ -85,6 +85,7 @@ setup(
                 "csrc/modules/kvcache.cpp",
                 "csrc/modules/static_kvcache.cpp",
                 "csrc/modules/dynamic_kvcache.cpp",
+                "csrc/modules/hybrid_chunked_kvcache.cpp",
                 "csrc/modules/rotary_module.cpp",
                 # parallel modules
                 "csrc/modules/parallel_linear_module.cpp",

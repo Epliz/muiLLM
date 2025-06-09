@@ -165,6 +165,7 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "modules/kvcache.h"
 #include "modules/static_kvcache.h"
 #include "modules/dynamic_kvcache.h"
+#include "modules/hybrid_chunked_kvcache.h"
 
 #include "modules/rotary_module.h"
 
@@ -339,6 +340,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_dynamic_kvcache_module_init", &muillm_dynamic_kvcache_module_init_trampoline, "muillm dynamic kvcache module init", py::arg("engine"), py::arg("key_cache"), py::arg("value_cache"), py::arg("seen_tokens"));
   m.def("muillm_dynamic_kvcache_module_deinit", &muillm_dynamic_kvcache_module_deinit_trampoline, "muillm dynamic kvcache module deinit", py::arg("module"));
   m.def("muillm_dynamic_kvcache_module_sync_back", &muillm_dynamic_kvcache_module_sync_back_trampoline, "muillm dynamic kvcache module sync back", py::arg("module"));
+
+  // hybrid chunked KV cache
+  m.def("muillm_hybrid_chunked_kvcache_module_init", &muillm_hybrid_chunked_kvcache_module_init_trampoline, "muillm hybrid chunked kvcache module init", py::arg("engine"), py::arg("key_cache"), py::arg("value_cache"), py::arg("is_sliding"), py::arg("window_size"), py::arg("seen_tokens"));
+  m.def("muillm_hybrid_chunked_kvcache_module_update", &muillm_hybrid_chunked_kvcache_module_update_trampoline, "muillm hybrid chunked kvcache module update", py::arg("module"), py::arg("key_states"), py::arg("value_states"), py::arg("cache_position"), py::arg("layer_index"));
+  m.def("muillm_hybrid_chunked_kvcache_module_deinit", &muillm_hybrid_chunked_kvcache_module_deinit_trampoline, "muillm hybrid chunked kvcache module deinit", py::arg("module"));
+  m.def("muillm_hybrid_chunked_kvcache_module_sync_back", &muillm_hybrid_chunked_kvcache_module_sync_back_trampoline, "muillm hybrid chunked kvcache module sync back", py::arg("module"));
 
   // rotary embedding
   pybind11::class_<muillm_rotary_embedding_module_ptr_t> cl_rotary_embedding_module(m, "muillm_rotary_embedding_module_ptr");

@@ -262,20 +262,18 @@ class _MuiHybridChunkedCacheUpdate(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
+        cpp_module,
         key_states,
         value_states,
-        k_out,
-        v_out,
         cache_position,
-        seen_tokens,
+        layer_index,
     ):
-        output = muillm_ext.muillm_sliding_kvcache_update(
+        output = muillm_ext.muillm_hybrid_chunked_kvcache_module_update(
+            cpp_module,
             key_states,
             value_states,
-            k_out,
-            v_out,
             cache_position,
-            seen_tokens,
+            layer_index,
         )
         ctx.save_for_backward(key_states, value_states)
 
@@ -301,7 +299,7 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
     ) -> None:
 
         self.device = device
-        self.num_hidden_layers = config.num_hidden_layers
+        self.dtype = dtype
 
         # hack to make the cache be the right size if we use tensor parallelism
         # in particular number of heads is modified due to the tensor parallelism
@@ -317,6 +315,7 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
         )
 
         self.num_key_value_heads = _get_num_key_value_heads(config)
+        self.num_hidden_layers = config.num_hidden_layers
 
         # set back the right values in the config
         _reset_sharded_attention_config(config, tensor_parallelism)
@@ -330,9 +329,40 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
         for l in range(self.num_hidden_layers):
             self._init_cache_layer(l)
 
+        self.engine_config = engine_config
+        self.cpp_engine = engine_config.cpp_engine
+
+        self.cpp_module = None
+
+        # create the cpp module
+        self.finalize_init()
+
+    def _check_dispatchable(self):
+        self.dispatchable = self.dtype == torch.float16 and self.key_cache[0].is_cuda
+
     def finalize_init(self):
-        # TODO: implement this
-        pass
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+        if self.cpp_module is not None:
+            muillm_ext.muillm_hybrid_chunked_kvcache_module_deinit(self.cpp_module)
+
+        self.cpp_module = muillm_ext.muillm_hybrid_chunked_kvcache_module_init(
+            self.cpp_engine,
+            self.key_cache,
+            self.value_cache,
+            self.is_sliding,
+            self.sliding_window,
+            self._seen_tokens,
+        )
+
+    def sync_back(self):
+        self.key_cache, self.value_cache = (
+            muillm_ext.muillm_hybrid_chunked_kvcache_module_sync_back(self.cpp_module)
+        )
+        self._seen_tokens = muillm_ext.muillm_kvcache_module_get_seen_tokens(
+            self.cpp_module
+        )
 
     def _init_cache_layer(self, layer_idx):
         if len(self.key_cache) > layer_idx:
@@ -380,26 +410,14 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
         v_out,
         max_cache_len,
     ):
-        if (key_states.dtype == torch.float16) and key_states.is_cuda:
-            # dispatchable to custom kernels
-            k_out, v_out = muillm_ext.muillm_static_kvcache_update(
-                key_states,
-                value_states,
-                k_out,
-                v_out,
-                cache_position,
-                self._seen_tokens,
-            )
-            return k_out, v_out
-        else:
-            k_out[:, :, cache_position] = key_states
-            v_out[:, :, cache_position] = value_states
+        k_out[:, :, cache_position] = key_states
+        v_out[:, :, cache_position] = value_states
 
-            # return the minimal slice of cache
-            k_out = torch.narrow(k_out, 2, 0, self._seen_tokens)
-            v_out = torch.narrow(v_out, 2, 0, self._seen_tokens)
+        # return the minimal slice of cache
+        k_out = torch.narrow(k_out, 2, 0, self._seen_tokens)
+        v_out = torch.narrow(v_out, 2, 0, self._seen_tokens)
 
-            return k_out, v_out
+        return k_out, v_out
 
     def _sliding_update(
         self,
@@ -421,97 +439,50 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
         self.cumulative_length[layer_idx] += num_new_tokens
 
         if cumulative_length == 0:
-            # Prefill
-            # We return all tokens in that case to avoid catastrophic forgetting
-            # We will return all the tokens, but store in the cache the latest ones
-            if (key_states.dtype == torch.float16) and key_states.is_cuda:
-                # dispatchable to custom kernels
-                k_out, v_out = _MuiHybridChunkedCacheUpdate.apply(
-                    key_states,
-                    value_states,
-                    k_out,
-                    v_out,
-                    cache_position,
-                    self._seen_tokens,
-                )
-                # the kernel writes into the cache tensors so we can return them
-                return k_out, v_out
+            full_key_states = key_states
+            full_value_states = value_states
+
+            if num_new_tokens <= max_cache_len:
+                # We are not full, so we can just return the new states
+                k_out.index_copy_(2, cache_position, key_states)
+                v_out.index_copy_(2, cache_position, value_states)
             else:
-                full_key_states = key_states
-                full_value_states = value_states
+                # We are full, so we need to keep the latest tokens
+                k_out.copy_(key_states[:, :, -max_cache_len:, :])
+                v_out.copy_(value_states[:, :, -max_cache_len:, :])
 
-                if num_new_tokens <= max_cache_len:
-                    # We are not full, so we can just return the new states
-                    k_out.index_copy_(2, cache_position, key_states)
-                    v_out.index_copy_(2, cache_position, value_states)
-                else:
-                    # We are full, so we need to keep the latest tokens
-                    k_out.copy_(key_states[:, :, -max_cache_len:, :])
-                    v_out.copy_(value_states[:, :, -max_cache_len:, :])
-
-                # we should return the whole states instead of k_out, v_out to take the whole prompt
-                # into consideration when building kv cache instead of just throwing away tokens outside of the window
-                return full_key_states, full_value_states
+            # we should return the whole states instead of k_out, v_out to take the whole prompt
+            # into consideration when building kv cache instead of just throwing away tokens outside of the window
+            return full_key_states, full_value_states
         elif cumulative_length + num_new_tokens > max_cache_len:
             # Decoding and becoming full or already full
             # We erase old tokens and keep the latest ones assuming the forgetting is not catastrophic
-            if (key_states.dtype == torch.float16) and key_states.is_cuda:
-                # dispatchable to custom kernels
-                k_out, v_out = _MuiHybridChunkedCacheUpdate.apply(
-                    key_states,
-                    value_states,
-                    k_out,
-                    v_out,
-                    cache_position,
-                    self._seen_tokens,
+            if num_new_tokens < max_cache_len:
+                # we still need to copy some of the previous tokens
+                full_key_states = torch.cat(
+                    (k_out[:, :, num_new_tokens:, :], key_states), dim=-2
                 )
-                # the kernel creates new cache tensors
-                # we have to replace the cache tensors with the new ones
-                # TODO: maybe unmark the previous cache?
-                self.key_cache[layer_idx] = k_out
-                self.value_cache[layer_idx] = v_out
-                # we return the new tensors
-                return k_out, v_out
+                full_value_states = torch.cat(
+                    (v_out[:, :, num_new_tokens:, :], value_states), dim=-2
+                )
             else:
-                if num_new_tokens < max_cache_len:
-                    # we still need to copy some of the previous tokens
-                    full_key_states = torch.cat(
-                        (k_out[:, :, num_new_tokens:, :], key_states), dim=-2
-                    )
-                    full_value_states = torch.cat(
-                        (v_out[:, :, num_new_tokens:, :], value_states), dim=-2
-                    )
-                else:
-                    # very large number of new tokens, we just keep the latest ones
-                    full_key_states = key_states[:, :, -max_cache_len:, :]
-                    full_value_states = value_states[:, :, -max_cache_len:, :]
-                k_out.copy_(full_key_states)
-                v_out.copy_(full_value_states)
-                return k_out, v_out
+                # very large number of new tokens, we just keep the latest ones
+                full_key_states = key_states[:, :, -max_cache_len:, :]
+                full_value_states = value_states[:, :, -max_cache_len:, :]
+            k_out.copy_(full_key_states)
+            v_out.copy_(full_value_states)
+            return k_out, v_out
         else:
             # Not full, not becoming full
             # Similar to a static cache update
-            if (key_states.dtype == torch.float16) and key_states.is_cuda:
-                # dispatchable to custom kernels
-                k_out, v_out = _MuiHybridChunkedCacheUpdate.apply(
-                    key_states,
-                    value_states,
-                    k_out,
-                    v_out,
-                    cache_position,
-                    self._seen_tokens,
-                )
-                # the kernel writes into the cache tensors so we can return them
-                return k_out, v_out
-            else:
-                k_out.index_copy_(2, cache_position, key_states)
-                v_out.index_copy_(2, cache_position, value_states)
+            k_out.index_copy_(2, cache_position, key_states)
+            v_out.index_copy_(2, cache_position, value_states)
 
-                # we need to narrow
-                k_out = torch.narrow(k_out, 2, 0, self._seen_tokens)
-                v_out = torch.narrow(v_out, 2, 0, self._seen_tokens)
+            # we need to narrow
+            k_out = torch.narrow(k_out, 2, 0, self._seen_tokens)
+            v_out = torch.narrow(v_out, 2, 0, self._seen_tokens)
 
-                return k_out, v_out
+            return k_out, v_out
 
     def update(
         self,
@@ -533,28 +504,35 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
             # and update the seen counter (only for layer 0 to avoid double counting)
             self._seen_tokens += key_states.shape[-2]
 
-        if self.is_sliding[layer_idx]:
-            k_out, v_out = self._sliding_update(
-                cache_position,
-                layer_idx,
-                key_states,
-                value_states,
-                k_out,
-                v_out,
-                k_out.shape[2],
+        if self.dispatchable:
+            # Use the C++ module to do the update
+            k_out, v_out = _MuiHybridChunkedCacheUpdate.apply(
+                self.cpp_module, key_states, value_states, cache_position, layer_idx
             )
+            return k_out, v_out
         else:
-            k_out, v_out = self._static_update(
-                cache_position,
-                layer_idx,
-                key_states,
-                value_states,
-                k_out,
-                v_out,
-                k_out.shape[2],
-            )
+            if self.is_sliding[layer_idx]:
+                k_out, v_out = self._sliding_update(
+                    cache_position,
+                    layer_idx,
+                    key_states,
+                    value_states,
+                    k_out,
+                    v_out,
+                    k_out.shape[2],
+                )
+            else:
+                k_out, v_out = self._static_update(
+                    cache_position,
+                    layer_idx,
+                    key_states,
+                    value_states,
+                    k_out,
+                    v_out,
+                    k_out.shape[2],
+                )
 
-        return k_out, v_out
+            return k_out, v_out
 
     def get_seq_length(self, layer_idx: Optional[int] = 0):
         # Occupied cache == any slot in the 3rd dim (sequence length) holds a non-zero value. To save on compute, let's
