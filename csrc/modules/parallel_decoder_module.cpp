@@ -66,14 +66,14 @@ muillm_parallel_decoder_module_ptr_t muillm_parallel_decoder_module_init_trampol
   muillm_comm_ptr comm,
   muillm_parallel_multilinear_module_ptr_t multilinear,
   muillm_parallel_attention_module_ptr_t attention,
-  muillm_parallel_gateupdownmlp_module_ptr_t mlp
+  muillm_parallel_igateupdownmlp_module_ptr_t mlp
 ) {
   MuiLLMParallelDecoder* decoder_module = new MuiLLMParallelDecoder(
     engine.engine_ptr,
     comm.comm_ptr,
     multilinear.ptr,
     attention.ptr,
-    mlp.ptr
+    (MuiLLMParallelGateUpDownMLP*)mlp.ptr
   );
 
   muillm_parallel_decoder_module_ptr_t module_ptr;

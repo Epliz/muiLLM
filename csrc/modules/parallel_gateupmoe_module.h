@@ -1,16 +1,15 @@
 #ifndef __MUILLM_PARALLEL_GATEUPDOWNMOE_MODULE_H__
 #define __MUILLM_PARALLEL_GATEUPDOWNMOE_MODULE_H__
 
+#include "parallel_gateup_module_interface.h"
 
 #include "../engine.h"
 #include "../comm_torch.h"
 
 #include "linear_module.h"
 
-#include <torch/torch.h>
 
-
-struct MuiLLMParallelGateUpDownMLPMoE: torch::nn::Module {
+struct MuiLLMParallelGateUpDownMLPMoE: MuiLLMParallelGateUpDownMLPInterface {
   // fields
   muillm_engine_t* engine;
   muillm_comm_t* comm;
@@ -47,6 +46,7 @@ struct MuiLLMParallelGateUpDownMLPMoE: torch::nn::Module {
 
   virtual ~MuiLLMParallelGateUpDownMLPMoE();
 
+  // @override
   torch::Tensor forward(
     torch::Tensor& inputs,
     torch::Tensor& residual,
@@ -54,14 +54,8 @@ struct MuiLLMParallelGateUpDownMLPMoE: torch::nn::Module {
   );
 };
 
-
-// needed because Pybind11 can't seem to be able to deal with opaque pointers
-typedef struct muillm_parallel_gateupdownmlpmoe_module_ptr {
-  MuiLLMParallelGateUpDownMLPMoE* ptr;
-} muillm_parallel_gateupdownmlpmoe_module_ptr_t;
-
 // init
-muillm_parallel_gateupdownmlpmoe_module_ptr_t muillm_parallel_gateupdownmlpmoe_module_init_trampoline(
+muillm_parallel_igateupdownmlp_module_ptr_t muillm_parallel_gateupdownmlpmoe_module_init_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
   muillm_linear_module_ptr_t router_module_ptr,
@@ -77,12 +71,12 @@ muillm_parallel_gateupdownmlpmoe_module_ptr_t muillm_parallel_gateupdownmlpmoe_m
 
 // deinit
 void muillm_parallel_gateupdownmlpmoe_module_deinit_trampoline(
-  muillm_parallel_gateupdownmlpmoe_module_ptr_t module_ptr
+  muillm_parallel_igateupdownmlp_module_ptr_t module_ptr
 );
 
 // forward
 at::Tensor muillm_parallel_gateupdownmlpmoe_module_forward_trampoline(
-  muillm_parallel_gateupdownmlpmoe_module_ptr_t module_ptr,
+  muillm_parallel_igateupdownmlp_module_ptr_t module_ptr,
   torch::Tensor& inputs,
   std::optional<torch::Tensor> residual_,
   bool reduce

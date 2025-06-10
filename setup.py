@@ -90,6 +90,7 @@ setup(
                 # parallel modules
                 "csrc/modules/parallel_linear_module.cpp",
                 "csrc/modules/parallel_multilinear_module.cpp",
+                "csrc/modules/parallel_gateup_module_interface.cpp",
                 "csrc/modules/parallel_gateup_module.cpp",
                 "csrc/modules/parallel_gateupmoe_module.cpp",
                 "csrc/modules/parallel_attention_module.cpp",

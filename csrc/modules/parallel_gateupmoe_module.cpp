@@ -76,7 +76,7 @@ torch::Tensor MuiLLMParallelGateUpDownMLPMoE::forward(
   );
 }
 
-muillm_parallel_gateupdownmlpmoe_module_ptr_t muillm_parallel_gateupdownmlpmoe_module_init_trampoline(
+muillm_parallel_igateupdownmlp_module_ptr_t muillm_parallel_gateupdownmlpmoe_module_init_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
   muillm_linear_module_ptr_t router_module_ptr,
@@ -108,19 +108,19 @@ muillm_parallel_gateupdownmlpmoe_module_ptr_t muillm_parallel_gateupdownmlpmoe_m
     variance_epsilon
   );
 
-  muillm_parallel_gateupdownmlpmoe_module_ptr_t module_ptr;
+  muillm_parallel_igateupdownmlp_module_ptr_t module_ptr;
   module_ptr.ptr = mlp_module;
   return module_ptr;
 }
 
 void muillm_parallel_gateupdownmlpmoe_module_deinit_trampoline(
-  muillm_parallel_gateupdownmlpmoe_module_ptr_t module_ptr
+  muillm_parallel_igateupdownmlp_module_ptr_t module_ptr
 ) {
   delete module_ptr.ptr;
 }
 
 at::Tensor muillm_parallel_gateupdownmlpmoe_module_forward_trampoline(
-    muillm_parallel_gateupdownmlpmoe_module_ptr_t module_ptr,
+    muillm_parallel_igateupdownmlp_module_ptr_t module_ptr,
     torch::Tensor& inputs,
     std::optional<torch::Tensor> residual_,
     bool reduce
@@ -128,5 +128,5 @@ at::Tensor muillm_parallel_gateupdownmlpmoe_module_forward_trampoline(
   auto undef_tensor = torch::Tensor();
   torch::Tensor& residual = residual_.has_value() ? residual_.value() : undef_tensor;
 
-  return module_ptr.ptr->forward(inputs, residual, reduce);
+  return ((MuiLLMParallelGateUpDownMLPMoE*)module_ptr.ptr)->forward(inputs, residual, reduce);
 }

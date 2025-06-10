@@ -55,7 +55,7 @@ muillm_parallel_decoder_module_ptr_t muillm_parallel_decoder_module_init_trampol
   muillm_comm_ptr comm,
   muillm_parallel_multilinear_module_ptr_t multilinear,
   muillm_parallel_attention_module_ptr_t attention,
-  muillm_parallel_gateupdownmlp_module_ptr_t mlp
+  muillm_parallel_igateupdownmlp_module_ptr_t mlp
 );
 
 void muillm_parallel_decoder_module_deinit_trampoline(
