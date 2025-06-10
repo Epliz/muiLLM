@@ -4,6 +4,7 @@ from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.attention.parallelllama4attention import (
     MuiParallelLlama4TextAttention,
 )
+from muillm.modules.kvcache.cache_utils import MuiCache
 from muillm.modules.module import MuiModule
 
 import torch
@@ -18,6 +19,40 @@ from transformers.models.llama4.modeling_llama4 import (
 from muillm.modules.moe.parallelgateupdownmlpmoe import MuiParallelGateUpDownMLPMoe
 from muillm.modules.parallelgateupdownmlp import MuiParallelGateUpDownMLP
 from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
+
+
+import muillm_ext
+
+
+class _MuiParallelLlama4Decoder(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        module,
+        cache_module,
+        h,
+        attention_mask,
+        chunk_causal_mask,
+        position_embeddings,
+        cache_positions,
+    ):
+        output = muillm_ext.muillm_parallel_llama4_decoder_module_forward(
+            module,
+            cache_module,
+            h,
+            attention_mask,
+            chunk_causal_mask,
+            position_embeddings,
+            cache_positions,
+        )
+
+        ctx.save_for_backward(h, attention_mask, chunk_causal_mask, position_embeddings)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
 
 
 class MuiParallelLlama4TextDecoderLayer(MuiModule):
@@ -47,6 +82,39 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
         self.qkv_proj = qkv_proj
 
         self.layer_idx = prev_module.layer_idx
+
+        # the cpp module will be created at the end of all layer replacements
+        self.cpp_module = None
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+    def _check_dispatchable(self):
+        self.dispatchable = (
+            self.self_attn.dispatchable and self.feed_forward.dispatchable
+        )
+
+    def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+        # initialize the cpp module
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_llama4_decoder_module_deinit(self.cpp_module)
+
+        self.cpp_module = muillm_ext.muillm_parallel_llama4_decoder_module_init(
+            self.cpp_engine,
+            self.comms.comms,
+            self.qkv_proj.cpp_module,
+            self.self_attn.cpp_module,
+            self.feed_forward.cpp_module,
+            self.use_chunked_attention,
+        )
+
+    def finalize_deinit(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_llama4_decoder_module_deinit(self.cpp_module)
+            self.cpp_module = None
 
     @staticmethod
     def replace(
@@ -156,7 +224,7 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
         attention_mask: Optional[torch.Tensor] = None,
         chunk_causal_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        past_key_value: Optional[MuiCache] = None,
         output_attentions: Optional[bool] = False,
         output_router_logits: Optional[bool] = False,
         use_cache: Optional[bool] = False,
@@ -179,50 +247,67 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
         if isinstance(hidden_states, list):
             hidden_states = hidden_states[0]
 
-        residual = hidden_states
-
-        # Transform q, k, v
-        # input layer norm is fused
-        query_states, key_states, value_states = self.qkv_proj.parallel_forward(
-            [hidden_states], collect_outputs=False
-        )[0]
-
-        # use local attention mask for ROPE layers
-        if self.use_chunked_attention and chunk_causal_mask is not None:
-            attention_mask = chunk_causal_mask
-
-        # Self Attention
-        hidden_states, _ = self.self_attn.parallel_forward(
-            query_states=[query_states],
-            key_states=[key_states],
-            value_states=[value_states],
-            position_embeddings=position_embeddings,
-            attention_mask=attention_mask,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            residual=residual,
-            **kwargs,
-        )
-
-        hidden_states = hidden_states[0]
-
-        # Fully Connected
-        residual = hidden_states
-
-        # the post layer norm & residual are fused in the feed forward
-        hidden_states = self.feed_forward.parallel_forward(
-            [hidden_states],
-            residual=residual,
-        )
-        if self.is_moe_layer:
-            hidden_states, router_logits = hidden_states
-
-            hidden_states = hidden_states[0]
+        bsz, q_len, _ = hidden_states.size()
+        if (
+            self.dispatchable
+            and (bsz == 1)
+            and (q_len == 1)
+            and isinstance(past_key_value, MuiCache)
+        ):
+            hidden_states = _MuiParallelLlama4Decoder.apply(
+                self.cpp_module,
+                past_key_value.cpp_module,
+                hidden_states,
+                attention_mask,
+                chunk_causal_mask,
+                position_embeddings,
+                cache_position,
+            )
         else:
+            residual = hidden_states
+
+            # Transform q, k, v
+            # input layer norm is fused
+            query_states, key_states, value_states = self.qkv_proj.parallel_forward(
+                [hidden_states], collect_outputs=False
+            )[0]
+
+            # use local attention mask for ROPE layers
+            if self.use_chunked_attention:
+                attention_mask = chunk_causal_mask
+
+            # Self Attention
+            hidden_states, _ = self.self_attn.parallel_forward(
+                query_states=[query_states],
+                key_states=[key_states],
+                value_states=[value_states],
+                position_embeddings=position_embeddings,
+                attention_mask=attention_mask,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                residual=residual,
+                **kwargs,
+            )
+
             hidden_states = hidden_states[0]
-            router_logits = None
+
+            # Fully Connected
+            residual = hidden_states
+
+            # the post layer norm & residual are fused in the feed forward
+            hidden_states = self.feed_forward.parallel_forward(
+                [hidden_states],
+                residual=residual,
+            )
+            if self.is_moe_layer:
+                hidden_states, router_logits = hidden_states
+
+                hidden_states = hidden_states[0]
+            else:
+                hidden_states = hidden_states[0]
+                router_logits = None
 
         outputs = ([hidden_states],)
 
