@@ -25,6 +25,9 @@ from muillm.modules.decoder.llama4decoder import MuiLlama4TextDecoderLayer
 from muillm.modules.decoder.parallelllama4decoder import (
     MuiParallelLlama4TextDecoderLayer,
 )
+from muillm.modules.decoder.parallelllama4decoderstack import (
+    _MuiParallelLlama4DecoderStack,
+)
 from muillm.modules.kvcache.cache_utils import (
     MuiCache,
     MuiHybridChunkedCache,
@@ -33,6 +36,8 @@ from muillm.modules.kvcache.cache_utils import (
 )
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
+
+import muillm_ext
 
 from transformers.cache_utils import Cache, HybridChunkedCache
 from transformers.generation import GenerationMixin
@@ -115,6 +120,21 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         # Initialize weights and apply final processing
         if initialize:
             self.post_init()
+
+    def finalize_init(self):
+        if self.comms == None:
+            # in the single GPU case we don't have comms, and we can't use the parallel decoder stack
+            self.cpp_module = None
+            return
+
+        if self.cpp_module is not None:
+            muillm_ext.muillm_parallel_llama4_decoder_stack_deinit(self.cpp_module)
+
+        self.cpp_module = muillm_ext.muillm_parallel_llama4_decoder_stack_init(
+            self.cpp_engine,
+            self.comms.comms,
+            [layer.cpp_module for layer in self.layers],
+        )
 
     @staticmethod
     def _replace_layers(
@@ -325,42 +345,68 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+        # determine if we can use the decoder stack
+        bsz, q_len, _ = hidden_states.size()
+        grad_checkpointing = self.gradient_checkpointing and self.training
+        mui_cache = isinstance(past_key_values, MuiCache)
+        dispatchable_dtype = hidden_states.dtype == torch.float16
+        no_outputs = (not output_hidden_states) and (not output_attentions)
+        dispatchable_input = (bsz == 1) and (q_len == 1) and dispatchable_dtype
+        dispatchable_to_stack = (
+            (self.cpp_module is not None)
+            and no_outputs
+            and (not grad_checkpointing)
+            and mui_cache
+            and dispatchable_input
+        )
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    causal_mask,
-                    chunk_causal_mask,
-                    position_ids,
-                    past_key_values,
-                    output_attentions,
-                    False,  # output_router_logits is False
-                    use_cache,
-                    cache_position,
-                    freq_cis,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    chunk_causal_mask=chunk_causal_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                    position_embeddings=freq_cis,
-                    **flash_attn_kwargs,
-                )
+        if dispatchable_to_stack:
+            hidden_states = _MuiParallelLlama4DecoderStack.apply(
+                self.cpp_module,
+                past_key_values.cpp_module,
+                hidden_states,
+                causal_mask,
+                chunk_causal_mask,
+                freq_cis,
+                cache_position,
+            )
+        else:
+            for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
 
-            hidden_states = layer_outputs[0]
+                if self.gradient_checkpointing and self.training:
+                    layer_outputs = self._gradient_checkpointing_func(
+                        decoder_layer.__call__,
+                        hidden_states,
+                        causal_mask,
+                        chunk_causal_mask,
+                        position_ids,
+                        past_key_values,
+                        output_attentions,
+                        False,  # output_router_logits is False
+                        use_cache,
+                        cache_position,
+                        freq_cis,
+                    )
+                else:
+                    layer_outputs = decoder_layer(
+                        hidden_states,
+                        attention_mask=causal_mask,
+                        chunk_causal_mask=chunk_causal_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_values,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        position_embeddings=freq_cis,
+                        **flash_attn_kwargs,
+                    )
 
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+                hidden_states = layer_outputs[0]
+
+                if output_attentions:
+                    all_self_attns += (layer_outputs[1],)
 
         hidden_states = self.norm(hidden_states)
 

@@ -161,6 +161,7 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "modules/parallel_decoder_module.h"
 #include "modules/parallel_llama4_decoder_module.h"
 #include "modules/parallel_decoder_stack.h"
+#include "modules/parallel_llama4_decoder_stack.h"
 
 #include "parallel_gateup_kernels.cuh"
 
@@ -403,4 +404,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_parallel_decoder_stack_init", &muillm_parallel_decoder_stack_init_trampoline, "muillm parallel decoder stack init", py::arg("engine"), py::arg("comm"), py::arg("decoders"));
   m.def("muillm_parallel_decoder_stack_deinit", &muillm_parallel_decoder_stack_deinit_trampoline, "muillm parallel decoder stack deinit", py::arg("module"));
   m.def("muillm_parallel_decoder_stack_forward", &muillm_parallel_decoder_stack_forward_trampoline, "muillm parallel decoder stack forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("m"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+
+  // parallel llama4 decoder stack
+  pybind11::class_<muillm_parallel_llama4_decoder_stack_ptr_t> cl_parallel_llama4_decoder_stack(m, "muillm_parallel_llama4_decoder_stack_ptr");
+  cl_parallel_llama4_decoder_stack.def(pybind11::init<>());
+
+  m.def("muillm_parallel_llama4_decoder_stack_init", &muillm_parallel_llama4_decoder_stack_init_trampoline, "muillm parallel llama4 decoder stack init", py::arg("engine"), py::arg("comm"), py::arg("decoders"));
+  m.def("muillm_parallel_llama4_decoder_stack_deinit", &muillm_parallel_llama4_decoder_stack_deinit_trampoline, "muillm parallel llama4 decoder stack deinit", py::arg("module"));
+  m.def("muillm_parallel_llama4_decoder_stack_forward", &muillm_parallel_llama4_decoder_stack_forward_trampoline, "muillm parallel llama4 decoder stack forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("mask"), py::arg("chunked_mask"), py::arg("position_embeds"), py::arg("cache_positions"));
 }

@@ -98,6 +98,7 @@ setup(
                 "csrc/modules/parallel_decoder_module.cpp",
                 "csrc/modules/parallel_llama4_decoder_module.cpp",
                 "csrc/modules/parallel_decoder_stack.cpp",
+                "csrc/modules/parallel_llama4_decoder_stack.cpp",
                 # other
                 "csrc/engine.cpp",
                 "csrc/gpu_info.cpp",
