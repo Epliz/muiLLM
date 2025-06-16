@@ -61,6 +61,10 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         super().__init__(engine_config=engine_config)
 
         self.cpp_engine = engine_config.cpp_engine
+        # the cpp module will be created at the end of all layer replacements
+        # (set the field here before potential OOM errors so that it can still be manipulated in
+        # the destructor)
+        self.cpp_module = None
         self.comms = engine_config.comms
         self.tensor_parallelism = engine_config.tensor_parallelism
 
@@ -88,7 +92,6 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         # replacements
         self.router._muillm_no_further_replacement = True
 
-        # BEGIN: MuiParallelExperts logic inlined here
         self.expert_dim = intermediate_size
         self.tp_expert_dim = self.expert_dim // self.tensor_parallelism
 
@@ -121,8 +124,6 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
             device=device,
             dtype=dtype,
         )
-
-        self.cpp_module = None
 
         self._check_dispatchable()
 

@@ -65,6 +65,10 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
         self.tensor_parallelism = engine_config.tensor_parallelism
         self.cpp_engine = engine_config.cpp_engine
+        # the cpp module will be created at the end of all layer replacements
+        # (set the field here before potential OOM errors so that it can still be manipulated in
+        # the destructor)
+        self.cpp_module = None
         self.comms = engine_config.comms
 
         self.hidden_size = hidden_size
@@ -112,9 +116,6 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
-
-        # the cpp module will be created at the end of all layer replacements
-        self.cpp_module = None
 
         # TODO: improve method selection
         self.method = _MuiParallelGateUpSiLUMethod.GATEUPSILU_FUSED

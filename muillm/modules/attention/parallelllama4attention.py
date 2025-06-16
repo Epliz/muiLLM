@@ -122,6 +122,10 @@ class MuiParallelLlama4TextAttention(MuiModule):
         super().__init__(engine_config=engine_config)
 
         self.cpp_engine = engine_config.cpp_engine
+        # the cpp module will be created at the end of all layer replacements
+        # (set the field here before potential OOM errors so that it can still be manipulated in
+        # the destructor)
+        self.cpp_module = None
         self.comms = engine_config.comms
         self.tensor_parallelism = engine_config.tensor_parallelism
 
@@ -151,9 +155,6 @@ class MuiParallelLlama4TextAttention(MuiModule):
         self.o_proj = o_proj
         if self.config.use_qk_norm and self.use_rope:
             self.qk_norm = qk_norm
-
-        # the cpp module will be created at the end of all layer replacements
-        self.cpp_module = None
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()

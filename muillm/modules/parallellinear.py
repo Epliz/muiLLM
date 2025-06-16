@@ -46,6 +46,14 @@ class MuiParallelLinear(MuiModule):
     ) -> None:
         super().__init__(engine_config=engine_config)
 
+        self.cpp_engine = engine_config.cpp_engine
+        # the cpp module will be created at the end of all layer replacements
+        # (set the field here before potential OOM errors so that it can still be manipulated in
+        # the destructor)
+        self.cpp_module = None
+        self.comms = engine_config.comms
+        self.tensor_parallelism = engine_config.tensor_parallelism
+
         linear = nn.Linear(
             in_features=in_features,
             out_features=out_features,
@@ -54,9 +62,6 @@ class MuiParallelLinear(MuiModule):
             dtype=dtype,
         )
 
-        self.cpp_engine = engine_config.cpp_engine
-        self.comms = engine_config.comms
-        self.tensor_parallelism = engine_config.tensor_parallelism
         self.sharding_dim = (
             sharding_dim + len(linear.weight.shape)
             if sharding_dim < 0
@@ -85,9 +90,6 @@ class MuiParallelLinear(MuiModule):
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
-
-        # the cpp module will be created at the end of all layer replacements
-        self.cpp_module = None
 
         # Need to synchronize after copying the tensors to make sure the transfers
         # completed
