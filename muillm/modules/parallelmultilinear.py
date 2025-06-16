@@ -329,18 +329,13 @@ class MuiParallelMultiLinear(MuiModule):
             )
             for prev_module in prev_modules
         ]
-        weigths_per_device = [
-            torch.cat([all_weights[i] for i in range(num_linears)], dim=0)
-        ]
-        self.linear.weights = nn.ParameterList(weigths_per_device)
-
-        weights_requires_grad = _all_or_none(
+        concat_weights = torch.cat([all_weights[i] for i in range(num_linears)], dim=0)
+        concat_weights_requires_grad = _all_or_none(
             [prev_module.weight.requires_grad for prev_module in prev_modules],
             "all or none weights must required grads but got a mix",
         )
-        MuiParallelLinear._set_requires_grads(
-            self.linear.weights, weights_requires_grad
-        )
+
+        self.linear._set_weights(concat_weights, concat_weights_requires_grad)
 
         if has_bias:
             all_biases = [
@@ -352,18 +347,13 @@ class MuiParallelMultiLinear(MuiModule):
                 )
                 for prev_module in prev_modules
             ]
-            biases_per_device = [
-                self._cat_dim0([all_biases[i] for i in range(num_linears)])
-            ]
-
-            self.linear.biases = nn.ParameterList(biases_per_device)
-            biases_requires_grad = _all_or_none(
+            concat_biases = self._cat_dim0([all_biases[i] for i in range(num_linears)])
+            concat_biases_requires_grad = _all_or_none(
                 [prev_module.bias.requires_grad for prev_module in prev_modules],
                 "all or none biases must required grads but got a mix",
             )
-            MuiParallelLinear._set_requires_grads(
-                self.linear.biases, biases_requires_grad
-            )
+
+            self.linear._set_bias(concat_biases, concat_biases_requires_grad)
 
         # norm_weights are not sharded
         if norm_weights is not None:

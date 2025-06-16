@@ -171,28 +171,26 @@ class MuiMultiLinear(MuiModule):
         device = prev_modules[0].weight.device if device is None else device
         has_bias = self.linear.bias is not None
 
-        self.linear.weight = nn.Parameter(
-            torch.cat(
-                [prev_module.weight.clone().detach() for prev_module in prev_modules],
-                dim=0,
-            )
+        concat_weights = torch.cat(
+            [prev_module.weight.clone().detach() for prev_module in prev_modules],
+            dim=0,
         )
-        self.linear.weight.requires_grad = _all_or_none(
+        concat_weights_require_grads = _all_or_none(
             [prev_module.weight.requires_grad for prev_module in prev_modules],
             "all or none weights must required grads but got a mix",
         )
+        self.linear._set_weights(concat_weights, concat_weights_require_grads)
 
         if has_bias:
-            self.linear.bias = nn.Parameter(
-                torch.cat(
-                    [prev_module.bias.clone().detach() for prev_module in prev_modules],
-                    dim=0,
-                )
+            concat_biases = torch.cat(
+                [prev_module.bias.clone().detach() for prev_module in prev_modules],
+                dim=0,
             )
-            self.linear.bias.requires_grad = _all_or_none(
+            concat_biases_requires_grad = _all_or_none(
                 [prev_module.bias.requires_grad for prev_module in prev_modules],
                 "all or none biases must required grads but got a mix",
             )
+            self.linear._set_bias(concat_biases, concat_biases_requires_grad)
 
         if norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities

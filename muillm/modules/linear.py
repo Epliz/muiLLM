@@ -233,23 +233,42 @@ class MuiLinear(MuiModule, nn.Linear):
 
         return new_module
 
-    def _set_weights(self, weights: torch.Tensor) -> None:
+    def _set_weights(
+        self, weights: torch.Tensor, requires_grads: Optional[bool] = None
+    ) -> None:
         weights_requires_grad = weights.requires_grad
-        self.weight = nn.Parameter(weights.clone().detach())
-        MuiLinear._set_requires_grads(self.weight, weights_requires_grad)
+        self.weight.data.copy_(weights.data)
+        MuiLinear._set_requires_grads(
+            self.weight,
+            requires_grads if requires_grads is not None else weights_requires_grad,
+        )
 
-    def _set_bias(self, bias: torch.Tensor) -> None:
+    def _set_bias(
+        self, bias: torch.Tensor, requires_grads: Optional[bool] = None
+    ) -> None:
         if bias is not None:
             bias_requires_grad = bias.requires_grad
-            self.bias = nn.Parameter(bias.clone().detach())
-            MuiLinear._set_requires_grads(self.bias, bias_requires_grad)
+            self.bias.data.copy_(bias.data)
+            MuiLinear._set_requires_grads(
+                self.bias,
+                requires_grads if requires_grads is not None else bias_requires_grad,
+            )
         else:
             self.bias = None
 
-    def _set_norm_weights(self, norm_weights: torch.Tensor) -> None:
+    def _set_norm_weights(
+        self, norm_weights: torch.Tensor, requires_grads: Optional[bool] = None
+    ) -> None:
         norm_weights_requires_grad = norm_weights.requires_grad
-        self.norm_weights = nn.Parameter(norm_weights.clone().detach())
-        MuiLinear._set_requires_grads(self.norm_weights, norm_weights_requires_grad)
+        self.norm_weights.data.copy_(norm_weights.data)
+        MuiLinear._set_requires_grads(
+            self.norm_weights,
+            (
+                requires_grads
+                if requires_grads is not None
+                else norm_weights_requires_grad
+            ),
+        )
 
     def copy_module(
         self,

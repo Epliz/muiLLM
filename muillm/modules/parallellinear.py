@@ -76,14 +76,10 @@ class MuiParallelLinear(MuiModule):
             else None
         )
 
-        self.weights = nn.ParameterList([self.__shard_weigths(linear.weight)])
-        MuiParallelLinear._set_requires_grads(self.weights, linear.weight.requires_grad)
+        self._set_weights(self.__shard_weigths(linear.weight))
 
         if linear.bias is not None:
-            self.biases = nn.ParameterList([self.__shard_bias(linear.bias)])
-            MuiParallelLinear._set_requires_grads(
-                self.biases, linear.bias.requires_grad
-            )
+            self._set_bias(self.__shard_bias(linear.bias))
         else:
             self.biases = None
 
@@ -273,15 +269,61 @@ class MuiParallelLinear(MuiModule):
 
         return new_module
 
-    def _set_norm_weights(self, norm_weights: torch.Tensor) -> None:
-        norm_weights_requires_grad = norm_weights.requires_grad
-        self.norm_weights = nn.ParameterList([norm_weights.detach()])
+    def _set_norm_weights(
+        self, norm_weights: torch.Tensor, requires_grads: Optional[bool] = None
+    ) -> None:
+        if norm_weights is None:
+            self.norm_weights = nn.ParameterList([None])
+            return
+
+        if not hasattr(self, "norm_weights") or self.norm_weights is None:
+            self.norm_weights = nn.ParameterList(
+                [norm_weights.contiguous().clone().detach()]
+            )
+        else:
+            self.norm_weights[0].data.copy_(norm_weights.data)
+
         MuiParallelLinear._set_requires_grads(
-            self.norm_weights, norm_weights_requires_grad
+            self.norm_weights,
+            (
+                requires_grads
+                if requires_grads is not None
+                else norm_weights.requires_grad
+            ),
         )
 
         # re-create the cpp module
         self.finalize_init()
+
+    def _set_weights(
+        self, weights: torch.Tensor, requires_grads: Optional[bool] = None
+    ) -> None:
+        if not hasattr(self, "weights") or self.weights is None:
+            self.weights = nn.ParameterList([weights.contiguous().clone().detach()])
+        else:
+            self.weights[0].data.copy_(weights.data)
+
+        MuiParallelLinear._set_requires_grads(
+            self.weights,
+            requires_grads if requires_grads is not None else weights.requires_grad,
+        )
+
+    def _set_bias(
+        self, bias: torch.Tensor, requires_grads: Optional[bool] = None
+    ) -> None:
+        if bias is None:
+            self.biases = nn.ParameterList([None])
+            return
+
+        if not hasattr(self, "biases") or self.biases is None:
+            self.biases = nn.ParameterList([bias.contiguous().clone().detach()])
+        else:
+            self.biases[0].data.copy_(bias.data)
+
+        MuiParallelLinear._set_requires_grads(
+            self.biases,
+            requires_grads if requires_grads is not None else bias.requires_grad,
+        )
 
     def copy_module(
         self,
@@ -299,20 +341,10 @@ class MuiParallelLinear(MuiModule):
 
         has_bias = prev_module.bias is not None
 
-        self.weights = nn.ParameterList([self.__shard_weigths(prev_module.weight)])
-        MuiParallelLinear._set_requires_grads(
-            self.weights, prev_module.weight.requires_grad
-        )
+        self._set_weights(self.__shard_weigths(prev_module.weight))
 
         if has_bias:
-            self.biases = (
-                nn.ParameterList([self.__shard_bias(prev_module.bias)])
-                if prev_module.bias is not None
-                else None
-            )
-            MuiParallelLinear._set_requires_grads(
-                self.biases, prev_module.bias.requires_grad
-            )
+            self._set_bias(self.__shard_bias(prev_module.bias))
 
         if isinstance(prev_module, MuiLinear):
             # MuiLinear inherits nn.Linear, so need to check first
