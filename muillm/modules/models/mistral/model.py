@@ -41,8 +41,6 @@ from transformers.models.mistral.modeling_mistral import (
     MistralPreTrainedModel,
     MistralModel,
     MistralForCausalLM,
-    MISTRAL_INPUTS_DOCSTRING,
-    MISTRAL_START_DOCSTRING,
 )
 
 from transformers.utils import (
@@ -61,10 +59,6 @@ logger = logging.get_logger(__name__)
 _CONFIG_FOR_DOC = "MistralConfig"
 
 
-@add_start_docstrings(
-    "The bare Mistral Model outputting raw hidden-states without any specific head on top.",
-    MISTRAL_START_DOCSTRING,
-)
 class MuiMistralModel(MistralPreTrainedModel, MuiModule):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`MistralDecoderLayer`]
@@ -192,7 +186,6 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(MISTRAL_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -506,7 +499,6 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
             sequence_length=sequence_length,
             target_length=target_length,
             dtype=dtype,
-            device=device,
             cache_position=cache_position,
             batch_size=input_tensor.shape[0],
             config=self.config,
@@ -535,7 +527,6 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         sequence_length: int,
         target_length: int,
         dtype: torch.dtype,
-        device: torch.device,
         cache_position: torch.Tensor,
         batch_size: int,
         config: MistralConfig,
@@ -565,6 +556,14 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
             past_key_values (`Cache`):
                 The cache class that is being used currently to generate
         """
+        if attention_mask is not None:
+            # because we are growing the cache in forward(), which is called after preparing inputs
+            # (which is when this method is called), we need to ensure that the
+            # target_length is correct according to the mask length
+            mask_length = attention_mask.shape[-1]
+            target_length = max(target_length, mask_length)
+
+        device = cache_position.device
         if attention_mask is not None and attention_mask.dim() == 4:
             # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
             causal_mask = attention_mask
@@ -700,10 +699,6 @@ class MuiMistralForCausalLM(MistralPreTrainedModel, MuiGenerationMixin):
     def get_decoder(self):
         return self.model
 
-    @add_start_docstrings_to_model_forward(MISTRAL_INPUTS_DOCSTRING)
-    @replace_return_docstrings(
-        output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
-    )
     def forward(
         self,
         input_ids: torch.LongTensor = None,

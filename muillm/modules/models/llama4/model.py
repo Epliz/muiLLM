@@ -67,7 +67,6 @@ from transformers.models.llama4.modeling_llama4 import (
     Llama4ForCausalLM,
     Llama4ForConditionalGeneration,
     Llama4CausalLMOutputWithPast,
-    LLAMA4_INPUTS_DOCSTRING,
 )
 
 from muillm.modules.parallellinear import MuiParallelLinear
@@ -234,7 +233,6 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(LLAMA4_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -518,7 +516,6 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
             sequence_length=sequence_length,
             target_length=max(full_cache_length, attention_chunk_size),
             dtype=dtype,
-            device=device,
             cache_position=cache_position,
             batch_size=input_tensor.shape[0],
         )
@@ -628,7 +625,6 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         sequence_length: int,
         target_length: int,
         dtype: torch.dtype,
-        device: torch.device,
         cache_position: torch.Tensor,
         batch_size: int,
         **kwargs,
@@ -655,7 +651,14 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
             batch_size (`torch.Tensor`):
                 Batch size.
         """
+        if attention_mask is not None:
+            # because we are growing the cache in forward(), which is called after preparing inputs
+            # (which is when this method is called), we need to ensure that the
+            # target_length is correct according to the mask length
+            mask_length = attention_mask.shape[-1]
+            target_length = max(target_length, mask_length)
 
+        device = cache_position.device
         if attention_mask is not None and attention_mask.dim() == 4:
             # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
             causal_mask = attention_mask
@@ -678,6 +681,7 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
                     causal_mask.clone()
                 )  # copy to contiguous memory for in-place edit
                 mask_length = attention_mask.shape[-1]
+
                 padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[
                     :, None, None, :
                 ].to(device)
@@ -781,10 +785,6 @@ class MuiLlama4ForCausalLM(Llama4PreTrainedModel, MuiGenerationMixin):
     def get_decoder(self):
         return self.model
 
-    @add_start_docstrings_to_model_forward(LLAMA4_INPUTS_DOCSTRING)
-    @replace_return_docstrings(
-        output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
-    )
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1232,7 +1232,6 @@ class MuiLlama4ForConditionalGeneration(Llama4PreTrainedModel, MuiGenerationMixi
         sequence_length: int,
         target_length: int,
         dtype: torch.dtype,
-        device: torch.device,
         cache_position: torch.Tensor,
         batch_size: int,
         **kwargs,
@@ -1259,7 +1258,7 @@ class MuiLlama4ForConditionalGeneration(Llama4PreTrainedModel, MuiGenerationMixi
             batch_size (`torch.Tensor`):
                 Batch size.
         """
-
+        device = cache_position.device
         if attention_mask is not None and attention_mask.dim() == 4:
             # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
             causal_mask = attention_mask

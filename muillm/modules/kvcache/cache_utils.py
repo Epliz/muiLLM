@@ -16,7 +16,7 @@ def _set_sharded_attention_config(
         config.num_key_value_heads = config.num_key_value_heads // tensor_parallelism
     if config.num_attention_heads is not None:
         config.num_attention_heads = config.num_attention_heads // tensor_parallelism
-    if not hasattr(config, "head_dim"):
+    if getattr(config, "head_dim", None) is None:
         # for some models, HF compute the head_dim as hidden_size / num_attention_heads
         # but we lower num_attention_heads, so we need to compensate for that otherwise
         # the head dim is wrong
@@ -31,7 +31,7 @@ def _reset_sharded_attention_config(
         config.num_key_value_heads = config.num_key_value_heads * tensor_parallelism
     if config.num_attention_heads is not None:
         config.num_attention_heads = config.num_attention_heads * tensor_parallelism
-    if not hasattr(config, "head_dim"):
+    if getattr(config, "head_dim", None) is None:
         config.hidden_size = config.hidden_size * tensor_parallelism
 
 

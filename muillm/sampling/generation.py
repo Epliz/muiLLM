@@ -128,7 +128,9 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
         unfinished_sequences = torch.ones(
             batch_size, dtype=torch.long, device=input_ids.device
         )
-        model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
+        model_kwargs = self._get_initial_cache_position(
+            cur_len, input_ids.device, model_kwargs
+        )
 
         model_forward = self.__call__
         if isinstance(model_kwargs.get("past_key_values"), Cache):
