@@ -59,7 +59,7 @@ def init_engine(
 def load_model(
     model_id: str,
     device="cuda",
-    model_dtype=torch.float16,
+    model_dtype="auto",
     quantization_method: QuantizationMethod = None,
     tensor_parallelism: Optional[int] = 1,
     **hfkwargs,
@@ -78,7 +78,7 @@ def load_model(
         hfkwargs["torch_dtype"] = model_dtype
         hfkwargs["low_cpu_mem_usage"] = True
         model = AutoModelForCausalLM.from_pretrained(model_id, **hfkwargs).to(
-            device=device, dtype=model_dtype
+            device=device
         )
 
         model = init_engine(
@@ -104,7 +104,7 @@ def load_model(
         )
 
         # ensure the model is moved to the right device
-        model = model.to(device=device, dtype=model_dtype)
+        model = model.to(device=device)
 
         # refinalize the model
         _finalize_module(model)
