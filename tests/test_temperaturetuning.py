@@ -27,10 +27,7 @@ def ref_apply_temperature_tuning(
     return query_states
 
 
-def test_apply_rotary_emb():
-    device = "cuda"
-    dtype = torch.float16
-
+def _test_apply_rotary_emb(device: str, dtype: torch.dtype):
     T = 5
     B = 1
     H = 128
@@ -53,3 +50,31 @@ def test_apply_rotary_emb():
     )
 
     tensors_equal(xq_out, xq_out_m)
+
+
+def test_apply_rotary_emb_fp32_cpu():
+    device = "cpu"
+    dtype = torch.float32
+
+    _test_apply_rotary_emb(device=device, dtype=dtype)
+
+
+def test_apply_rotary_emb_fp32_gpu():
+    device = "cuda"
+    dtype = torch.float32
+
+    _test_apply_rotary_emb(device=device, dtype=dtype)
+
+
+def test_apply_rotary_emb_fp16_gpu():
+    device = "cuda"
+    dtype = torch.float16
+
+    _test_apply_rotary_emb(device=device, dtype=dtype)
+
+
+def test_apply_rotary_emb_bf16_gpu():
+    device = "cuda"
+    dtype = torch.bfloat16
+
+    _test_apply_rotary_emb(device=device, dtype=dtype)

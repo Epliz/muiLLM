@@ -78,7 +78,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
 #include "rotary_kernels.h"
 #include "kvcaches/static_kvcache_kernels.cuh"
 #include "kvcaches/sliding_kvcache_kernels.cuh"
-#include "temperature_tuning_kernels.cuh"
+#include "temperaturetuning/temperature_tuning.cuh"
 
 #include "causal_transformer_decoding.cuh"
 

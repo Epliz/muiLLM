@@ -74,7 +74,9 @@ def apply_temperature_tuning(
     attn_scale: float,
     floor_scale: float,
 ) -> torch.Tensor:
-    if (query_states.dtype == torch.float16) and (query_states.is_cuda):
+    if (query_states.is_cuda) and (
+        (query_states.dtype == torch.float16) or (query_states.dtype == torch.bfloat16)
+    ):
         # can dispatch to the custom kernel
         return _MuiTemperatureTuning.apply(
             query_states,

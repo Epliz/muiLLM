@@ -2,7 +2,7 @@
 
 #include "../rotary_kernels.h"
 #include "../qkl2norm_kernels.cuh"
-#include "../temperature_tuning_kernels.cuh"
+#include "../temperaturetuning/temperature_tuning.cuh"
 #include "hybrid_chunked_kvcache.h"
 #include "../causal_transformer_decoding.cuh"
 
