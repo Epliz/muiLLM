@@ -87,7 +87,11 @@ class MuiL2Norm(MuiModule):
         return new_module
 
     def forward(self, input: Tensor) -> Tensor:
-        if self.dispatchable and (input.dtype == torch.float16) and (input.is_cuda):
+        if (
+            self.dispatchable
+            and (input.is_cuda)
+            and ((input.dtype == torch.float16) or (input.dtype == torch.bfloat16))
+        ):
             # we support the type
             return _MuiL2Norm.apply(input, self.variance_epsilon)
         else:

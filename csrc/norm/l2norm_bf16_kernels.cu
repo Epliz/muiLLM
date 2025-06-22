@@ -1,7 +1,5 @@
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/extension.h>
 
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
 
 #define THREADS_PER_BLOCK 256
 #define ELEMENTS_PER_BLOCK (2 * THREADS_PER_BLOCK)
@@ -34,9 +32,9 @@ __device__ float warpReduce(float val) {
 
 // TODO: variance is computed by every block
 //  each block scales and normalizes only a slice
-__global__ void muillm_l2norm_kernel(
-    const half* __restrict__ X, // input = size BxK
-    half* __restrict__ Y, // output = size BxK
+__global__ void muillm_l2norm_bf16_kernel(
+    const __hip_bfloat16* __restrict__ X, // input = size BxK
+    __hip_bfloat16* __restrict__ Y, // output = size BxK
     float epsilon,
     unsigned K,
     float scale // 1/K
@@ -66,12 +64,12 @@ __global__ void muillm_l2norm_kernel(
       {
         unsigned k = kStart;
         for (; k + 1 < K; k += ELEMENTS_PER_BLOCK) {
-          float2 x = __half22float2(*((const half2*)&X[k]));
+          float2 x = __bfloat1622float2(*((const __hip_bfloat162*)&X[k]));
           acc_var += x.x * x.x;
           acc_var += x.y * x.y;
         }
         if (k < K) {
-          float x = __half2float(X[k]);
+          float x = __bfloat162float(X[k]);
           acc_var += x * x;
         }
       }
@@ -79,12 +77,12 @@ __global__ void muillm_l2norm_kernel(
       {
         unsigned k = threadIdx.x * 2;
         for (; k + 1 < kStart; k += ELEMENTS_PER_BLOCK) {
-          float2 x = __half22float2(*((const half2*)&X[k]));
+          float2 x = __bfloat1622float2(*((const __hip_bfloat162*)&X[k]));
           acc_var += x.x * x.x;
           acc_var += x.y * x.y;
         }
         if (k < kStart) {
-          float x = __half2float(X[k]);
+          float x = __bfloat162float(X[k]);
           acc_var += x * x;
         }
       }
@@ -106,71 +104,42 @@ __global__ void muillm_l2norm_kernel(
       // one thread processes 2 elements
       unsigned k = blockIdx.x * ELEMENTS_PER_BLOCK + threadIdx.x * 2;
       if (k + 1 < K) {
-        float2 x = __half22float2(*((const half2*)&X[k]));
+        float2 x = __bfloat1622float2(*((const __hip_bfloat162*)&X[k]));
 
         float yx = (x.x * rsqrt_var);
         float yy = (x.y * rsqrt_var);
         
-        Y[k + 0] = __float2half(yx);
-        Y[k + 1] = __float2half(yy);
+        Y[k + 0] = __float2bfloat16(yx);
+        Y[k + 1] = __float2bfloat16(yy);
       }
       if (k < K) {
-        float x = __half2float(X[k]);
+        float x = __bfloat162float(X[k]);
 
         float y = (x * rsqrt_var);
         
-        Y[k] = __float2half(y);
+        Y[k] = __float2bfloat16(y);
       }
     }
 }
 
-static at::Tensor muillm_l2norm_forward_cuda(
-    torch::Tensor& x,
-    float epsilon) {
-
-  auto device = x.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  const auto K = x.size(x.dim() - 1);
-  // batch size
-  // TODO: is numel slow?
-  const auto B = x.numel() / K;
-
-  auto output_sizes = x.sizes().vec();
-
-  auto dtype = torch::kFloat16;
-  auto output_options = at::TensorOptions()
-                            .dtype(dtype)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  auto y = torch::empty(output_sizes, output_options);
-
+void muillm_l2norm_bf16(
+  hipStream_t stream,
+  unsigned B,
+  unsigned K,
+  const __hip_bfloat16* x,
+  __hip_bfloat16* y,
+  float epsilon
+) {
   const int threads_per_blocks = THREADS_PER_BLOCK;
   const dim3 num_blocks = dim3(DIV_ROUND_UP(K, ELEMENTS_PER_BLOCK), B, 1);
 
   float scale = 1.f / K;
 
-  muillm_l2norm_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-    (const half*)x.data_ptr(),
-    (half*)y.data_ptr(),
+  muillm_l2norm_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    x,
+    y,
     epsilon,
     K,
     scale
   );
-
-  return y;
-}
-
-#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
-
-at::Tensor muillm_l2norm_forward(
-    torch::Tensor inputs,
-    float epsilon) {
-  CHECK_INPUT(inputs);
-
-  return muillm_l2norm_forward_cuda(inputs, epsilon);
 }

@@ -70,7 +70,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
     int group_size_shift,
     torch::Tensor x);
 
-#include "l2norm_kernels.cuh"
+#include "norm/l2norm.cuh"
 #include "qkl2norm_kernels.cuh"
 #include "norm/rmsnorm.cuh"
 #include "reduce_kernels.cuh"
