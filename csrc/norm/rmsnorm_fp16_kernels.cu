@@ -1,7 +1,5 @@
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/extension.h>
 
-#include <cuda_fp16.h>
+#include <hip/hip_fp16.h>
 
 #define THREADS_PER_BLOCK 256
 #define ELEMENTS_PER_BLOCK (2 * THREADS_PER_BLOCK)
@@ -34,7 +32,7 @@ __device__ float warpReduce(float val) {
 
 // TODO: variance is computed by every block
 //  each block scales and normalizes only a slice
-__global__ void muillm_rmsnorm_kernel(
+__global__ void muillm_rmsnorm_fp16_kernel(
     const half* __restrict__ W, // weight matrix - size K
     const half* __restrict__ X, // input = size BxK
     half* __restrict__ Y, // output = size BxK
@@ -127,58 +125,27 @@ __global__ void muillm_rmsnorm_kernel(
     }
 }
 
-static at::Tensor muillm_rmsnorm_forward_cuda(
-    torch::Tensor& weights,
-    torch::Tensor& x,
-    float epsilon) {
-
-  auto device = x.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  // TODO: is numel slow?
-  const auto K = weights.numel();
-  // batch size
-  // TODO: is numel slow?
-  const auto B = x.numel() / K;
-
-  auto output_sizes = x.sizes().vec();
-
-  auto dtype = torch::kFloat16;
-  auto output_options = at::TensorOptions()
-                            .dtype(dtype)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  auto y = torch::empty(output_sizes, output_options);
+void muillm_rmsnorm_fp16(
+  hipStream_t stream,
+  unsigned B,
+  unsigned K,
+  const half* __restrict__ W, // weight matrix - size K
+  const half* __restrict__ X, // input = size BxK
+  half* __restrict__ Y, // output = size BxK
+  float epsilon
+) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
   const dim3 num_blocks = dim3(DIV_ROUND_UP(K, ELEMENTS_PER_BLOCK), B, 1);
 
   float scale = 1.f / K;
 
-  muillm_rmsnorm_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-    (const half*)weights.data_ptr(),
-    (const half*)x.data_ptr(),
-    (half*)y.data_ptr(),
+  muillm_rmsnorm_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    W,
+    X,
+    Y,
     epsilon,
     K,
     scale
   );
-
-  return y;
-}
-
-#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
-
-at::Tensor muillm_rmsnorm_forward(
-    torch::Tensor weights,
-    torch::Tensor inputs,
-    float epsilon) {
-  CHECK_INPUT(weights);
-  CHECK_INPUT(inputs);
-
-  return muillm_rmsnorm_forward_cuda(weights, inputs, epsilon);
 }

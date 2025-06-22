@@ -72,7 +72,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
 
 #include "l2norm_kernels.cuh"
 #include "qkl2norm_kernels.cuh"
-#include "rmsnorm_kernels.cuh"
+#include "norm/rmsnorm.cuh"
 #include "reduce_kernels.cuh"
 #include "topk_kernels.cuh"
 #include "rotary_kernels.h"

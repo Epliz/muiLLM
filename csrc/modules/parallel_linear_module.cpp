@@ -1,7 +1,7 @@
 #include "parallel_linear_module.h"
 
 #include "../parallel_linear_kernels.cuh"
-#include "../rmsnorm_kernels.cuh"
+#include "../norm/rmsnorm.cuh"
 #include "../comm_torch.h"
 
 //

@@ -16,8 +16,14 @@ from muillm.modules.norm.rmsnorm import MuiRMSNorm
 from .test_utils import tensors_equal
 
 
-def random_mistral_rmsnorm(hidden_size: int, eps=1e-5) -> MistralRMSNorm:
+def random_mistral_rmsnorm(
+    hidden_size: int,
+    eps=1e-5,
+    dtype=torch.float16,
+    device="cpu",
+) -> MistralRMSNorm:
     norm = MistralRMSNorm(hidden_size=hidden_size, eps=eps)
+    norm = norm.to(dtype=dtype, device=device)
 
     # initialize weights
     torch.nn.init.uniform_(norm.weight)
@@ -34,9 +40,9 @@ def copy_mistral_rmsnorm(norm: MistralRMSNorm) -> MistralRMSNorm:
     return new_norm
 
 
-def test_basic_mistral_rmsnorm():
+def _test_basic_mistral_rmsnorm(dtype: torch.dtype, device: str):
     hidden_size = 256
-    norm = random_mistral_rmsnorm(hidden_size=hidden_size)
+    norm = random_mistral_rmsnorm(hidden_size=hidden_size, dtype=dtype, device=device)
 
     # replace destroys the passed linear module so we need to copy it
     norm_copy = copy_mistral_rmsnorm(norm)
@@ -45,16 +51,32 @@ def test_basic_mistral_rmsnorm():
     muinorm = MuiRMSNorm.replace(
         prev_module=norm_copy,
         engine_config=engine_config,
-        device="cpu",
+        device=device,
     )
 
-    input_tensor = torch.rand(size=(4, hidden_size))
+    input_tensor = torch.rand(size=(4, hidden_size), device=device, dtype=dtype)
 
     y = norm(input_tensor)
 
     y_m = muinorm(input_tensor)
 
     tensors_equal(y, y_m)
+
+
+def test_basic_mistral_rmsnorm_fp32_cpu():
+    _test_basic_mistral_rmsnorm(dtype=torch.float32, device="cpu")
+
+
+def test_basic_mistral_rmsnorm_fp32_gpu():
+    _test_basic_mistral_rmsnorm(dtype=torch.float32, device="cuda")
+
+
+def test_basic_mistral_rmsnorm_fp16_gpu():
+    _test_basic_mistral_rmsnorm(dtype=torch.float16, device="cuda")
+
+
+def test_basic_mistral_rmsnorm_bf16_gpu():
+    _test_basic_mistral_rmsnorm(dtype=torch.bfloat16, device="cuda")
 
 
 def random_llama3_rmsnorm(hidden_size: int, eps=1e-5) -> LlamaRMSNorm:
