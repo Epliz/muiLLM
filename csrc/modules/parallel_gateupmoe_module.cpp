@@ -1,7 +1,7 @@
 #include "parallel_gateupmoe_module.h"
 
 #include "../parallel_gateupmoe_kernels.cuh"
-#include "../topk_kernels.cuh"
+#include "../topk/topk.cuh"
 
 MuiLLMParallelGateUpDownMLPMoE::MuiLLMParallelGateUpDownMLPMoE(
   muillm_engine_t* engine,

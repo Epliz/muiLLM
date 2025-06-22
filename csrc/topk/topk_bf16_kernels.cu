@@ -1,15 +1,9 @@
-#include "topk_kernels.cuh"
-#include <ATen/cuda/CUDAContext.h>
-
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
 
 #define THREADS_PER_BLOCK 256
 #define ELEMENTS_PER_BLOCK 4096
 
 #define DIV_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
-
-#define THREADS_PER_BLOCK 256
-#define ELEMENTS_PER_BLOCK 4096
 
 #define FULL_MASK32 0xffffffff
 #define FULL_MASK64 0xffffffffffffffff
@@ -63,9 +57,9 @@ __device__ float sigmoid(float x) {
 }
 
 // finds the maximum value in a row and applies the sigmoid function
-__global__ void muillm_max_sigmoid_kernel(
-    const half* __restrict__ X, // input values = size BxM
-    half* __restrict__ Y, // output values = size Bxk
+__global__ void muillm_max_sigmoid_bf16_kernel(
+    const __hip_bfloat16* __restrict__ X, // input values = size BxM
+    __hip_bfloat16* __restrict__ Y, // output values = size Bxk
     int64_t* __restrict__ indices, // output indices = size Bxk
     int M
 ) {
@@ -76,11 +70,11 @@ __global__ void muillm_max_sigmoid_kernel(
   indices = &indices[current_row];
 
   int max_index = -1;
-  half max_value = __float2half(-INFINITY);
+  __hip_bfloat16 max_value = __float2bfloat16(-INFINITY);
 
   // compute the per thread max
   for (int i = threadIdx.x; i < M; i += THREADS_PER_BLOCK) {
-    half value = X[i];
+    __hip_bfloat16 value = X[i];
     if (__hgt(value, max_value)) {
       max_value = value;
       max_index = i;
@@ -88,19 +82,19 @@ __global__ void muillm_max_sigmoid_kernel(
   }
   __syncthreads();
   // reduce the max value across threads in the block
-  value_index_pair_t pair = warpMax(__half2float(max_value), max_index);
+  value_index_pair_t pair = warpMax(__bfloat162float(max_value), max_index);
 
   // output the values and indices
   if (threadIdx.x == 0) {
     // apply the sigmoid function to the max value
-    Y[0] = __float2half(sigmoid(pair.value));
+    Y[0] = __float2bfloat16(sigmoid(pair.value));
     indices[0] = pair.index;
   }
 }
 
-__global__ void muillm_topk_sigmoid_kernel(
-    const half* __restrict__ X, // input values = size BxM
-    half* __restrict__ Y, // output values = size Bxk
+__global__ void muillm_topk_sigmoid_bf16_kernel(
+    const __hip_bfloat16* __restrict__ X, // input values = size BxM
+    __hip_bfloat16* __restrict__ Y, // output values = size Bxk
     int64_t* __restrict__ indices, // output indices = size Bxk
     int M,
     int k
@@ -111,7 +105,7 @@ __global__ void muillm_topk_sigmoid_kernel(
   Y = &Y[current_row * k];
   indices = &indices[current_row * k];
 
-  __shared__ half shared_values[ELEMENTS_PER_BLOCK];
+  __shared__ __hip_bfloat16 shared_values[ELEMENTS_PER_BLOCK];
   __shared__ int64_t shared_indices[ELEMENTS_PER_BLOCK];
 
   // compute the top K
@@ -126,7 +120,7 @@ __global__ void muillm_topk_sigmoid_kernel(
 
   // Fill remaining elements with negative infinity for proper sorting
   for (int i = threadIdx.x + M; i < P; i += THREADS_PER_BLOCK) {
-    shared_values[i] = __float2half(-INFINITY);
+    shared_values[i] = __float2bfloat16(-INFINITY);
     shared_indices[i] = -1;
   }
   __syncthreads();
@@ -152,7 +146,7 @@ __global__ void muillm_topk_sigmoid_kernel(
             
             if (should_swap) {
               // Swap values
-              half temp_val = shared_values[idx];
+              __hip_bfloat16 temp_val = shared_values[idx];
               shared_values[idx] = shared_values[partner];
               shared_values[partner] = temp_val;
               
@@ -171,7 +165,7 @@ __global__ void muillm_topk_sigmoid_kernel(
   // apply the sigmoid function to the top k values
   for (int i = threadIdx.x; i < k; i += THREADS_PER_BLOCK) {
     // Apply sigmoid: sigmoid(x) = 1 / (1 + exp(-x))
-    shared_values[i] = __float2half(sigmoid(__half2float(shared_values[i])));
+    shared_values[i] = __float2bfloat16(sigmoid(__bfloat162float(shared_values[i])));
   }
 
   // output the values and indices
@@ -181,66 +175,33 @@ __global__ void muillm_topk_sigmoid_kernel(
   }
 }
 
-#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
-
-// return top-k values and indices
-std::tuple<at::Tensor, at::Tensor> muillm_topk_sigmoid_forward(
-    torch::Tensor x, // shape BxM
-    int k) {
-  CHECK_INPUT(x);
-
-  auto device = x.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  // M is the last dimensions
-  const auto M = x.size(x.dim() - 1);
-  const auto B = x.numel() / M;
-
-  TORCH_CHECK(k > 0 && k <= M, "k must be in the range (0, M] where M is the last dimension of x");
-  TORCH_CHECK(M <= ELEMENTS_PER_BLOCK, "M must be less than ELEMENTS_PER_BLOCK");
-
-  auto output_sizes = x.sizes().vec();
-  output_sizes[x.dim() - 1] = k; // change last dimension to k
-
-  auto values_dtype = torch::kFloat16;
-  auto values_output_options = at::TensorOptions()
-                            .dtype(values_dtype)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  auto indices_dtype = torch::kInt64;
-  auto indices_output_options = at::TensorOptions()
-                            .dtype(indices_dtype)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  auto values = torch::empty(output_sizes, values_output_options);
-  auto indices = torch::empty(output_sizes, indices_output_options);
-
+void muillm_topk_sigmoid_bf16(
+    hipStream_t stream,
+    const __hip_bfloat16* x, // input values = size BxM
+    __hip_bfloat16* y, // output values = size Bxk
+    int64_t* indices, // output indices = size Bxk
+    int B,
+    int M,
+    int k
+) {
   const int threads_per_blocks = THREADS_PER_BLOCK;
 
   if (k == 1) {
     // Special case for k == 1, we can use a simpler kernel
-    muillm_max_sigmoid_kernel<<<B, threads_per_blocks, 0, stream>>>(
-      (const half*)x.data_ptr(),
-      (half*)values.data_ptr(),
-      (int64_t*)indices.data_ptr(),
+    muillm_max_sigmoid_bf16_kernel<<<B, threads_per_blocks, 0, stream>>>(
+      (const __hip_bfloat16*)x,
+      (__hip_bfloat16*)y,
+      (int64_t*)indices,
       M
     );
-    return std::make_tuple(values, indices);
   } else {
-    muillm_topk_sigmoid_kernel<<<B, threads_per_blocks, 0, stream>>>(
-      (const half*)x.data_ptr(),
-      (half*)values.data_ptr(),
-      (int64_t*)indices.data_ptr(),
+    muillm_topk_sigmoid_bf16_kernel<<<B, threads_per_blocks, 0, stream>>>(
+      (const __hip_bfloat16*)x,
+      (__hip_bfloat16*)y,
+      (int64_t*)indices,
       M,
       k
     );
   }
-
-  return std::make_tuple(values, indices);
 }
+
