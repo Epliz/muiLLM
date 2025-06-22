@@ -85,7 +85,11 @@ class MuiQKL2Norm(MuiModule):
         return new_module
 
     def forward(self, q: Tensor, k: Tensor) -> Tuple[Tensor, Tensor]:
-        if self.dispatchable and (q.dtype == torch.float16) and (q.is_cuda):
+        if (
+            self.dispatchable
+            and (q.is_cuda)
+            and ((q.dtype == torch.float16) or (q.dtype == torch.bfloat16))
+        ):
             # we support the type
             return _MuiQKL2Norm.apply(q, k, self.variance_epsilon)
         else:

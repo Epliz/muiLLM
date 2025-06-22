@@ -1,9 +1,4 @@
-#include "qkl2norm_kernels.cuh"
-
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/extension.h>
-
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
 
 #define THREADS_PER_BLOCK 256
 #define ELEMENTS_PER_BLOCK (2 * THREADS_PER_BLOCK)
@@ -36,11 +31,11 @@ __device__ float warpReduce(float val) {
 
 // TODO: variance is computed by every block
 //  each block scales and normalizes only a slice
-__global__ void muillm_qkl2norm_kernel(
-    const half* __restrict__ Q, // input = size BxK
-    const half* __restrict__ K, // input = size BxK
-    half* __restrict__ Q_NORM, // output = size BxK
-    half* __restrict__ K_NORM, // output = size BxK
+__global__ void muillm_qkl2norm_bf16_kernel(
+    const __hip_bfloat16* __restrict__ Q, // input = size BxK
+    const __hip_bfloat16* __restrict__ K, // input = size BxK
+    __hip_bfloat16* __restrict__ Q_NORM, // output = size BxK
+    __hip_bfloat16* __restrict__ K_NORM, // output = size BxK
     float epsilon,
     unsigned BQ, // batch size for Q
     unsigned N,
@@ -52,8 +47,8 @@ __global__ void muillm_qkl2norm_kernel(
 
     unsigned B = blockIdx.y;
 
-    const half* __restrict__ X;
-    half* __restrict__ Y;
+    const __hip_bfloat16* __restrict__ X;
+    __hip_bfloat16* __restrict__ Y;
 
     if (B < BQ) {
         // Q
@@ -87,12 +82,12 @@ __global__ void muillm_qkl2norm_kernel(
       {
         unsigned n = nStart;
         for (; n + 1 < N; n += ELEMENTS_PER_BLOCK) {
-          float2 x = __half22float2(*((const half2*)&X[n]));
+          float2 x = __bfloat1622float2(*((const __hip_bfloat162*)&X[n]));
           acc_var += x.x * x.x;
           acc_var += x.y * x.y;
         }
         if (n < N) {
-          float x = __half2float(X[n]);
+          float x = __bfloat162float(X[n]);
           acc_var += x * x;
         }
       }
@@ -100,12 +95,12 @@ __global__ void muillm_qkl2norm_kernel(
       {
         unsigned n = threadIdx.x * 2;
         for (; n + 1 < nStart; n += ELEMENTS_PER_BLOCK) {
-          float2 x = __half22float2(*((const half2*)&X[n]));
+          float2 x = __bfloat1622float2(*((const __hip_bfloat162*)&X[n]));
           acc_var += x.x * x.x;
           acc_var += x.y * x.y;
         }
         if (n < nStart) {
-          float x = __half2float(X[n]);
+          float x = __bfloat162float(X[n]);
           acc_var += x * x;
         }
       }
@@ -127,79 +122,49 @@ __global__ void muillm_qkl2norm_kernel(
       // one thread processes 2 elements
       unsigned n = blockIdx.x * ELEMENTS_PER_BLOCK + threadIdx.x * 2;
       if (n + 1 < N) {
-        float2 x = __half22float2(*((const half2*)&X[n]));
+        float2 x = __bfloat1622float2(*((const __hip_bfloat162*)&X[n]));
 
         float yx = (x.x * rsqrt_var);
         float yy = (x.y * rsqrt_var);
         
-        Y[n + 0] = __float2half(yx);
-        Y[n + 1] = __float2half(yy);
+        Y[n + 0] = __float2bfloat16(yx);
+        Y[n + 1] = __float2bfloat16(yy);
       }
       if (n < N) {
-        float x = __half2float(X[n]);
+        float x = __bfloat162float(X[n]);
 
         float y = (x * rsqrt_var);
         
-        Y[n] = __float2half(y);
+        Y[n] = __float2bfloat16(y);
       }
     }
 }
 
-#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
-
-std::tuple<at::Tensor, at::Tensor> muillm_qkl2norm_forward(
-    torch::Tensor q,
-    torch::Tensor k,
-    float epsilon) {
-  CHECK_INPUT(q);
-  CHECK_INPUT(k);
-
-  auto device = q.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  // q and k have different sizes, but the last dimension must be the same
-  const auto NQ = q.size(q.dim() - 1);
-  const auto NK = q.size(q.dim() - 1);
-  TORCH_CHECK(NQ == NK, "The last dimension of q and k must be the same");
-  const auto N = NQ; // last dimension size, same for q and k
-
-  // batch size
-  // TODO: is numel slow?
-  const auto BQ = q.numel() / N;
-  const auto BK = k.numel() / N;
-
-  // q and k have different sizes
-  auto qoutput_sizes = q.sizes().vec();
-  auto koutput_sizes = k.sizes().vec();
-
-  auto dtype = torch::kFloat16;
-  auto output_options = at::TensorOptions()
-                            .dtype(dtype)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  auto q_norm = torch::empty(qoutput_sizes, output_options);
-  auto k_norm = torch::empty(koutput_sizes, output_options);
-
+void muillm_qkl2norm_bf16(
+  hipStream_t stream,
+  unsigned BQ,
+  unsigned BK,
+  unsigned N,
+  const __hip_bfloat16* q,
+  const __hip_bfloat16* k,
+  __hip_bfloat16* q_norm,
+  __hip_bfloat16* k_norm,
+  float epsilon
+) {
   const int threads_per_blocks = THREADS_PER_BLOCK;
   // launch enough blocks to cover all elements in q and k
   const dim3 num_blocks = dim3(DIV_ROUND_UP(N, ELEMENTS_PER_BLOCK), BQ+BK, 1);
 
   float scale = 1.f / N;
 
-  muillm_qkl2norm_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-    (const half*)q.data_ptr(),
-    (const half*)k.data_ptr(),
-    (half*)q_norm.data_ptr(),
-    (half*)k_norm.data_ptr(),
+  muillm_qkl2norm_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    q,
+    k,
+    q_norm,
+    k_norm,
     epsilon,
     BQ,
     N,
     scale
   );
-
-  return std::make_tuple(q_norm, k_norm);
 }

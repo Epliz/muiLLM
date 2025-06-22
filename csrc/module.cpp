@@ -71,7 +71,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
     torch::Tensor x);
 
 #include "norm/l2norm.cuh"
-#include "qkl2norm_kernels.cuh"
+#include "norm/qkl2norm.cuh"
 #include "norm/rmsnorm.cuh"
 #include "reduce/reduce.cuh"
 #include "topk/topk.cuh"

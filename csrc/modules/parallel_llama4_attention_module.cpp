@@ -1,7 +1,7 @@
 #include "parallel_llama4_attention_module.h"
 
 #include "../rotary_kernels.h"
-#include "../qkl2norm_kernels.cuh"
+#include "../norm/qkl2norm.cuh"
 #include "../temperaturetuning/temperature_tuning.cuh"
 #include "hybrid_chunked_kvcache.h"
 #include "../causal_transformer_decoding.cuh"
