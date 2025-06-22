@@ -1,10 +1,4 @@
-#include "reduce_kernels.cuh"
-
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/extension.h>
-
-#include <cuda_fp16.h>
-
+#include <hip/hip_fp16.h>
 
 #define THREADS_PER_BLOCK 256
 
@@ -35,7 +29,7 @@ __device__ float warpReduce(float val) {
 }
 
 // kernel to do the reduction
-__global__ void muillm_reduce_sum_kernel(
+__global__ void muillm_reduce_sum_fp16_kernel(
     const half* __restrict__ X, // size BxMxN
     half* __restrict__ Y, // size BxMx1 (if we reduce columns) or Bx1xN (if we reduce rows)
     int M, // number of rows
@@ -109,44 +103,17 @@ __global__ void muillm_reduce_sum_kernel(
   }
 }
 
-#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
-
-void muillm_reduce_sum_forward_placed_output(
-    torch::Tensor x, // shape ()
-    int dim,
-    bool keep_dim,
-    void* output_ptr,
-    hipStream_t stream
+void muillm_reduce_sum_fp16(
+  hipStream_t stream,
+  unsigned B,
+  unsigned M,
+  unsigned N,
+  bool reduce_last_dim,
+  const half* x,
+  half* y
 ) {
-  CHECK_INPUT(x);
-
-  int num_dims = x.dim();
-  TORCH_CHECK(x.dtype() == torch::kFloat16, "Input tensor must be of type float16");
-  TORCH_CHECK(num_dims >= 1, "Input tensor must have at least one dimension");
-
-  if (dim < 0) {
-    dim += num_dims; // convert negative dimension to positive
-  }
-
-  auto input_sizes = x.sizes();
-
-  bool reduce_last_dim = (dim == num_dims - 1);
-
-  int B, M, N;
   // calculate the number of blocks and threads
   if (reduce_last_dim) {
-    // B can be 1
-    B = 1;
-    // M is the product of all dimensions before the last dimension
-    M = 1;
-    for (int i = 0; i < num_dims - 1; ++i) {
-      M *= input_sizes[i];
-    }
-    // N is the last dimension
-    N = input_sizes[num_dims - 1];
-
     // as many block as needed to cover all rows
     const int num_blocks_x = M;
     const int num_blocks_y = B;
@@ -155,26 +122,14 @@ void muillm_reduce_sum_forward_placed_output(
     int threads_per_blocks = THREADS_PER_BLOCK;
 
     // launch the kernel
-    muillm_reduce_sum_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*) x.data_ptr(),
-        (half*)output_ptr,
+    muillm_reduce_sum_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+        x,
+        y,
         M,
         N,
         reduce_last_dim
     );
   } else {
-    // B is the product of all dimensions before the reduced dimension
-    B = 1;
-    for (int i = 0; i < dim; ++i) {
-      B *= input_sizes[i];
-    }
-    // M is the size of the reduced dimension
-    M = input_sizes[dim];
-    // N is the product of all dimensions after the reduced dimension
-    N = 1;
-    for (int i = dim + 1; i < num_dims; ++i) {
-      N *= input_sizes[i];
-    }
 
     // as many block as needed to cover all columns
     const int num_blocks_x = DIV_ROUND_UP(N, THREADS_PER_BLOCK);
@@ -184,59 +139,13 @@ void muillm_reduce_sum_forward_placed_output(
     int threads_per_blocks = THREADS_PER_BLOCK;
 
     // launch the kernel
-    muillm_reduce_sum_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*) x.data_ptr(),
-        (half*)output_ptr,
+    muillm_reduce_sum_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+        x,
+        y,
         M,
         N,
         reduce_last_dim
     );
 
   }
-}
-
-at::Tensor muillm_reduce_sum_forward(
-    torch::Tensor x,
-    int dim,
-    bool keep_dim
-) {
-
-  auto device = x.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  if (dim < 0) {
-    dim += x.dim();
-  }
-
-  TORCH_CHECK(dim >= 0 && dim < x.dim(), "Invalid dimension for reduction");
-
-  // the output size is the same as input size except for the reduced dimension
-  auto output_sizes = x.sizes().vec();
-  if (!keep_dim) {
-    TORCH_CHECK(x.dim() > 0, "Cannot remove dimension for a scalar tensor");
-    // get the size of the output
-    output_sizes.erase(output_sizes.begin() + dim); // remove the dimension
-  } else {
-    // keep dim
-    output_sizes[dim] = 1; // reduce the dimension
-  }
-
-  auto dtype = torch::kFloat16;
-  auto output_options = at::TensorOptions()
-                            .dtype(dtype)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  auto y = torch::empty(output_sizes, output_options);
-
-  muillm_reduce_sum_forward_placed_output(
-      x,
-      dim,
-      keep_dim,
-      y.data_ptr(),
-      stream
-  );
-
-  return y;
 }

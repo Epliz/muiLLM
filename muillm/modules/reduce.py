@@ -31,4 +31,9 @@ def reduce_sum(inputs: torch.Tensor, dim: int, keepdim: bool = False) -> torch.T
     Returns:
         torch.Tensor: The reduced tensor.
     """
-    return _MuiReducetorch.apply(inputs, dim, keepdim)
+    if inputs.is_cuda and (
+        (inputs.dtype == torch.float16) or (inputs.dtype == torch.bfloat16)
+    ):
+        return _MuiReducetorch.apply(inputs, dim, keepdim)
+
+    return torch.sum(inputs, dim=dim, keepdim=keepdim)

@@ -77,7 +77,9 @@ setup(
                 "csrc/flash_decoding.cu",
                 "csrc/sync.cu",
                 "csrc/sync_torch.cpp",
-                "csrc/reduce_kernels.cu",
+                "csrc/reduce/reduce.cu",
+                "csrc/reduce/reduce_fp16_kernels.cu",
+                "csrc/reduce/reduce_bf16_kernels.cu",
                 # comms
                 "csrc/comm_base.cpp",
                 "csrc/comm.cpp",
