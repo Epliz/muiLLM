@@ -19,7 +19,7 @@ muillm_engine_ptr muillm_engine_init_trampoline(
   return ret;
 }
 
-#include "linear_kernels.cuh"
+#include "linear/linear.cuh"
 
 #include "int8_linear_kernels.cuh"
 

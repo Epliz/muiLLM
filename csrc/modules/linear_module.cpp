@@ -1,6 +1,6 @@
 #include "linear_module.h"
 
-#include "../linear_kernels.cuh"
+#include "../linear/linear.cuh"
 #include "../norm/rmsnorm.cuh"
 #include "../comm_torch.h"
 
@@ -27,7 +27,7 @@ MuiLLMLinear::MuiLLMLinear(
   this->variance_epsilon = variance_epsilon;
 
   auto wdtype = weights.dtype();
-  bool dispatchable_type = (wdtype == at::kHalf);
+  bool dispatchable_type = (wdtype == torch::kFloat16) || (wdtype == torch::kBFloat16);
   bool dispatchable_device = weights.device().is_cuda();
   this->dispatchable = dispatchable_type && dispatchable_device;
 }

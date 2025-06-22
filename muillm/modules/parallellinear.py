@@ -142,7 +142,9 @@ class MuiParallelLinear(MuiModule):
 
     def _check_dispatchable(self):
         self.dtype = self.weights[0].dtype
-        dispatchable_type = self.dtype == torch.float16
+        dispatchable_type = (self.dtype == torch.float16) or (
+            self.dtype == torch.bfloat16
+        )
         self.is_cuda = self.weights[0].is_cuda
         dispatchable_device = self.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type

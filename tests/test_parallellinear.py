@@ -21,9 +21,15 @@ from .test_utils import (
 )
 
 
-def _test_basic_linear(in_features: int, out_features: int, device: str):
+def _test_basic_linear(
+    in_features: int, out_features: int, device: str, dtype: torch.dtype = torch.float16
+):
     linear = random_linear(
-        in_features=in_features, out_features=out_features, bias=False, device=device
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        device=device,
+        dtype=dtype,
     )
 
     # replace destroys the passed linear module so we need to copy it
@@ -37,7 +43,7 @@ def _test_basic_linear(in_features: int, out_features: int, device: str):
     )
     muilinear.finalize_init()
 
-    input_tensor = torch.rand(size=(4, in_features), device=device)
+    input_tensor = torch.rand(size=(4, in_features), device=device, dtype=dtype)
 
     y = linear(input_tensor)
 
@@ -52,9 +58,15 @@ def test_basic_linear():
     )
 
 
-def _test_linear_bias(in_features: int, out_features: int, device: str):
+def _test_linear_bias(
+    in_features: int, out_features: int, device: str, dtype: torch.dtype = torch.float16
+):
     linear = random_linear(
-        in_features=in_features, out_features=out_features, bias=True, device=device
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        device=device,
+        dtype=dtype,
     )
 
     # replace destroys the passed linear module so we need to copy it
@@ -68,7 +80,7 @@ def _test_linear_bias(in_features: int, out_features: int, device: str):
     )
     muilinear.finalize_init()
 
-    input_tensor = torch.rand(size=(4, in_features), device=device)
+    input_tensor = torch.rand(size=(4, in_features), device=device, dtype=dtype)
 
     y = linear(input_tensor)
 

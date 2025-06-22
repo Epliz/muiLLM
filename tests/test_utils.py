@@ -28,10 +28,18 @@ def tensors_equal(t1, t2, rtol=1e-04):
 
 
 def random_linear(
-    in_features: int, out_features: int, bias: bool = False, device="cuda"
+    in_features: int,
+    out_features: int,
+    bias: bool = False,
+    device="cuda",
+    dtype=torch.float16,
 ) -> nn.Linear:
     linear = nn.Linear(
-        in_features=in_features, out_features=out_features, bias=bias, device=device
+        in_features=in_features,
+        out_features=out_features,
+        bias=bias,
+        device=device,
+        dtype=dtype,
     )
 
     # We seed to have reproducible results
@@ -61,10 +69,12 @@ def copy_linear(linear: nn.Linear) -> nn.Linear:
 
 
 def random_linears(
-    in_features: int, out_features: List[int], device: str
+    in_features: int, out_features: List[int], device: str, dtype=torch.float16
 ) -> List[nn.Linear]:
     return [
-        random_linear(in_features=in_features, out_features=out_feat, device=device)
+        random_linear(
+            in_features=in_features, out_features=out_feat, device=device, dtype=dtype
+        )
         for out_feat in out_features
     ]
 

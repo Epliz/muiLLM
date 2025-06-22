@@ -3,7 +3,7 @@
 
 #include "engine.h"
 #include "comm_torch.h"
-#include "linear_kernels.cuh" // for activation enum
+#include "linear/linear.cuh" // for activation enum
 
 #include <optional>
 

@@ -13,9 +13,14 @@ from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
 from .test_utils import execute_distributed, tensors_equal, copy_linears, random_linears
 
 
-def _test_basic_linears(in_features: int, out_features: List[int], device: str):
+def _test_basic_linears(
+    in_features: int, out_features: List[int], device: str, dtype=torch.float16
+):
     linears = random_linears(
-        in_features=in_features, out_features=out_features, device=device
+        in_features=in_features,
+        out_features=out_features,
+        device=device,
+        dtype=dtype,
     )
 
     # replace destroys the passed linear module so we need to copy it
@@ -29,7 +34,7 @@ def _test_basic_linears(in_features: int, out_features: List[int], device: str):
     )
     multilinear.finalize_init()
 
-    input_tensor = torch.rand(size=(4, in_features), device=device)
+    input_tensor = torch.rand(size=(4, in_features), device=device, dtype=dtype)
 
     q = linears[0](input_tensor)
     k = linears[1](input_tensor)

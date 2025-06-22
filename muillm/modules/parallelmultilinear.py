@@ -144,7 +144,7 @@ class MuiParallelMultiLinear(MuiModule):
         prev_modules: Union[MuiMultiLinear, List[nn.Linear]],
         engine_config: MuiEngineConfig,
         prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None,
-        sharding_dim: int = 0,
+        sharding_dim: int = 1,
         device=None,
     ) -> "MuiParallelMultiLinear":
         if device is None:

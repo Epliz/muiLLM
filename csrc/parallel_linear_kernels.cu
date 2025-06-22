@@ -1,4 +1,3 @@
-#include "parallel_gateup_kernels.cuh"
 #include "parallel_linear_kernels.cuh"
 
 #include <ATen/cuda/CUDAContext.h>
@@ -90,14 +89,23 @@ at::Tensor muillm_parallel_linear_activ_forward(
     size_t in_count = N;
     size_t output_count = sharding_dim == 1 ? N : (N * tp_level);
   
-    muillm_comm_datatype_t datatype = MUILLM_COMM_FP16;
+    auto dtype = x.dtype();
+
+    muillm_comm_datatype_t datatype;
   
+    if (dtype == torch::kFloat16) {
+      datatype = MUILLM_COMM_FP16;
+    } else if (dtype == torch::kBFloat16) {
+      datatype = MUILLM_COMM_BF16;
+    } else {
+      // error
+      TORCH_CHECK(false, "Unsupported dtype for all_reduce_sum");
+    }
+
     if ((muillm_error = muillm_comm_get_buffers(comm, in_count, datatype, &buffers, stream)) != MUILLM_COMM_SUCCESS) {
       TORCH_CHECK(false, "failed to get reduction buffers");
     }
 
-
-    auto dtype = torch::kFloat16;
     auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)

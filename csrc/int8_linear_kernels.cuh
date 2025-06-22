@@ -1,7 +1,7 @@
 #ifndef __MUILLM_INT8_LINEAR_KERNELS_CUH__
 #define __MUILLM_INT8_LINEAR_KERNELS_CUH__
 
-#include "linear_kernels.cuh"
+#include "linear/activation.h"
 
 at::Tensor muillm_int8_linear_activ_forward(
     torch::Tensor norm_weights,

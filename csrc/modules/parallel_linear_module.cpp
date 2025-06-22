@@ -31,7 +31,7 @@ MuiLLMParallelLinear::MuiLLMParallelLinear(
   this->sharding_dim = sharding_dim;
 
   auto wdtype = weights.dtype();
-  bool dispatchable_type = (wdtype == at::kHalf);
+  bool dispatchable_type = (wdtype == torch::kFloat16) || (wdtype == torch::kBFloat16);
   bool dispatchable_device = weights.device().is_cuda();
   this->dispatchable = dispatchable_type && dispatchable_device;
 }

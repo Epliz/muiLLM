@@ -48,7 +48,9 @@ setup(
             "muillm_ext",
             [
                 "csrc/module.cpp",
-                "csrc/linear_kernels.cu",
+                "csrc/linear/linear.cu",
+                "csrc/linear/linear_fp16_kernels.cu",
+                "csrc/linear/linear_bf16_kernels.cu",
                 "csrc/moelinear_kernels.cu",
                 "csrc/int8_dequantization_kernel.cu",
                 "csrc/int8_linear_kernels.cu",

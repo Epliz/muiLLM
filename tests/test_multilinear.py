@@ -8,10 +8,14 @@ from .test_utils import copy_linears, random_linears, tensors_equal
 
 
 def test_basic_linears():
+    dtype = torch.float16
     device = "cpu"
     in_features = 4096
     linears = random_linears(
-        in_features=in_features, out_features=[1024, 2048, 4096], device=device
+        in_features=in_features,
+        out_features=[1024, 2048, 4096],
+        device=device,
+        dtype=dtype,
     )
 
     # replace destroys the passed linear module so we need to copy it
@@ -25,7 +29,7 @@ def test_basic_linears():
     )
     multilinear.finalize_init()
 
-    input_tensor = torch.rand(size=(4, in_features))
+    input_tensor = torch.rand(size=(4, in_features), device=device, dtype=dtype)
 
     q = linears[0](input_tensor)
     k = linears[1](input_tensor)
@@ -44,10 +48,14 @@ def test_basic_linears():
 
 
 def test_replace_back():
+    dtype = torch.float16
     device = "cpu"
     in_features = 4096
     linears = random_linears(
-        in_features=in_features, out_features=[1024, 2048, 4096], device=device
+        in_features=in_features,
+        out_features=[1024, 2048, 4096],
+        device=device,
+        dtype=dtype,
     )
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
@@ -59,7 +67,7 @@ def test_replace_back():
 
     replaced_back_linears, _ = multilinear.replace_back()
 
-    input_tensor = torch.rand(size=(4, in_features))
+    input_tensor = torch.rand(size=(4, in_features), device=device, dtype=dtype)
 
     q = linears[0](input_tensor)
     k = linears[1](input_tensor)
