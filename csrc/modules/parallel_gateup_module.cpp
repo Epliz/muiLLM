@@ -24,7 +24,7 @@ MuiLLMParallelGateUpDownMLP::MuiLLMParallelGateUpDownMLP(
   this->variance_epsilon = variance_epsilon;
 
   auto wdtype = gate_weights.dtype();
-  bool dispatchable_type = (wdtype == at::kHalf);
+  bool dispatchable_type = (wdtype == torch::kFloat16) || (wdtype == torch::kBFloat16);
   bool dispatchable_device = gate_weights.device().is_cuda();
   this->dispatchable = dispatchable_device && dispatchable_type;
 }

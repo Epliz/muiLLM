@@ -1,7 +1,7 @@
 #ifndef __MUILLM_GATEUP_KERNELS_CUH__
 #define __MUILLM_GATEUP_KERNELS_CUH__
 
-#include "engine.h"
+#include "../engine.h"
 
 #include <torch/extension.h>
 

@@ -18,7 +18,12 @@ from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 from .test_utils import tensors_equal
 
 
-def random_mistral_mlp(hidden_size: int, intermediate_size: int) -> MistralMLP:
+def random_mistral_mlp(
+    hidden_size: int,
+    intermediate_size: int,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> MistralMLP:
     config = MistralConfig(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
@@ -36,6 +41,8 @@ def random_mistral_mlp(hidden_size: int, intermediate_size: int) -> MistralMLP:
     torch.nn.init.xavier_uniform_(mlp.up_proj.weight)
     torch.nn.init.xavier_uniform_(mlp.down_proj.weight)
 
+    mlp = mlp.to(device=device, dtype=dtype)
+
     return mlp
 
 
@@ -49,9 +56,11 @@ def copy_mistral_mlp(mlp: MistralMLP) -> MistralMLP:
     return new_mlp
 
 
-def test_basic_mistral_mlp():
+def _test_basic_mistral_mlp(device: str = "cpu", dtype: torch.dtype = torch.float32):
     hidden_size = 256
-    mlp = random_mistral_mlp(hidden_size=hidden_size, intermediate_size=1024)
+    mlp = random_mistral_mlp(
+        hidden_size=hidden_size, intermediate_size=1024, device=device, dtype=dtype
+    )
 
     # replace destroys the passed linear module so we need to copy it
     mlp_copy = copy_mistral_mlp(mlp)
@@ -60,17 +69,33 @@ def test_basic_mistral_mlp():
     muimlp = MuiGateUpDownMLP.replace(
         prev_module=mlp_copy,
         engine_config=engine_config,
-        device="cpu",
+        device=device,
     )
     muimlp.finalize_init()
 
-    input_tensor = torch.rand(size=(4, hidden_size))
+    input_tensor = torch.rand(size=(4, hidden_size), device=device, dtype=dtype)
 
     y = mlp(input_tensor)
 
     y_m = muimlp(input_tensor)
 
     tensors_equal(y, y_m)
+
+
+def test_basic_mistral_mlp_fp32_cpu():
+    _test_basic_mistral_mlp(device="cpu", dtype=torch.float32)
+
+
+def test_basic_mistral_mlp_fp32_gpu():
+    _test_basic_mistral_mlp(device="cuda", dtype=torch.float32)
+
+
+def test_basic_mistral_mlp_fp16_gpu():
+    _test_basic_mistral_mlp(device="cuda", dtype=torch.float16)
+
+
+def test_basic_mistral_mlp_bf16_gpu():
+    _test_basic_mistral_mlp(device="cuda", dtype=torch.bfloat16)
 
 
 def random_llama3_mlp(hidden_size: int, intermediate_size: int) -> LlamaMLP:
@@ -185,4 +210,3 @@ def test_basic_llama4_mlp():
 
 # TODO tests with bias and no bias
 # TODO tests with input norm
-# TODO tests with other data types

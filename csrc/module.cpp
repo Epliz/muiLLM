@@ -53,7 +53,7 @@ at::Tensor muillm_int8_linear_forward_trampoline(
     );
 }
 
-#include "gateup_kernels.cuh"
+#include "ffn/gateup.cuh"
 #include "gateupmoe_kernels.cuh"
 
 

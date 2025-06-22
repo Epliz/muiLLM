@@ -171,7 +171,7 @@ class MuiGateUpDownMLP(MuiModule):
     def _check_dispatchable(self):
         wdtype = self.gate_proj.weight.dtype
         dispatchable_activation = isinstance(self.activation_function, nn.SiLU)
-        dispatchable_type = wdtype == torch.float16
+        dispatchable_type = (wdtype == torch.float16) or (wdtype == torch.bfloat16)
         dispatchable_device = self.gate_proj.weight.is_cuda
         self.dispatchable = (
             dispatchable_activation and dispatchable_device and dispatchable_type
