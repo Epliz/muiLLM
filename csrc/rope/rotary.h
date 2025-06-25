@@ -5,6 +5,8 @@
 #include <tuple>
 #include <stdint.h>
 
+#include "rotary_position_layout.h"
+
 // out: query, key
 std::tuple<at::Tensor, at::Tensor> muillm_rope_forward_no_cache(
     torch::Tensor& position_ids,
@@ -46,7 +48,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> muillm_rope_forward_static_cache(
 std::tuple<at::Tensor, at::Tensor> muillm_complex_rope_forward_no_cache(
     torch::Tensor& q_in,
     torch::Tensor& k_in,
-    torch::Tensor& position_embeds
+    torch::Tensor& position_embeds // always complex floats
 );
 
 #endif /* __MUILLM_ROTARY_KERNELS_H__ */

@@ -1,6 +1,6 @@
 #include "parallel_llama4_attention_module.h"
 
-#include "../rotary_kernels.h"
+#include "../rope/rotary.h"
 #include "../norm/qkl2norm.cuh"
 #include "../temperaturetuning/temperature_tuning.cuh"
 #include "hybrid_chunked_kvcache.h"

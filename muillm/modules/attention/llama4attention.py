@@ -53,7 +53,8 @@ def apply_rotary_emb(
     xk: torch.Tensor,
     freqs_cis: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if (xq.dtype == torch.float16) and (xq.is_cuda):
+    dtype = xq.dtype
+    if (xq.is_cuda) and ((dtype == torch.float16) or (dtype == torch.bfloat16)):
         # can dispatch to the custom kernel
         return _MuiComplexRotaryNoCache.apply(
             xq,
@@ -61,6 +62,7 @@ def apply_rotary_emb(
             freqs_cis,
         )
     else:
+        # freqs_cis is always a complex tensor of floats
         xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
         xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
         xq_out = torch.view_as_real(xq_ * freqs_cis[:, None, :, :]).flatten(3)

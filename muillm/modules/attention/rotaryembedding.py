@@ -248,7 +248,9 @@ class MuiRotaryEmbedding(MuiModule):
     def _check_dispatchable(self):
         # cos and sin are of type self.dtype
         # but the frequencies are float32
-        dispatchable_type = self.dtype == torch.float16
+        dispatchable_type = (self.dtype == torch.float16) or (
+            self.dtype == torch.bfloat16
+        )
         dispatchable_device = self.inv_freq.is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
 
@@ -333,12 +335,16 @@ class MuiRotaryEmbedding(MuiModule):
 
     def forward(self, x, position_ids):
         # x: [bs, num_attention_heads, seq_len, head_size]
-        cos = self.cos_cached[position_ids].to(dtype=x.dtype)
-        sin = self.sin_cached[position_ids].to(dtype=x.dtype)
+        dtype = x.dtype
 
         if self.output_complex:
+            # For Llama 4, always output complex floats
+            cos = self.cos_cached[position_ids].to(dtype=torch.float32)
+            sin = self.sin_cached[position_ids].to(dtype=torch.float32)
             return torch.complex(cos, sin)
         else:
+            cos = self.cos_cached[position_ids].to(dtype=dtype)
+            sin = self.sin_cached[position_ids].to(dtype=dtype)
             return cos, sin
 
     def apply_rotary_pos_emb_write_kv_cache(

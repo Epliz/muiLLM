@@ -2,7 +2,7 @@
 #include "static_kvcache.h"
 #include "dynamic_kvcache.h"
 
-#include "../rotary_kernels.h"
+#include "../rope/rotary.h"
 
 MuillmRotaryEmbedding::MuillmRotaryEmbedding(
   muillm_engine_t* engine,
