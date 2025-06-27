@@ -288,7 +288,10 @@ class MuiParallelBaseAttention(MuiModule):
         #  k: [B, num_k_heads, S, embed_dim]
         #  v: [B, num_v_heads, S, embed_dim]
 
-        if (q_len == 1) and (query_states.dtype == torch.float16):
+        if (q_len == 1) and (
+            (query_states.dtype == torch.float16)
+            or (query_states.dtype == torch.bfloat16)
+        ):
             #
             # if all_ones_mask or (attention_mask is None):
             #     attn_output = mui_causally_decode(query_states, key_states, value_states)

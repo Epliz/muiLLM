@@ -4,7 +4,7 @@
 #include "../norm/qkl2norm.cuh"
 #include "../temperaturetuning/temperature_tuning.cuh"
 #include "hybrid_chunked_kvcache.h"
-#include "../causal_transformer_decoding.cuh"
+#include "../attention/causal_transformer_decoding.cuh"
 
 //
 // Actual code

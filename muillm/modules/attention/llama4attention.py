@@ -203,7 +203,10 @@ class MuiLlama4TextAttention(MuiModule):
 
         if (
             (q_len == 1)
-            and (query_states.dtype == torch.float16)
+            and (
+                (query_states.dtype == torch.float16)
+                or (query_states.dtype == torch.bfloat16)
+            )
             and (query_states.is_cuda)
         ):
             # as q_len == 1, we can avoid the transposes

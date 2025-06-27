@@ -80,7 +80,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
 #include "kvcaches/sliding_kvcache_kernels.cuh"
 #include "temperaturetuning/temperature_tuning.cuh"
 
-#include "causal_transformer_decoding.cuh"
+#include "attention/causal_transformer_decoding.cuh"
 
 #include "sync.h"
 

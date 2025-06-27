@@ -11,11 +11,15 @@ from transformers.models.llama.modeling_llama import LlamaAttention
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.attention.rotaryembedding import apply_rotary_pos_emb
-from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode, mui_causally_decode_masked
+from muillm.modules.attention.causaltransformerdecoding import (
+    mui_causally_decode,
+    mui_causally_decode_masked,
+)
 from muillm.modules.attention.kvcache import repeat_kv
 from muillm.modules.attention.baseattention import MuiBaseAttention
 
 logger = logging.get_logger(__name__)
+
 
 # Modified to avoid a sync
 def _ignore_causal_mask_sdpa(
@@ -60,7 +64,10 @@ def _ignore_causal_mask_sdpa(
     elif sliding_window is None or key_value_length < sliding_window:
         if len(attention_mask.shape) == 4:
             return False
-        elif (is_training or not is_tracing) and (((all_ones_mask is not None) and all_ones_mask == True) or ((all_ones_mask is None) and torch.all(attention_mask == 1))):
+        elif (is_training or not is_tracing) and (
+            ((all_ones_mask is not None) and all_ones_mask == True)
+            or ((all_ones_mask is None) and torch.all(attention_mask == 1))
+        ):
             if query_length == 1 or key_value_length == query_length:
                 # For query_length == 1, causal attention and bi-directional attention are the same.
                 ignore_causal_mask = True
@@ -72,6 +79,7 @@ def _ignore_causal_mask_sdpa(
 
     return ignore_causal_mask
 
+
 class MuiSdpaAttention(MuiBaseAttention):
     """
     Mistral attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
@@ -80,19 +88,32 @@ class MuiSdpaAttention(MuiBaseAttention):
     """
 
     @staticmethod
-    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig, device=None) -> "MuiSdpaAttention":
+    def replace(
+        prev_module: Union[LlamaAttention, MistralAttention],
+        engine_config: MuiEngineConfig,
+        device=None,
+    ) -> "MuiSdpaAttention":
         if device is None:
             raise ValueError("device was None")
 
         device = prev_module.o_proj.weight.device if device is None else device
         dtype = prev_module.o_proj.weight.dtype
 
-        layer_idx=prev_module.layer_idx
-        config=prev_module.config
+        layer_idx = prev_module.layer_idx
+        config = prev_module.config
 
-        rotary_emb = MuiBaseAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
+        rotary_emb = MuiBaseAttention._create_rotary_embeddings(
+            engine_config, config, layer_idx, device, dtype
+        )
 
-        new_module = MuiSdpaAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
+        new_module = MuiSdpaAttention(
+            engine_config=engine_config,
+            config=config,
+            rotary_emb=rotary_emb,
+            layer_idx=layer_idx,
+            device=device,
+            dtype=dtype,
+        )
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj, device=device)
 
@@ -110,7 +131,9 @@ class MuiSdpaAttention(MuiBaseAttention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
+        position_embeddings: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # will become mandatory in v4.45
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -137,46 +160,59 @@ class MuiSdpaAttention(MuiBaseAttention):
             # if not specified, assume it might not have just ones
             all_ones_mask = False
 
-
         bsz, q_len, _ = query_states.size()
 
         # TODO: optimization avoiding transpose for q_len==1
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
 
         # TODO: make sure it is restricted to seen tokens?
-        query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
-            query_states,
-            key_states,
-            position_ids,
-            position_embeddings,
-            value_states,
-            past_key_value,
-            cache_position
+        query_states, key_states, value_states = (
+            self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                query_states,
+                key_states,
+                position_ids,
+                position_embeddings,
+                value_states,
+                past_key_value,
+                cache_position,
+            )
         )
 
         # at this point, we have the following shapes:
         #  q: [B, num_q_heads, T, embed_dim]
         #  k: [B, num_k_heads, NEW_T, embed_dim]
         #  v: [B, num_v_heads, NEW_T, embed_dim]
-        if (q_len == 1) and (query_states.dtype == torch.float16):
+        if (q_len == 1) and (
+            (query_states.dtype == torch.float16)
+            or (query_states.dtype == torch.bfloat16)
+        ):
             #
             if all_ones_mask or (attention_mask is None):
-                attn_output = mui_causally_decode(query_states, key_states, value_states)
+                attn_output = mui_causally_decode(
+                    query_states, key_states, value_states
+                )
             else:
                 # The mask has shape:
                 # M: [B, 1, NEW_T, T]
                 # It contains 0 where OK, min_dtype where padded
                 # min_dtype obtained with torch.finfo(dtype).min
-                attn_output = mui_causally_decode_masked(query_states, key_states, value_states, attention_mask)
-            
+                attn_output = mui_causally_decode_masked(
+                    query_states, key_states, value_states, attention_mask
+                )
+
             # q_len is 1 so we can remove the transposition
             attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
         else:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
-
 
             causal_mask = attention_mask
 
@@ -190,7 +226,7 @@ class MuiSdpaAttention(MuiBaseAttention):
             # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
             # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
             is_causal = True if causal_mask is None and q_len > 1 else False
-            
+
             attn_output = torch.nn.functional.scaled_dot_product_attention(
                 query_states,
                 key_states,

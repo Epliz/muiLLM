@@ -1,7 +1,11 @@
 import math
 from typing import List, Optional, Tuple, Union
 import warnings
-from muillm.modules.attention.parallelbaseattention import _MuiParallelAttention, _MuiParallelAttentionRope, MuiParallelBaseAttention
+from muillm.modules.attention.parallelbaseattention import (
+    _MuiParallelAttention,
+    _MuiParallelAttentionRope,
+    MuiParallelBaseAttention,
+)
 from muillm.modules.kvcache.cache_utils import MuiCache
 from muillm.modules.parallellinear import MuiParallelLinear
 import torch
@@ -30,7 +34,13 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
     """
 
     @staticmethod
-    def _create_rotary_embeddings(engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx:int, device=None, dtype=None) -> MuiRotaryEmbedding:
+    def _create_rotary_embeddings(
+        engine_config: MuiEngineConfig,
+        config: Union[LlamaConfig, MistralConfig],
+        layer_idx: int,
+        device=None,
+        dtype=None,
+    ) -> MuiRotaryEmbedding:
 
         rotary_emb = MuiRotaryEmbedding(
             engine_config,
@@ -42,7 +52,11 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
         return rotary_emb
 
     @staticmethod
-    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig, device=None) -> "MuiParallelSdpaAttention":
+    def replace(
+        prev_module: Union[LlamaAttention, MistralAttention],
+        engine_config: MuiEngineConfig,
+        device=None,
+    ) -> "MuiParallelSdpaAttention":
         if device is None:
             raise ValueError("device was None")
 
@@ -53,12 +67,21 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
             device = prev_module.o_proj.weight.device if device is None else device
             dtype = prev_module.o_proj.weight.dtype
 
-        layer_idx=prev_module.layer_idx
-        config=prev_module.config
+        layer_idx = prev_module.layer_idx
+        config = prev_module.config
 
-        rotary_emb = MuiParallelSdpaAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
+        rotary_emb = MuiParallelSdpaAttention._create_rotary_embeddings(
+            engine_config, config, layer_idx, device, dtype
+        )
 
-        new_module = MuiParallelSdpaAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
+        new_module = MuiParallelSdpaAttention(
+            engine_config=engine_config,
+            config=config,
+            rotary_emb=rotary_emb,
+            layer_idx=layer_idx,
+            device=device,
+            dtype=dtype,
+        )
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj, device=device)
 
@@ -75,7 +98,9 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        position_embeddings: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # will become mandatory in v4.46
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,
@@ -105,7 +130,10 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
         #  k: [B, num_k_heads, S, embed_dim]
         #  v: [B, num_v_heads, S, embed_dim]
 
-        if (q_len == 1) and (query_states.dtype == torch.float16):
+        if (q_len == 1) and (
+            (query_states.dtype == torch.float16)
+            or (query_states.dtype == torch.bfloat16)
+        ):
             #
             # if all_ones_mask or (attention_mask is None):
             #     attn_output = mui_causally_decode(query_states, key_states, value_states)
@@ -120,7 +148,7 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
 
             # The mask has shape:
             # M: [B, 1, S, T]
-            
+
             if self.dispatchable and isinstance(past_key_value, MuiCache):
                 # can use the C++ module for doing rope + cache write + attention
                 attn_output = _MuiParallelAttentionRope.apply(
@@ -137,39 +165,68 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
                 )
             else:
                 # as q_len is 1, we can avoid the transpose
-                query_states = query_states.view(bsz, self.num_tp_heads, q_len, self.head_dim)
-                key_states = key_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
-                value_states = value_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
+                query_states = query_states.view(
+                    bsz, self.num_tp_heads, q_len, self.head_dim
+                )
+                key_states = key_states.view(
+                    bsz, self.num_tp_key_value_heads, q_len, self.head_dim
+                )
+                value_states = value_states.view(
+                    bsz, self.num_tp_key_value_heads, q_len, self.head_dim
+                )
 
-                query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                query_states, key_states, value_states = (
+                    self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                        query_states,
+                        key_states,
+                        position_ids,
+                        position_embeddings,
+                        value_states,
+                        past_key_value,
+                        cache_position,
+                    )
+                )
+                attn_output = _MuiParallelAttention.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    residual,
+                )
+        else:
+            if q_len == 1:
+                # as q_len is 1, we can avoid the transpose
+                query_states = query_states.view(
+                    bsz, self.num_tp_heads, q_len, self.head_dim
+                )
+                key_states = key_states.view(
+                    bsz, self.num_tp_key_value_heads, q_len, self.head_dim
+                )
+                value_states = value_states.view(
+                    bsz, self.num_tp_key_value_heads, q_len, self.head_dim
+                )
+            else:
+                query_states = query_states.view(
+                    bsz, q_len, self.num_tp_heads, self.head_dim
+                ).transpose(1, 2)
+                key_states = key_states.view(
+                    bsz, q_len, self.num_tp_key_value_heads, self.head_dim
+                ).transpose(1, 2)
+                value_states = value_states.view(
+                    bsz, q_len, self.num_tp_key_value_heads, self.head_dim
+                ).transpose(1, 2)
+
+            query_states, key_states, value_states = (
+                self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
                     query_states,
                     key_states,
                     position_ids,
                     position_embeddings,
                     value_states,
                     past_key_value,
-                    cache_position
+                    cache_position,
                 )
-                attn_output = _MuiParallelAttention.apply(self.cpp_module, query_states, key_states, value_states, attention_mask, residual)
-        else:
-            if (q_len == 1):
-                # as q_len is 1, we can avoid the transpose
-                query_states = query_states.view(bsz, self.num_tp_heads, q_len, self.head_dim)
-                key_states = key_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
-                value_states = value_states.view(bsz, self.num_tp_key_value_heads, q_len, self.head_dim)
-            else:
-                query_states = query_states.view(bsz, q_len, self.num_tp_heads, self.head_dim).transpose(1, 2)
-                key_states = key_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
-                value_states = value_states.view(bsz, q_len, self.num_tp_key_value_heads, self.head_dim).transpose(1, 2)
-
-            query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
-                query_states,
-                key_states,
-                position_ids,
-                position_embeddings,
-                value_states,
-                past_key_value,
-                cache_position
             )
 
             key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -202,7 +259,9 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
             # from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
             attn_output = attn_output.view(bsz, q_len, self.tp_hidden_size)
 
-            attn_output = self.o_proj.parallel_forward([attn_output], residual=residual)[0]
+            attn_output = self.o_proj.parallel_forward(
+                [attn_output], residual=residual
+            )[0]
 
         return [attn_output]
 
@@ -217,7 +276,9 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        position_embeddings: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # will become mandatory in v4.46
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,

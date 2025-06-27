@@ -1,6 +1,4 @@
-#include "flash_decoding.cuh"
-
-#include <ATen/cuda/CUDAContext.h>
+#include <hip/hip_bf16.h>
 
 #include <stdint.h>
 #include <vector>
@@ -68,22 +66,22 @@ static inline __device__ float warpReduceMax(float val) {
   return val;
 }
 
-struct __align__(8) half4 {
-  half x;
-  half y;
-  half z;
-  half w;
+struct __align__(8) bfloat164 {
+  __hip_bfloat16 x;
+  __hip_bfloat16 y;
+  __hip_bfloat16 z;
+  __hip_bfloat16 w;
 };
 
-struct __align__(8) half8 {
-  half x;
-  half y;
-  half z;
-  half w;
-  half a;
-  half b;
-  half c;
-  half d;
+struct __align__(8) bfloat168 {
+  __hip_bfloat16 x;
+  __hip_bfloat16 y;
+  __hip_bfloat16 z;
+  __hip_bfloat16 w;
+  __hip_bfloat16 a;
+  __hip_bfloat16 b;
+  __hip_bfloat16 c;
+  __hip_bfloat16 d;
 };
 
 struct __align__(8) float8 {
@@ -112,43 +110,43 @@ static inline void __device__ dot8(float& acc, const float8& a, const float8& b)
   acc += ((a.a * b.a) + (a.c * b.c)) + ((a.b * b.b) + (a.d * b.d));
 }
 
-static inline float4 __device__ __half42float4(const half4& v) {
+static inline float4 __device__ __bfloat1642float4(const bfloat164& v) {
   float4 f;
-  f.x = __half2float(v.x);
-  f.y = __half2float(v.y);
-  f.z = __half2float(v.z);
-  f.w = __half2float(v.w);
+  f.x = __bfloat162float(v.x);
+  f.y = __bfloat162float(v.y);
+  f.z = __bfloat162float(v.z);
+  f.w = __bfloat162float(v.w);
 
   return f;
 }
 
-static inline float8 __device__ __half82float8(const half8& v) {
+static inline float8 __device__ __bfloat1682float8(const bfloat168& v) {
   float8 f;
-  f.x = __half2float(v.x);
-  f.y = __half2float(v.y);
-  f.z = __half2float(v.z);
-  f.w = __half2float(v.w);
-  f.a = __half2float(v.a);
-  f.b = __half2float(v.b);
-  f.c = __half2float(v.c);
-  f.d = __half2float(v.d);
+  f.x = __bfloat162float(v.x);
+  f.y = __bfloat162float(v.y);
+  f.z = __bfloat162float(v.z);
+  f.w = __bfloat162float(v.w);
+  f.a = __bfloat162float(v.a);
+  f.b = __bfloat162float(v.b);
+  f.c = __bfloat162float(v.c);
+  f.d = __bfloat162float(v.d);
 
   return f;
 }
 
-__device__ half2 load_nontemporal_half2(const half* p) {
+__device__ __hip_bfloat162 load_nontemporal_bfloat162(const __hip_bfloat16* p) {
   float _v = __builtin_nontemporal_load((const float*)p);
-  return *((half2*)&_v);
+  return *((__hip_bfloat162*)&_v);
 }
 
-__device__ half4 load_nontemporal_half4(const half* p) {
+__device__ bfloat164 load_nontemporal_bfloat164(const __hip_bfloat16* p) {
   float _v0 = __builtin_nontemporal_load(((const float*)p));
   float _v1 = __builtin_nontemporal_load(((const float*)p) + 1);
 
-  half2 _hv0 = *((half2*)&_v0);
-  half2 _hv1 = *((half2*)&_v1);
+  __hip_bfloat162 _hv0 = *((__hip_bfloat162*)&_v0);
+  __hip_bfloat162 _hv1 = *((__hip_bfloat162*)&_v1);
 
-  half4 v;
+  bfloat164 v;
   v.x = _hv0.x;
   v.y = _hv0.y;
   v.z = _hv1.x;
@@ -157,18 +155,18 @@ __device__ half4 load_nontemporal_half4(const half* p) {
   return v;
 }
 
-__device__ half8 load_nontemporal_half8(const half* p) {
+__device__ bfloat168 load_nontemporal_bfloat168(const __hip_bfloat16* p) {
   float _v0 = __builtin_nontemporal_load(((const float*)p));
   float _v1 = __builtin_nontemporal_load(((const float*)p) + 1);
   float _v2 = __builtin_nontemporal_load(((const float*)p) + 2);
   float _v3 = __builtin_nontemporal_load(((const float*)p) + 3);
 
-  half2 _hv0 = *((half2*)&_v0);
-  half2 _hv1 = *((half2*)&_v1);
-  half2 _hv2 = *((half2*)&_v2);
-  half2 _hv3 = *((half2*)&_v3);
+  __hip_bfloat162 _hv0 = *((__hip_bfloat162*)&_v0);
+  __hip_bfloat162 _hv1 = *((__hip_bfloat162*)&_v1);
+  __hip_bfloat162 _hv2 = *((__hip_bfloat162*)&_v2);
+  __hip_bfloat162 _hv3 = *((__hip_bfloat162*)&_v3);
 
-  half8 v;
+  bfloat168 v;
   v.x = _hv0.x;
   v.y = _hv0.y;
   v.z = _hv1.x;
@@ -199,14 +197,14 @@ static inline float __device__ uniformf(float v) {
 #define GEMV_ROWS_PER_BLOCK 4
 
 // expected number of blocks: [x=G, y=num_q_heads, z=B]
-void __global__ flash_decoding_partially_aggregate_kernel(
-  const half* __restrict__ q_in, // shape [B, num_q_heads, T, embed_dim]
-  const half* __restrict__ k_in, // shape [B, num_k_heads, S, embed_dim]
-  const half* __restrict__ v_in, // shape [B, num_k_heads, S, embed_dim]
-  const half* __restrict__ m_in, // shape [B, 1, T, S]
+void __global__ flash_decoding_partially_aggregate_bf16_kernel(
+  const __hip_bfloat16* __restrict__ q_in, // shape [B, num_q_heads, T, embed_dim]
+  const __hip_bfloat16* __restrict__ k_in, // shape [B, num_k_heads, S, embed_dim]
+  const __hip_bfloat16* __restrict__ v_in, // shape [B, num_k_heads, S, embed_dim]
+  const __hip_bfloat16* __restrict__ m_in, // shape [B, 1, T, S]
   float* __restrict__ partial_vectors, // [B, num_q_heads, G, T, embed_dim]
-  half* __restrict__ partial_softmax_denoms, // [B, num_q_heads, G, T]
-  half* __restrict__ partial_maxes, // [B, num_q_heads, G, T]
+  __hip_bfloat16* __restrict__ partial_softmax_denoms, // [B, num_q_heads, G, T]
+  __hip_bfloat16* __restrict__ partial_maxes, // [B, num_q_heads, G, T]
   // tensor dimension sizes
   unsigned G, // number of groups
   unsigned S, // number of total tokens
@@ -251,7 +249,7 @@ void __global__ flash_decoding_partially_aggregate_kernel(
     __syncthreads();
   }
 
-  const half* X = addr(q_in, (((batch_idx * num_q_heads) + q_head_idx) * T + q_tok_idx) * embed_dim);
+  const __hip_bfloat16* X = addr(q_in, (((batch_idx * num_q_heads) + q_head_idx) * T + q_tok_idx) * embed_dim);
   k_in = addr(k_in, batch_idx * kv_batch_stride + kv_head_idx * kv_head_stride);
   {
     int current_row = group_idx * GEMV_ROWS_PER_BLOCK + 0;
@@ -259,10 +257,10 @@ void __global__ flash_decoding_partially_aggregate_kernel(
 
       // compute the t-th element of Y. by doing the dot product with the
       // t-th row of W
-      const half* W0 = &k_in[(current_row + 0) * embed_dim];
-      const half* W1 = &k_in[(current_row + 1) * embed_dim];
-      const half* W2 = &k_in[(current_row + 2) * embed_dim];
-      const half* W3 = &k_in[(current_row + 3) * embed_dim];
+      const __hip_bfloat16* W0 = &k_in[(current_row + 0) * embed_dim];
+      const __hip_bfloat16* W1 = &k_in[(current_row + 1) * embed_dim];
+      const __hip_bfloat16* W2 = &k_in[(current_row + 2) * embed_dim];
+      const __hip_bfloat16* W3 = &k_in[(current_row + 3) * embed_dim];
 
       float acc0 = 0.f;
       float acc1 = 0.f;
@@ -275,11 +273,11 @@ void __global__ flash_decoding_partially_aggregate_kernel(
         //*
         for (k = threadIdx.x * 4; k + 3 < embed_dim; k += (THREADS_PER_BLOCK * 4)) {
           // vectorized
-          float4 x = __half42float4(*(const half4*)(addr(X, k)));
-          float4 w0 = __half42float4(load_nontemporal_half4(addr(W0, k)));
-          float4 w1 = __half42float4(load_nontemporal_half4(addr(W1, k)));
-          float4 w2 = __half42float4(load_nontemporal_half4(addr(W2, k)));
-          float4 w3 = __half42float4(load_nontemporal_half4(addr(W3, k)));
+          float4 x = __bfloat1642float4(*(const bfloat164*)(addr(X, k)));
+          float4 w0 = __bfloat1642float4(load_nontemporal_bfloat164(addr(W0, k)));
+          float4 w1 = __bfloat1642float4(load_nontemporal_bfloat164(addr(W1, k)));
+          float4 w2 = __bfloat1642float4(load_nontemporal_bfloat164(addr(W2, k)));
+          float4 w3 = __bfloat1642float4(load_nontemporal_bfloat164(addr(W3, k)));
 
           dot4(acc0, w0, x);
           dot4(acc1, w1, x);
@@ -288,11 +286,11 @@ void __global__ flash_decoding_partially_aggregate_kernel(
         }
         if (k + 1 < embed_dim) {
           // remainder
-          float2 x = __half22float2(*(const half2*)(addr(X,k)));
-          float2 w0 = __half22float2(load_nontemporal_half2(addr(W0,k)));
-          float2 w1 = __half22float2(load_nontemporal_half2(addr(W1,k)));
-          float2 w2 = __half22float2(load_nontemporal_half2(addr(W2,k)));
-          float2 w3 = __half22float2(load_nontemporal_half2(addr(W3,k)));
+          float2 x = __bfloat1622float2(*(const __hip_bfloat162*)(addr(X,k)));
+          float2 w0 = __bfloat1622float2(load_nontemporal_bfloat162(addr(W0,k)));
+          float2 w1 = __bfloat1622float2(load_nontemporal_bfloat162(addr(W1,k)));
+          float2 w2 = __bfloat1622float2(load_nontemporal_bfloat162(addr(W2,k)));
+          float2 w3 = __bfloat1622float2(load_nontemporal_bfloat162(addr(W3,k)));
 
           dot2(acc0, w0, x);
           dot2(acc1, w1, x);
@@ -303,11 +301,11 @@ void __global__ flash_decoding_partially_aggregate_kernel(
         }
         if (k < embed_dim) {
           // remainder
-          float x = __half2float(*addr(X,k));
-          float w0 = __half2float(*addr(W0,k));
-          float w1 = __half2float(*addr(W1,k));
-          float w2 = __half2float(*addr(W2,k));
-          float w3 = __half2float(*addr(W3,k));
+          float x = __bfloat162float(*addr(X,k));
+          float w0 = __bfloat162float(*addr(W0,k));
+          float w1 = __bfloat162float(*addr(W1,k));
+          float w2 = __bfloat162float(*addr(W2,k));
+          float w3 = __bfloat162float(*addr(W3,k));
           acc0 += w0 * x;
           acc1 += w1 * x;
           acc2 += w2 * x;
@@ -345,20 +343,20 @@ void __global__ flash_decoding_partially_aggregate_kernel(
           continue;
         }
 
-        const half* W_ = &k_in[current_row * embed_dim];
+        const __hip_bfloat16* W_ = &k_in[current_row * embed_dim];
       
         // do the dot product
         float acc = 0.f;
         {
           int k = threadIdx.x  * 2;
           for (; k + 1 < embed_dim; k += THREADS_PER_BLOCK * 2) {
-            float2 w = __half22float2(*(const half2*)&W_[k]);
-            float2 x = __half22float2(*(const half2*)&X[k]);
+            float2 w = __bfloat1622float2(*(const __hip_bfloat162*)&W_[k]);
+            float2 x = __bfloat1622float2(*(const __hip_bfloat162*)&X[k]);
             dot2(acc, w, x);
           }
           if (k < embed_dim) {
-            float w = __half2float(W_[k]);
-            float x = __half2float(X[k]);
+            float w = __bfloat162float(W_[k]);
+            float x = __bfloat162float(X[k]);
             acc += w * x;
           }
         }
@@ -389,7 +387,7 @@ void __global__ flash_decoding_partially_aggregate_kernel(
         // appply the mask
         m_in = addr(m_in, ((batch_idx * T) + q_tok_idx) * S + 0);
   
-        float mask_val = __half2float(*addr(m_in, k_tok_idx));
+        float mask_val = __bfloat162float(*addr(m_in, k_tok_idx));
     
         attention_score = mask_val == 0.0f ? attention_score : -INFINITY;
       }
@@ -421,7 +419,7 @@ void __global__ flash_decoding_partially_aggregate_kernel(
  
   if (threadIdx.x == 0) {
     // write out the max
-    partial_maxes[group_idx] = __float2half(group_max);
+    partial_maxes[group_idx] = __float2bfloat16(group_max);
   }
 
   // compute the softmax denominator
@@ -430,7 +428,7 @@ void __global__ flash_decoding_partially_aggregate_kernel(
   if (isinf(group_max) && group_max < 0.f) {
     // if the group is fully masked, we can skip the aggregation
     if (threadIdx.x == 0) {
-      partial_softmax_denoms[group_idx] = __float2half(0.f);
+      partial_softmax_denoms[group_idx] = __float2bfloat16(0.f);
     }
 
     // but it is preferable to write 0s to the partial vectors
@@ -479,7 +477,7 @@ void __global__ flash_decoding_partially_aggregate_kernel(
 
   if (threadIdx.x == 0) {
     // write out the softmax denominator
-    partial_softmax_denoms[group_idx] = __float2half(softmax_denom);
+    partial_softmax_denoms[group_idx] = __float2bfloat16(softmax_denom);
   }
 
   //
@@ -488,10 +486,10 @@ void __global__ flash_decoding_partially_aggregate_kernel(
   {
     unsigned kv_tok_idx = group_idx * GEMV_ROWS_PER_BLOCK + 0;
 
-    const half* v_in0 = addr(v_in, batch_idx * kv_batch_stride + kv_head_idx * kv_head_stride + kv_tok_idx * kv_tok_stride);
-    const half* v_in1 = addr(v_in0, 1 * kv_tok_stride);
-    const half* v_in2 = addr(v_in0, 2 * kv_tok_stride);
-    const half* v_in3 = addr(v_in0, 3 * kv_tok_stride);
+    const __hip_bfloat16* v_in0 = addr(v_in, batch_idx * kv_batch_stride + kv_head_idx * kv_head_stride + kv_tok_idx * kv_tok_stride);
+    const __hip_bfloat16* v_in1 = addr(v_in0, 1 * kv_tok_stride);
+    const __hip_bfloat16* v_in2 = addr(v_in0, 2 * kv_tok_stride);
+    const __hip_bfloat16* v_in3 = addr(v_in0, 3 * kv_tok_stride);
 
     partial_vectors = addr(partial_vectors, (((batch_idx * num_q_heads) + q_head_idx) * G + group_idx) * embed_dim + 0);
 
@@ -507,10 +505,10 @@ void __global__ flash_decoding_partially_aggregate_kernel(
       // 4 rows to aggregate
       unsigned k;
       for (k = threadIdx.x * 2; k + 1 < embed_dim; k += (THREADS_PER_BLOCK * 2)) {
-        float2 v0 = __half22float2(load_nontemporal_half2(addr(v_in0, k)));
-        float2 v1 = __half22float2(load_nontemporal_half2(addr(v_in1, k)));
-        float2 v2 = __half22float2(load_nontemporal_half2(addr(v_in2, k)));
-        float2 v3 = __half22float2(load_nontemporal_half2(addr(v_in3, k)));
+        float2 v0 = __bfloat1622float2(load_nontemporal_bfloat162(addr(v_in0, k)));
+        float2 v1 = __bfloat1622float2(load_nontemporal_bfloat162(addr(v_in1, k)));
+        float2 v2 = __bfloat1622float2(load_nontemporal_bfloat162(addr(v_in2, k)));
+        float2 v3 = __bfloat1622float2(load_nontemporal_bfloat162(addr(v_in3, k)));
 
         float2 pv = (((scale0 * v0) + (scale1 * v1)) + (scale2 * v2)) + (scale3 * v3);
 
@@ -518,10 +516,10 @@ void __global__ flash_decoding_partially_aggregate_kernel(
       }
       if (k < embed_dim) {
         // remainder
-        float v0 = __half2float(*addr(v_in0,k));
-        float v1 = __half2float(*addr(v_in1,k));
-        float v2 = __half2float(*addr(v_in2,k));
-        float v3 = __half2float(*addr(v_in3,k));
+        float v0 = __bfloat162float(*addr(v_in0,k));
+        float v1 = __bfloat162float(*addr(v_in1,k));
+        float v2 = __bfloat162float(*addr(v_in2,k));
+        float v3 = __bfloat162float(*addr(v_in3,k));
 
         float pv = (((scale0 * v0) + (scale1 * v1)) + (scale2 * v2)) + (scale3 * v3);
 
@@ -531,9 +529,9 @@ void __global__ flash_decoding_partially_aggregate_kernel(
       // 3 rows to aggregate
       unsigned k;
       for (k = threadIdx.x * 2; k + 1 < embed_dim; k += (THREADS_PER_BLOCK * 2)) {
-        float2 v0 = __half22float2(load_nontemporal_half2(addr(v_in0, k)));
-        float2 v1 = __half22float2(load_nontemporal_half2(addr(v_in1, k)));
-        float2 v2 = __half22float2(load_nontemporal_half2(addr(v_in2, k)));
+        float2 v0 = __bfloat1622float2(load_nontemporal_bfloat162(addr(v_in0, k)));
+        float2 v1 = __bfloat1622float2(load_nontemporal_bfloat162(addr(v_in1, k)));
+        float2 v2 = __bfloat1622float2(load_nontemporal_bfloat162(addr(v_in2, k)));
 
         float2 pv = ((scale0 * v0) + (scale1 * v1)) + (scale2 * v2);
 
@@ -541,9 +539,9 @@ void __global__ flash_decoding_partially_aggregate_kernel(
       }
       if (k < embed_dim) {
         // remainder
-        float v0 = __half2float(*addr(v_in0,k));
-        float v1 = __half2float(*addr(v_in1,k));
-        float v2 = __half2float(*addr(v_in2,k));
+        float v0 = __bfloat162float(*addr(v_in0,k));
+        float v1 = __bfloat162float(*addr(v_in1,k));
+        float v2 = __bfloat162float(*addr(v_in2,k));
 
         float pv = ((scale0 * v0) + (scale1 * v1)) + (scale2 * v2);
 
@@ -553,8 +551,8 @@ void __global__ flash_decoding_partially_aggregate_kernel(
       // 2 rows to aggregate
       unsigned k;
       for (k = threadIdx.x * 2; k + 1 < embed_dim; k += (THREADS_PER_BLOCK * 2)) {
-        float2 v0 = __half22float2(load_nontemporal_half2(addr(v_in0, k)));
-        float2 v1 = __half22float2(load_nontemporal_half2(addr(v_in1, k)));
+        float2 v0 = __bfloat1622float2(load_nontemporal_bfloat162(addr(v_in0, k)));
+        float2 v1 = __bfloat1622float2(load_nontemporal_bfloat162(addr(v_in1, k)));
 
         float2 pv = (scale0 * v0) + (scale1 * v1);
 
@@ -562,8 +560,8 @@ void __global__ flash_decoding_partially_aggregate_kernel(
       }
       if (k < embed_dim) {
         // remainder
-        float v0 = __half2float(*addr(v_in0,k));
-        float v1 = __half2float(*addr(v_in1,k));
+        float v0 = __bfloat162float(*addr(v_in0,k));
+        float v1 = __bfloat162float(*addr(v_in1,k));
 
         float pv = ((scale0 * v0) + (scale1 * v1));
 
@@ -573,13 +571,13 @@ void __global__ flash_decoding_partially_aggregate_kernel(
       // 1 row to aggregate
       unsigned k;
       for (k = threadIdx.x * 2; k + 1 < embed_dim; k += (THREADS_PER_BLOCK * 2)) {
-        float2 v0 = __half22float2(load_nontemporal_half2(addr(v_in0, k)));
+        float2 v0 = __bfloat1622float2(load_nontemporal_bfloat162(addr(v_in0, k)));
 
         *((float2*) addr(partial_vectors, k)) = v0;
       }
       if (k < embed_dim) {
         // remainder
-        float v0 = __half2float(*addr(v_in0,k));
+        float v0 = __bfloat162float(*addr(v_in0,k));
 
         *((float*) addr(partial_vectors, k)) = v0;
       }
@@ -587,15 +585,15 @@ void __global__ flash_decoding_partially_aggregate_kernel(
   }
 }
     
-void flash_decoding_partially_aggregate(
+void flash_decoding_partially_aggregate_bf16(
   hipStream_t stream,
-  const half* __restrict__ q_in, // shape [B, num_q_heads, T, embed_dim]
-  const half* __restrict__ k_in, // shape [B, num_k_heads, S, embed_dim]
-  const half* __restrict__ v_in, // shape [B, num_v_heads, S, embed_dim]
-  const half* __restrict__ m_in, // shape [B, 1, T, S]
+  const __hip_bfloat16* __restrict__ q_in, // shape [B, num_q_heads, T, embed_dim]
+  const __hip_bfloat16* __restrict__ k_in, // shape [B, num_k_heads, S, embed_dim]
+  const __hip_bfloat16* __restrict__ v_in, // shape [B, num_v_heads, S, embed_dim]
+  const __hip_bfloat16* __restrict__ m_in, // shape [B, 1, T, S]
   float* __restrict__ partial_vectors, // [B, num_q_heads, G, T, embed_dim]
-  half* __restrict__ partial_softmax_denoms, // [B, num_q_heads, G, T]
-  half* __restrict__ partial_maxes, // [B, num_q_heads, G, T]
+  __hip_bfloat16* __restrict__ partial_softmax_denoms, // [B, num_q_heads, G, T]
+  __hip_bfloat16* __restrict__ partial_maxes, // [B, num_q_heads, G, T]
   // tensor dimension sizes
   unsigned B,
   unsigned G,
@@ -616,14 +614,14 @@ void flash_decoding_partially_aggregate(
   // expected number of blocks: [x=G, y=num_q_heads, z=B]
   const dim3 num_blocks = dim3(G, num_q_heads, B);
   
-  flash_decoding_partially_aggregate_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-    (const half*)q_in,
-    (const half*)k_in,
-    (const half*)v_in,
-    (const half*)m_in,
+  flash_decoding_partially_aggregate_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    (const __hip_bfloat16*)q_in,
+    (const __hip_bfloat16*)k_in,
+    (const __hip_bfloat16*)v_in,
+    (const __hip_bfloat16*)m_in,
     (float*)partial_vectors,
-    (half*)partial_softmax_denoms,
-    (half*) partial_maxes,
+    (__hip_bfloat16*)partial_softmax_denoms,
+    (__hip_bfloat16*) partial_maxes,
     // tensor dimension sizes
     G,
     S,
@@ -641,11 +639,11 @@ void flash_decoding_partially_aggregate(
 #define COLS_PER_BLOCK 8
 
 // expected block dimensions: [x=embed_dim/COLS_PER_BLOCK, y=num_q_heads, z=B]
-void __global__ flash_decoding_final_reduce_kernel(
+void __global__ flash_decoding_final_reduce_bf16_kernel(
     const float* __restrict__ partial_vectors, // shape [B, num_q_heads, G, T, embed_dim]
-    const half* __restrict__ partial_softmax_denoms, // shape [B, num_q_heads, G, T]
-    half* __restrict__ partial_maxes, // [B, num_q_heads, G, T]
-    half* __restrict__ hidden_out, // [B, num_q_heads, T, embed_dim]
+    const __hip_bfloat16* __restrict__ partial_softmax_denoms, // shape [B, num_q_heads, G, T]
+    __hip_bfloat16* __restrict__ partial_maxes, // [B, num_q_heads, G, T]
+    __hip_bfloat16* __restrict__ hidden_out, // [B, num_q_heads, T, embed_dim]
     // tensor dimension sizes
     unsigned G, // number of groups
     unsigned num_q_heads, // number of heads for q
@@ -705,7 +703,7 @@ void __global__ flash_decoding_final_reduce_kernel(
 
   for (unsigned g = threadIdx.x; g < G; g += THREADS_PER_BLOCK) {
     // note: partial_max might be -INFINITY if the group was fully masked
-    float partial_max = __half2float(partial_maxes[g]);
+    float partial_max = __bfloat162float(partial_maxes[g]);
 
     final_max = std::max(partial_max, final_max);
   }
@@ -729,9 +727,9 @@ void __global__ flash_decoding_final_reduce_kernel(
   for (unsigned g = threadIdx.x; g < G; g += THREADS_PER_BLOCK) {
     // even if the block was fully masked, the partial softmax denom will be 0
     // and not cause NaNs here
-    float d = __half2float(partial_softmax_denoms[g]);
+    float d = __bfloat162float(partial_softmax_denoms[g]);
 
-    float group_max = __half2float(partial_maxes[g]);
+    float group_max = __bfloat162float(partial_maxes[g]);
     float max_diff = group_max - final_max;
     float group_scale = __expf(max_diff);
   
@@ -762,8 +760,8 @@ void __global__ flash_decoding_final_reduce_kernel(
       // so to do the final aggregation we need to bring to the final scale first
       float v = partial_vectors[colIdx];
 
-      float d = __half2float(partial_softmax_denoms[r]);
-      float group_max = __half2float(partial_maxes[r]);
+      float d = __bfloat162float(partial_softmax_denoms[r]);
+      float group_max = __bfloat162float(partial_maxes[r]);
 
       float max_diff = group_max - final_max;
       float group_scale = __expf(max_diff);
@@ -781,17 +779,17 @@ void __global__ flash_decoding_final_reduce_kernel(
 
     // write out
     if (threadIdx.x < COLS_PER_BLOCK) {
-      hidden_out[threadIdx.x] = __float2half(rs[threadIdx.x]);
+      hidden_out[threadIdx.x] = __float2bfloat16(rs[threadIdx.x]);
     }
   }
 }
 
-void flash_decoding_final_reduce(
+void flash_decoding_final_reduce_bf16(
   hipStream_t stream,
   const float* __restrict__ partial_vectors, // shape [B, num_q_heads, G, T, embed_dim]
-  const half* __restrict__ partial_softmax_denoms, // shape [B, num_q_heads, G, T]
-  const half* __restrict__ partial_maxes, // [B, num_q_heads, G, T]
-  half* __restrict__ hidden_out, // [B, num_q_heads, T, embed_dim]
+  const __hip_bfloat16* __restrict__ partial_softmax_denoms, // shape [B, num_q_heads, G, T]
+  const __hip_bfloat16* __restrict__ partial_maxes, // [B, num_q_heads, G, T]
+  __hip_bfloat16* __restrict__ hidden_out, // [B, num_q_heads, T, embed_dim]
   // tensor dimension sizes
   unsigned B,
   unsigned G, // number of groups
@@ -810,11 +808,11 @@ void flash_decoding_final_reduce(
   // expected block dimensions: [x=embed_dim/COLS_PER_BLOCK, y=num_q_heads, z=B]
   const dim3 num_blocks = dim3(DIV_ROUND_UP(embed_dim, COLS_PER_BLOCK), num_q_heads, B);
 
-  flash_decoding_final_reduce_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+  flash_decoding_final_reduce_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
     (const float*)partial_vectors,
-    (const half*)partial_softmax_denoms,
-    (half*)partial_maxes,
-    (half*)hidden_out,
+    (const __hip_bfloat16*)partial_softmax_denoms,
+    (__hip_bfloat16*)partial_maxes,
+    (__hip_bfloat16*)hidden_out,
     // tensor dimension sizes
     G,
     num_q_heads,
@@ -823,197 +821,5 @@ void flash_decoding_final_reduce(
     v_batch_stride,
     v_head_stride,
     v_tok_stride
-  );
-}
-
-// torch wrappers
-
-#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
-
-// returns partial vectors, partial softmax denoms, partial maxes
-static inline std::tuple<at::Tensor, at::Tensor, at::Tensor> flash_decoding_partially_aggregate(
-  torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
-  torch::Tensor& k, // [B, num_k_heads, S, embed_dim]
-  torch::Tensor& v, // [B, num_v_heads, S, embed_dim]
-  torch::Tensor& m // [B, 1, S, T]
-) {
-  // q is expected to be contiguous
-  CHECK_INPUT(q);
-  // but k and v might not be due to the static cache being
-  // allocated for longer sequences
-  // it is fine as long as the innermost stride is 1
-  CHECK_CUDA(k);
-  CHECK_CUDA(v);
-  // m must be contiguous
-  if (m.defined()) {
-    CHECK_INPUT(m);
-  }
-
-  auto device = q.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  auto output_options_f16 = at::TensorOptions()
-                            .dtype(torch::kFloat16)
-                            .layout(at::kStrided)
-                            .device(device) // same device as inputs
-                            .requires_grad(false);
-  
-
-  auto temp_options_f32 = at::TensorOptions()
-                            .dtype(torch::kFloat32)
-                            .layout(at::kStrided)
-                            .device(device) // same device as inputs
-                            .requires_grad(false);
-
-  auto q_sizes = q.sizes().vec();
-  auto k_sizes = k.sizes().vec();
-  auto k_strides = k.strides().vec();
-  auto v_strides = v.strides().vec();
-
-  TORCH_CHECK(k_strides[3] == 1, "k innermost stride must be 1");
-  TORCH_CHECK(v_strides[3] == 1, "v innermost stride must be 1");
-
-  unsigned B = q_sizes[0];
-  unsigned num_q_heads = q_sizes[1];
-  unsigned T = q_sizes[2]; // always 1 for now
-  unsigned embed_dim = q_sizes[3];
-  unsigned S = k_sizes[2];
-  unsigned num_k_heads = k_sizes[1];
-
-  TORCH_CHECK(T == 1, "T > 1 not supported");
-
-  TORCH_CHECK((k_strides[0] == v_strides[0]) && (k_strides[1] == v_strides[1]) && (k_strides[2] == v_strides[2]), "k and v strides must match");
-
-  // TODO: adapt num_groups based on number of compute units
-  unsigned G = DIV_ROUND_UP(S, MIN_TOKENS_PER_GROUP);
-
-  auto partial_vectors = torch::empty({B, num_q_heads, G, T, embed_dim}, temp_options_f32);
-  auto partial_softmax_denoms = torch::empty({B, num_q_heads, G, T}, output_options_f16);
-  auto partial_maxes = torch::empty({B, num_q_heads, G, T}, output_options_f16);
-
-  // kv strides
-  unsigned kv_batch_stride = k_strides[0];
-  unsigned kv_head_stride = k_strides[1];
-  unsigned kv_tok_stride = k_strides[2];
-
-  // to compute what k/v head to target for a given q head
-  unsigned q_to_kv_heads = num_q_heads / num_k_heads;
-
-  float attention_inv_scale = 1.0f / sqrtf(embed_dim);
-
-  flash_decoding_partially_aggregate(
-    stream,
-    (const half*) q.data_ptr(), // shape [B, num_q_heads, T, embed_dim]
-    (const half*) k.data_ptr(), // shape [B, num_k_heads, S, embed_dim]
-    (const half*) v.data_ptr(), // shape [B, num_v_heads, S, embed_dim]
-    m.defined() ? (const half*) m.data_ptr() : nullptr, // shape [B, 1, T, S]
-    (float*) partial_vectors.data_ptr(), // [B, num_q_heads, G, T, embed_dim]
-    (half*) partial_softmax_denoms.data_ptr(), // [B, num_q_heads, G, T]
-    (half*) partial_maxes.data_ptr(), // [B, num_q_heads, G, T]
-    // tensor dimension sizes
-    B,
-    G,
-    T, // num tokens to decode
-    S, // number of total tokens
-    num_q_heads, // number of heads for q
-    embed_dim,
-    q_to_kv_heads,
-    attention_inv_scale, // factor to scale the attention scores, typically 1/sqrt(embed_dim)
-    // kv strides
-    kv_batch_stride,
-    kv_head_stride,
-    kv_tok_stride
-  );
-
-  return std::make_tuple(partial_vectors, partial_softmax_denoms, partial_maxes);
-}
-
-// returns transformed vectors
-static inline at::Tensor flash_decoding_final_reduce(
-  torch::Tensor& partial_vectors, // shape [B, num_q_heads, G, T, embed_dim]
-  torch::Tensor& partial_softmax_denoms, // shape [B, num_q_heads, G, T]
-  torch::Tensor& partial_maxes  // [B, num_q_heads, G, T]
-) {
-  CHECK_INPUT(partial_vectors);
-  CHECK_INPUT(partial_softmax_denoms);
-  CHECK_INPUT(partial_maxes);
-
-  auto device = partial_vectors.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  auto output_options_f16 = at::TensorOptions()
-                            .dtype(torch::kFloat16)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  auto partial_vectors_sizes = partial_vectors.sizes().vec();
-
-  unsigned B = partial_vectors_sizes[0];
-  unsigned num_q_heads = partial_vectors_sizes[1];
-  unsigned G = partial_vectors_sizes[2];
-  unsigned T = partial_vectors_sizes[3];
-  unsigned embed_dim = partial_vectors_sizes[4];
-
-  TORCH_CHECK(T == 1, "T > 1 not supported");
-
-  // q_len is 1, so we can avoid the transposition
-  auto hidden_out = torch::empty({B, T, num_q_heads * embed_dim}, output_options_f16);
-
-  flash_decoding_final_reduce(
-    stream,
-    (const float*) partial_vectors.data_ptr(), // shape [B, num_q_heads, G, T, embed_dim]
-    (const half*) partial_softmax_denoms.data_ptr(), // shape [B, num_q_heads, G, T]
-    (const half*) partial_maxes.data_ptr(), // [B, num_q_heads, G, T]
-    (half*) hidden_out.data_ptr(), // [B, num_q_heads, T, embed_dim]
-    // tensor dimension sizes
-    B,
-    G, // number of groups
-    T, // num tokens to decode
-    num_q_heads, // number of heads for q
-    embed_dim
-  );
-
-  return hidden_out;
-}
-
-at::Tensor flash_decode_no_mask(
-  torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
-  torch::Tensor& k, // [B, num_k_heads, S, embed_dim]
-  torch::Tensor& v  // [B, num_v_heads, S, embed_dim]
-) {
-  auto undef_tensor = torch::Tensor();
-
-  auto partial_aggregation_results = flash_decoding_partially_aggregate(q, k, v, /*m*/ undef_tensor);
-
-  auto partial_vectors = std::get<0>(partial_aggregation_results);
-  auto partial_softmax_denoms = std::get<1>(partial_aggregation_results);
-  auto partial_maxes = std::get<2>(partial_aggregation_results);
-
-  return flash_decoding_final_reduce(
-    partial_vectors,
-    partial_softmax_denoms,
-    partial_maxes
-  );
-}
-
-at::Tensor flash_decode_masked(
-  torch::Tensor& q, // [B, num_q_heads, T, embed_dim]
-  torch::Tensor& k, // [B, num_k_heads, S, embed_dim]
-  torch::Tensor& v,  // [B, num_v_heads, S, embed_dim]
-  torch::Tensor& m  // [B, 1, S, T]
-) {
-  auto partial_aggregation_results = flash_decoding_partially_aggregate(q, k, v, m);
-
-  auto partial_vectors = std::get<0>(partial_aggregation_results);
-  auto partial_softmax_denoms = std::get<1>(partial_aggregation_results);
-  auto partial_maxes = std::get<2>(partial_aggregation_results);
-
-  return flash_decoding_final_reduce(
-    partial_vectors,
-    partial_softmax_denoms,
-    partial_maxes
   );
 }

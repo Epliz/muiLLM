@@ -14,11 +14,15 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.module import MuiModule
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
-from muillm.modules.attention.causaltransformerdecoding import mui_causally_decode, mui_causally_decode_masked
+from muillm.modules.attention.causaltransformerdecoding import (
+    mui_causally_decode,
+    mui_causally_decode_masked,
+)
 from muillm.modules.attention.kvcache import repeat_kv
 from muillm.modules.linear import MuiLinear
 
 logger = logging.get_logger(__name__)
+
 
 class MuiBaseAttention(MuiModule):
     """
@@ -26,7 +30,15 @@ class MuiBaseAttention(MuiModule):
     and "Generating Long Sequences with Sparse Transformers".
     """
 
-    def __init__(self, engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], rotary_emb: MuiRotaryEmbedding, layer_idx: Optional[int] = None, device=None, dtype=None):
+    def __init__(
+        self,
+        engine_config: MuiEngineConfig,
+        config: Union[LlamaConfig, MistralConfig],
+        rotary_emb: MuiRotaryEmbedding,
+        layer_idx: Optional[int] = None,
+        device=None,
+        dtype=None,
+    ):
         super().__init__(engine_config=engine_config)
         self.config = config
         self.layer_idx = layer_idx
@@ -58,12 +70,26 @@ class MuiBaseAttention(MuiModule):
         else:
             attention_bias = False
 
-        self.o_proj = MuiLinear(engine_config, self.num_heads * self.head_dim, self.hidden_size, bias=attention_bias, device=device, dtype=dtype)
+        self.o_proj = MuiLinear(
+            engine_config,
+            self.num_heads * self.head_dim,
+            self.hidden_size,
+            bias=attention_bias,
+            device=device,
+            dtype=dtype,
+        )
 
         self.rotary_emb = rotary_emb
 
     staticmethod
-    def _create_rotary_embeddings(engine_config: MuiEngineConfig, config: Union[LlamaConfig, MistralConfig], layer_idx:int, device=None, dtype=None) -> MuiRotaryEmbedding:
+
+    def _create_rotary_embeddings(
+        engine_config: MuiEngineConfig,
+        config: Union[LlamaConfig, MistralConfig],
+        layer_idx: int,
+        device=None,
+        dtype=None,
+    ) -> MuiRotaryEmbedding:
 
         rotary_emb = MuiRotaryEmbedding(
             engine_config,
@@ -75,26 +101,43 @@ class MuiBaseAttention(MuiModule):
         return rotary_emb
 
     @staticmethod
-    def replace(prev_module: Union[LlamaAttention, MistralAttention], engine_config: MuiEngineConfig, device=None) -> "MuiBaseAttention":
+    def replace(
+        prev_module: Union[LlamaAttention, MistralAttention],
+        engine_config: MuiEngineConfig,
+        device=None,
+    ) -> "MuiBaseAttention":
         if device is None:
             raise ValueError("device was None")
 
         device = prev_module.o_proj.weight.device if device is None else device
         dtype = prev_module.o_proj.weight.dtype
 
-        layer_idx=prev_module.layer_idx
-        config=prev_module.config
+        layer_idx = prev_module.layer_idx
+        config = prev_module.config
 
-        rotary_emb = MuiBaseAttention._create_rotary_embeddings(engine_config, config, layer_idx, device, dtype)
+        rotary_emb = MuiBaseAttention._create_rotary_embeddings(
+            engine_config, config, layer_idx, device, dtype
+        )
 
-        new_module = MuiBaseAttention(engine_config=engine_config, config=config, rotary_emb=rotary_emb, layer_idx=layer_idx, device=device, dtype=dtype)
+        new_module = MuiBaseAttention(
+            engine_config=engine_config,
+            config=config,
+            rotary_emb=rotary_emb,
+            layer_idx=layer_idx,
+            device=device,
+            dtype=dtype,
+        )
 
         new_module.o_proj.copy_module(prev_module=prev_module.o_proj, device=device)
 
         return new_module
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return (
+            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
 
     def forward(
         self,
@@ -107,7 +150,9 @@ class MuiBaseAttention(MuiModule):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
+        position_embeddings: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # will become mandatory in v4.45
         all_ones_mask: Optional[bool] = None,
         residual: Optional[torch.Tensor] = None,
         **kwargs,
@@ -124,18 +169,26 @@ class MuiBaseAttention(MuiModule):
         bsz, q_len, _ = query_states.size()
 
         # TODO: optimization avoiding transpose for q_len==1
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
 
-        query_states, key_states, value_states = self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
-            query_states,
-            key_states,
-            position_ids,
-            position_embeddings,
-            value_states,
-            past_key_value,
-            cache_position
+        query_states, key_states, value_states = (
+            self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                query_states,
+                key_states,
+                position_ids,
+                position_embeddings,
+                value_states,
+                past_key_value,
+                cache_position,
+            )
         )
 
         # at this point, we have the following shapes:
@@ -143,17 +196,24 @@ class MuiBaseAttention(MuiModule):
         #  k: [B, num_k_heads, NEW_T, embed_dim]
         #  v: [B, num_v_heads, NEW_T, embed_dim]
 
-        if (q_len == 1) and (query_states.dtype == torch.float16):
+        if (q_len == 1) and (
+            (query_states.dtype == torch.float16)
+            or (query_states.dtype == torch.bfloat16)
+        ):
             #
             if all_ones_mask or (attention_mask is None):
-                attn_output = mui_causally_decode(query_states, key_states, value_states)
+                attn_output = mui_causally_decode(
+                    query_states, key_states, value_states
+                )
             else:
                 # The mask has shape:
                 # M: [B, 1, NEW_T, T]
                 # It contains 0 where OK, min_dtype where padded
                 # min_dtype obtained with torch.finfo(dtype).min
-                attn_output = mui_causally_decode_masked(query_states, key_states, value_states, attention_mask)
-            
+                attn_output = mui_causally_decode_masked(
+                    query_states, key_states, value_states, attention_mask
+                )
+
             # q_len is 1 so we can remove the transposition
             attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
         else:
@@ -161,7 +221,9 @@ class MuiBaseAttention(MuiModule):
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+            attn_weights = torch.matmul(
+                query_states, key_states.transpose(2, 3)
+            ) / math.sqrt(self.head_dim)
 
             if attention_mask is not None:  # no matter the length, we just slice it
                 # The mask has shape:
@@ -171,8 +233,12 @@ class MuiBaseAttention(MuiModule):
                 attn_weights = attn_weights + attention_mask
 
             # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_weights = nn.functional.softmax(
+                attn_weights, dim=-1, dtype=torch.float32
+            ).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(
+                attn_weights, p=self.attention_dropout, training=self.training
+            )
             attn_output = torch.matmul(attn_weights, value_states)
 
             if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):

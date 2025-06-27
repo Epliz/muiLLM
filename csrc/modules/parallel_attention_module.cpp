@@ -1,5 +1,5 @@
 #include "parallel_attention_module.h"
-#include "../causal_transformer_decoding.cuh"
+#include "../attention/causal_transformer_decoding.cuh"
 
 //
 // Actual code
