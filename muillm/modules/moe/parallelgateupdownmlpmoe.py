@@ -129,7 +129,7 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
 
     def _check_dispatchable(self):
         wdtype = self.gate_projs.linear.weights[0].dtype
-        dispatchable_type = wdtype == torch.float16
+        dispatchable_type = (wdtype == torch.float16) or (wdtype == torch.bfloat16)
         dispatchable_device = self.gate_projs.linear.weights[0].is_cuda
         self.dispatchable = dispatchable_device and dispatchable_type
 

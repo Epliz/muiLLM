@@ -1,14 +1,11 @@
 #ifndef __MUILLM_MOELINEAR_KERNELS_CUH__
 #define __MUILLM_MOELINEAR_KERNELS_CUH__
 
-#include "engine.h"
+#include "../engine.h"
 
 #include <torch/extension.h>
 
-enum mui_activation {
-    Identity = 0,
-    Silu = 1
-};
+#include "../linear/activation.h"
 
 // variant where the output needs to be placed somewhere precise
 // (used when fusing reductions by parallel linear)

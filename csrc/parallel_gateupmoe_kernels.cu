@@ -1,4 +1,4 @@
-#include "gateupmoe_kernels.cuh"
+#include "./moeffn/gateupmoe.cuh"
 #include "comm_torch.h"
 
 #include <ATen/cuda/CUDAContext.h>
@@ -39,9 +39,20 @@ at::Tensor muillm_parallel_gateupsilumoe_forward(
   const auto N = down_weights.size(0) / (num_shared_experts + num_dynamic_experts);
 
   size_t count = N;
-  muillm_comm_datatype_t datatype = MUILLM_COMM_FP16;
 
-  auto dtype = torch::kFloat16;
+  auto dtype = x.dtype();
+
+  muillm_comm_datatype_t datatype;
+
+  if (dtype == torch::kFloat16) {
+    datatype = MUILLM_COMM_FP16;
+  } else if (dtype == torch::kBFloat16) {
+    datatype = MUILLM_COMM_BF16;
+  } else {
+    // error
+    TORCH_CHECK(false, "Unsupported dtype for all_reduce_sum");
+  }
+
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
@@ -148,9 +159,20 @@ at::Tensor muillm_parallel_gateupsilumoe_split_forward(
   const auto N = down_weights.size(0) / (num_shared_experts + num_dynamic_experts);
 
   size_t count = N;
-  muillm_comm_datatype_t datatype = MUILLM_COMM_FP16;
 
-  auto dtype = torch::kFloat16;
+  auto dtype = x.dtype();
+
+  muillm_comm_datatype_t datatype;
+
+  if (dtype == torch::kFloat16) {
+    datatype = MUILLM_COMM_FP16;
+  } else if (dtype == torch::kBFloat16) {
+    datatype = MUILLM_COMM_BF16;
+  } else {
+    // error
+    TORCH_CHECK(false, "Unsupported dtype for all_reduce_sum");
+  }
+
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)

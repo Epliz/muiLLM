@@ -1,80 +1,4 @@
-#include "moelinear_kernels.cuh"
-#include "gateupmoe_kernels.cuh"
-
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/extension.h>
-
-#include <cuda_fp16.h>
-
-// Python trampolines
-
-at::Tensor muillm_gateupsilumoe_forward_trampoline(
-  muillm_engine_ptr engine,
-  int num_shared_experts,
-  int num_dynamic_experts,
-  std::optional<torch::Tensor> norm_weights_,
-  float epsilon,
-  torch::Tensor gate_weights,
-  torch::Tensor up_weights,
-  torch::Tensor down_weights,
-  std::optional<torch::Tensor> residual_,
-  torch::Tensor x,
-  torch::Tensor router_scores,
-  torch::Tensor router_indices
-) {
-  torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
-  torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
-  return muillm_gateupsilumoe_forward(
-      engine.engine_ptr,
-      num_shared_experts,
-      num_dynamic_experts,
-      norm_weights,
-      epsilon,
-      gate_weights,
-      up_weights,
-      down_weights,
-      residual,
-      x,
-      router_scores,
-      router_indices
-  );
-}
-
-at::Tensor muillm_gateupsilumoe_split_forward_trampoline(
-  muillm_engine_ptr engine,
-  int num_shared_experts,
-  int num_dynamic_experts,
-  std::optional<torch::Tensor> norm_weights_,
-  float epsilon,
-  torch::Tensor gate_weights,
-  torch::Tensor up_weights,
-  torch::Tensor down_weights,
-  std::optional<torch::Tensor> residual_,
-  torch::Tensor x,
-  torch::Tensor router_scores,
-  torch::Tensor router_indices
-) {
-  torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
-  torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
-  return muillm_gateupsilumoe_split_forward(
-      engine.engine_ptr,
-      num_shared_experts,
-      num_dynamic_experts,
-      norm_weights,
-      epsilon,
-      gate_weights,
-      up_weights,
-      down_weights,
-      residual,
-      x,
-      router_scores,
-      router_indices
-  );
-}
-
-//
-// Actual module
-//
+#include <hip/hip_fp16.h>
 
 #define GEMV_THREADS_PER_BLOCK 256
 
@@ -234,7 +158,7 @@ static inline float __device__ silu(float x) {
 #define FUSED_ROWS_PER_BLOCK 2
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilumoe_gemv_kernel(
+__global__ void muillm_gateupsilumoe_gemv_fp16_kernel(
     const half* __restrict__ GW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
     const half* __restrict__ UW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
     const half* __restrict__ X, // input = size K
@@ -442,7 +366,7 @@ __global__ void muillm_gateupsilumoe_gemv_kernel(
 }
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilumoe_gemv_norm_inputs_kernel(
+__global__ void muillm_gateupsilumoe_gemv_norm_inputs_fp16_kernel(
     const half* __restrict__ NW, // input normalization weights matrix - size K
     const half* __restrict__ GW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
     const half* __restrict__ UW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
@@ -727,63 +651,29 @@ __global__ void muillm_gateupsilumoe_gemv_norm_inputs_kernel(
   }
 }
 
-#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
-
-
-void muillm_gateupsilumoe_forward_placed_output(
-    muillm_engine_t* engine,
-    int num_shared_experts,
-    int num_dynamic_experts,
-    torch::Tensor& norm_weights,
-    float epsilon,
-    torch::Tensor& gate_weights, // size ((num_shared_experts + num_dynamic_experts) * N) x K
-    torch::Tensor& up_weights, // size ((num_shared_experts + num_dynamic_experts) * N) x K
-    torch::Tensor& down_weights, // size ((num_shared_experts + num_dynamic_experts) * K) x N
-    torch::Tensor& residual,
-    torch::Tensor& x, // size B x T x K
-    torch::Tensor& router_scores, // size B x T x num_routed_experts
-    torch::Tensor& router_indices, // size B x T x num_routed_experts
-    void* output_ptr) { // size B x T x K
-  bool normalize = norm_weights.defined();
-  if (normalize) {
-    CHECK_INPUT(norm_weights);
-  }
-  CHECK_INPUT(gate_weights);
-  CHECK_INPUT(up_weights);
-  CHECK_INPUT(x);
-  CHECK_INPUT(router_scores);
-  CHECK_INPUT(router_indices);
-
-  auto device = x.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  auto dtype = torch::kFloat16;
-  auto output_options = at::TensorOptions()
-                            .dtype(dtype)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  const auto B = x.size(0);
-  const auto T = x.size(1);
-  const auto N = gate_weights.size(0) / (num_shared_experts + num_dynamic_experts);
-  const auto K = gate_weights.size(1);
-  const auto num_routed_experts = router_scores.size(2);
-
-  const int num_computed_experts = num_shared_experts + num_routed_experts;
-   
-  // y is the output of the gate/up part, and has shape B x T x num_computed_experts x N
-  auto y = torch::empty({B, T, num_computed_experts, N}, output_options);
+void muillm_gateupsilumoe_forward_fp16(
+  hipStream_t stream,
+  unsigned N,
+  unsigned K,
+  unsigned num_shared_experts,
+  unsigned num_computed_experts,
+  const half* norm_weights,
+  float epsilon,
+  const half* gate_weights,
+  const half* up_weights,
+  const half* x,
+  const half* router_scores,
+  const int64_t* router_indices,
+  half* y,
+  int simd_lanes
+) {
+  bool normalize = (norm_weights != nullptr);
 
   const int num_blocks_x = DIV_ROUND_UP(N, FUSED_ROWS_PER_BLOCK);
   const int num_blocks_y = num_computed_experts; // one y block per expert to compute
   const dim3 num_blocks = dim3(num_blocks_x, num_blocks_y);
 
   int threads_per_blocks = GEMV_THREADS_PER_BLOCK;
-
-  int simd_lanes = engine->gpu_infos[0]->simd_lanes;
 
   // try to occupy enough to saturate memory bandwidth
   /*
@@ -796,14 +686,14 @@ void muillm_gateupsilumoe_forward_placed_output(
     float scale = 1.f / K;
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilumoe_gemv_norm_inputs_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)norm_weights.data_ptr(),
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)y.data_ptr(),
+      muillm_gateupsilumoe_gemv_norm_inputs_fp16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights,
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)y,
         num_shared_experts,
         N,
         K,
@@ -811,14 +701,14 @@ void muillm_gateupsilumoe_forward_placed_output(
         scale
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilumoe_gemv_norm_inputs_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)norm_weights.data_ptr(),
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)y.data_ptr(),
+      muillm_gateupsilumoe_gemv_norm_inputs_fp16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights,
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)y,
         num_shared_experts,
         N,
         K,
@@ -826,144 +716,67 @@ void muillm_gateupsilumoe_forward_placed_output(
         scale
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilumoe_gemv_norm_inputs_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)norm_weights.data_ptr(),
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)y.data_ptr(),
+      muillm_gateupsilumoe_gemv_norm_inputs_fp16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights,
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)y,
         num_shared_experts,
         N,
         K,
         epsilon,
         scale
       );
-    } else {
-      TORCH_CHECK(false, "unsupported threads_per_blocks");
     }
   } else {
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilumoe_gemv_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)y.data_ptr(),
+      muillm_gateupsilumoe_gemv_fp16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)y,
         num_shared_experts,
         N,
         K
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilumoe_gemv_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)y.data_ptr(),
+      muillm_gateupsilumoe_gemv_fp16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)y,
         num_shared_experts,
         N,
         K
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilumoe_gemv_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)y.data_ptr(),
+      muillm_gateupsilumoe_gemv_fp16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)y,
         num_shared_experts,
         N,
         K
       );
-    } else {
-      TORCH_CHECK(false, "unsupported threads_per_blocks");
     }
   }
-
-  // down proj
-  auto undef_tensor = torch::Tensor();
-
-  muillm_moelinear_activ_forward_placed_output(
-      engine,
-      num_shared_experts,
-      num_dynamic_experts,
-      undef_tensor /*norm_weights*/,
-      epsilon,
-      down_weights,
-      mui_activation::Identity,
-      undef_tensor /*mul_bias*/,
-      undef_tensor /*add_bias*/,
-      residual,
-      y,
-      router_indices,
-      output_ptr,
-      stream
-  );
-}
-
-at::Tensor muillm_gateupsilumoe_forward(
-    muillm_engine_t* engine,
-    int num_shared_experts,
-    int num_dynamic_experts,
-    torch::Tensor& norm_weights,
-    float epsilon,
-    torch::Tensor& gate_weights,
-    torch::Tensor& up_weights,
-    torch::Tensor& down_weights,
-    torch::Tensor& residual,
-    torch::Tensor& x,
-    torch::Tensor& router_scores,
-    torch::Tensor& router_indices
-) {
-  auto device = x.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  auto dtype = torch::kFloat16;
-  auto output_options = at::TensorOptions()
-                            .dtype(dtype)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  const auto N = down_weights.size(0) / (num_shared_experts + num_dynamic_experts);
-
-  // output has the same dimensions as x, except the last dim that is given by
-  // the out_features of weights
-  auto output_sizes = x.sizes().vec();
-  output_sizes[output_sizes.size() - 1] = N;
-
-  auto output = torch::empty(output_sizes, output_options);
-
-  void* output_ptr = output.data_ptr();
-
-  muillm_gateupsilumoe_forward_placed_output(
-    engine,
-    num_shared_experts,
-    num_dynamic_experts,
-    norm_weights,
-    epsilon,
-    gate_weights,
-    up_weights,
-    down_weights,
-    residual,
-    x,
-    router_scores,
-    router_indices,
-    output_ptr
-  );
-  return output;
 }
 
 #define SPLIT_ROWS_PER_BLOCK 4
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilumoe_gemv_norm_inputs_split_kernel(
+__global__ void muillm_gateupsilumoe_gemv_norm_inputs_split_fp16_kernel(
     const half* __restrict__ NW, // input normalization weights matrix - size K
     const half* __restrict__ GW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
     const half* __restrict__ UW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
@@ -1235,7 +1048,7 @@ __global__ void muillm_gateupsilumoe_gemv_norm_inputs_split_kernel(
 }
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilumoe_gemv_split_kernel(
+__global__ void muillm_gateupsilumoe_gemv_split_fp16_kernel(
     const half* __restrict__ GW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
     const half* __restrict__ UW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
     const half* __restrict__ X, // input = size K
@@ -1427,7 +1240,7 @@ __global__ void muillm_gateupsilumoe_gemv_split_kernel(
 }
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilumoe_combine_kernel(
+__global__ void muillm_gateupsilumoe_combine_fp16_kernel(
     const half* __restrict__ GY, // input - size (num_shared_experts + num_routed_experts) * N
     const half* __restrict__ UY, // input - size (num_shared_experts + num_routed_experts) * N
     half* __restrict__ Y, // output - size (num_shared_experts + num_routed_experts) * N
@@ -1449,64 +1262,32 @@ __global__ void muillm_gateupsilumoe_combine_kernel(
   }
 }
 
+void muillm_gateupsilumoe_split_forward_fp16(
+  hipStream_t stream,
+  unsigned N,
+  unsigned K,
+  unsigned num_shared_experts,
+  unsigned num_computed_experts,
+  const half* norm_weights,
+  float epsilon,
+  const half* gate_weights,
+  const half* up_weights,
+  const half* x,
+  const half* router_scores,
+  const int64_t* router_indices,
+  half* gy,
+  half* uy,
+  half* y,
+  int simd_lanes
+) {
 
-void muillm_gateupsilumoe_split_forward_placed_output(
-    muillm_engine_t* engine,
-    int num_shared_experts,
-    int num_dynamic_experts,
-    torch::Tensor& norm_weights,
-    float epsilon,
-    torch::Tensor& gate_weights, // size (num_shared_experts + num_dynamic_experts) x N x K
-    torch::Tensor& up_weights, // size (num_shared_experts + num_dynamic_experts) x N x K
-    torch::Tensor& down_weights, // size (num_shared_experts + num_dynamic_experts) x K x N
-    torch::Tensor& residual,
-    torch::Tensor& x, // size B x T x K
-    torch::Tensor& router_scores, // size B x T x num_routed_experts
-    torch::Tensor& router_indices, // size B x T x num_routed_experts
-    void* output_ptr) { // size B x T x K
-  bool normalize = norm_weights.defined();
-  if (normalize) {
-    CHECK_INPUT(norm_weights);
-  }
-  CHECK_INPUT(gate_weights);
-  CHECK_INPUT(up_weights);
-  CHECK_INPUT(x);
-  CHECK_INPUT(router_scores);
-  CHECK_INPUT(router_indices);
-
-  auto device = x.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
-
-
-  const auto B = x.size(0);
-  const auto T = x.size(1);
-  const auto N = gate_weights.size(0) / (num_shared_experts + num_dynamic_experts);
-  const auto K = gate_weights.size(1);
-  const auto num_routed_experts = router_scores.size(2);
-
-  const int num_computed_experts = num_shared_experts + num_routed_experts;
-
-  auto dtype = torch::kFloat16;
-  auto output_options = at::TensorOptions()
-                            .dtype(dtype)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  // output for gate projections
-  auto gy = torch::empty({B, T, num_computed_experts, N}, output_options);
-  // output for up projection
-  auto uy = torch::empty({B, T, num_computed_experts, N}, output_options);
-  // output for the reduction
-  auto y = torch::empty({B, T, num_computed_experts, N}, output_options);
+  bool normalize = norm_weights != nullptr;
 
   const int num_blocks_x = DIV_ROUND_UP(N, SPLIT_ROWS_PER_BLOCK);
   const int num_blocks_y = num_computed_experts; // one y block per expert to compute
   const int num_blocks_z = 2;
   const dim3 num_blocks = dim3(num_blocks_x, num_blocks_y);
   int threads_per_blocks = GEMV_THREADS_PER_BLOCK;
-
-  int simd_lanes = engine->gpu_infos[0]->simd_lanes;
 
   // try to occupy enough to saturate memory bandwidth
   /*
@@ -1520,15 +1301,15 @@ void muillm_gateupsilumoe_split_forward_placed_output(
     float scale = 1.f / K;
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilumoe_gemv_norm_inputs_split_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)norm_weights.data_ptr(),
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)gy.data_ptr(),
-        (half*)uy.data_ptr(),
+      muillm_gateupsilumoe_gemv_norm_inputs_split_fp16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights,
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)gy,
+        (half*)uy,
         num_shared_experts,
         N,
         K,
@@ -1536,15 +1317,15 @@ void muillm_gateupsilumoe_split_forward_placed_output(
         scale
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilumoe_gemv_norm_inputs_split_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)norm_weights.data_ptr(),
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)gy.data_ptr(),
-        (half*)uy.data_ptr(),
+      muillm_gateupsilumoe_gemv_norm_inputs_split_fp16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights,
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)gy,
+        (half*)uy,
         num_shared_experts,
         N,
         K,
@@ -1552,67 +1333,63 @@ void muillm_gateupsilumoe_split_forward_placed_output(
         scale
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilumoe_gemv_norm_inputs_split_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)norm_weights.data_ptr(),
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)gy.data_ptr(),
-        (half*)uy.data_ptr(),
+      muillm_gateupsilumoe_gemv_norm_inputs_split_fp16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)norm_weights,
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)gy,
+        (half*)uy,
         num_shared_experts,
         N,
         K,
         epsilon,
         scale
       );
-    } else {
-      TORCH_CHECK(false, "unsupported threads_per_blocks");
     }
   } else {
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilumoe_gemv_split_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)gy.data_ptr(),
-        (half*)uy.data_ptr(),
+      muillm_gateupsilumoe_gemv_split_fp16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)gy,
+        (half*)uy,
         num_shared_experts,
         N,
         K
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilumoe_gemv_split_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)gy.data_ptr(),
-        (half*)uy.data_ptr(),
+      muillm_gateupsilumoe_gemv_split_fp16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)gy,
+        (half*)uy,
         num_shared_experts,
         N,
         K
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilumoe_gemv_split_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        (const half*)gate_weights.data_ptr(),
-        (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
-        (const half*)router_scores.data_ptr(),
-        (const int64_t*)router_indices.data_ptr(),
-        (half*)gy.data_ptr(),
-        (half*)uy.data_ptr(),
+      muillm_gateupsilumoe_gemv_split_fp16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+        (const half*)gate_weights,
+        (const half*)up_weights,
+        (const half*)x,
+        (const half*)router_scores,
+        (const int64_t*)router_indices,
+        (half*)gy,
+        (half*)uy,
         num_shared_experts,
         N,
         K
       );
-    } else {
-      TORCH_CHECK(false, "unsupported threads_per_blocks");
     }
   }
 
@@ -1620,101 +1397,25 @@ void muillm_gateupsilumoe_split_forward_placed_output(
   const int S = num_computed_experts * N;
   const int num_blocks_combine = DIV_ROUND_UP(S, threads_per_blocks);
   if (threads_per_blocks == 64) {
-    muillm_gateupsilumoe_combine_kernel<64><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
-      (const half*)gy.data_ptr(),
-      (const half*)uy.data_ptr(),
-      (half*)y.data_ptr(),
+    muillm_gateupsilumoe_combine_fp16_kernel<64><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+      (const half*)gy,
+      (const half*)uy,
+      (half*)y,
       S
     );
   } else if (threads_per_blocks == 128) {
-    muillm_gateupsilumoe_combine_kernel<128><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
-      (const half*)gy.data_ptr(),
-      (const half*)uy.data_ptr(),
-      (half*)y.data_ptr(),
+    muillm_gateupsilumoe_combine_fp16_kernel<128><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+      (const half*)gy,
+      (const half*)uy,
+      (half*)y,
       S
     );
   } else if (threads_per_blocks == 256) {
-    muillm_gateupsilumoe_combine_kernel<256><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
-      (const half*)gy.data_ptr(),
-      (const half*)uy.data_ptr(),
-      (half*)y.data_ptr(),
+    muillm_gateupsilumoe_combine_fp16_kernel<256><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+      (const half*)gy,
+      (const half*)uy,
+      (half*)y,
       S
     );
-  } else {
-    TORCH_CHECK(false, "unsupported threads_per_blocks");
   }
-
-  // down proj
-  auto undef_tensor = torch::Tensor();
-  muillm_moelinear_activ_forward_placed_output(
-      engine,
-      num_shared_experts,
-      num_dynamic_experts,
-      undef_tensor /*norm_weights*/,
-      epsilon,
-      down_weights,
-      mui_activation::Identity,
-      undef_tensor /*mul_bias*/,
-      undef_tensor /*add_bias*/,
-      residual,
-      y,
-      router_indices,
-      output_ptr,
-      stream
-  );
-}
-
-at::Tensor muillm_gateupsilumoe_split_forward(
-    muillm_engine_t* engine,
-    int num_shared_experts,
-    int num_dynamic_experts,
-    torch::Tensor& norm_weights,
-    float epsilon,
-    torch::Tensor& gate_weights,
-    torch::Tensor& up_weights,
-    torch::Tensor& down_weights,
-    torch::Tensor& residual,
-    torch::Tensor& x,
-    torch::Tensor& router_scores,
-    torch::Tensor& router_indices
-) {
-
-  auto device = x.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  auto dtype = torch::kFloat16;
-  auto output_options = at::TensorOptions()
-                            .dtype(dtype)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  const auto N = down_weights.size(0) / (num_shared_experts + num_dynamic_experts);
-
-  // output has the same dimensions as x, except the last dim that is given by
-  // the out_features of weights
-  auto output_sizes = x.sizes().vec();
-  output_sizes[output_sizes.size() - 1] = N;
-
-  auto output = torch::empty(output_sizes, output_options);
-
-  void* output_ptr = output.data_ptr();
-  
-  muillm_gateupsilumoe_split_forward_placed_output(
-    engine,
-    num_shared_experts,
-    num_dynamic_experts,
-    norm_weights,
-    epsilon,
-    gate_weights,
-    up_weights,
-    down_weights,
-    residual,
-    x,
-    router_scores,
-    router_indices,
-    output_ptr
-  );
-
-  return output;
 }

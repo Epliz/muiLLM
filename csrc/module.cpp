@@ -54,7 +54,7 @@ at::Tensor muillm_int8_linear_forward_trampoline(
 }
 
 #include "ffn/gateup.cuh"
-#include "gateupmoe_kernels.cuh"
+#include "moeffn/gateupmoe.cuh"
 
 
 std::tuple<at::Tensor, at::Tensor> muillm_int8_gateupsilu_dequantize_forward(
