@@ -262,7 +262,7 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
             if no_cache:
                 # create a cache from scratch
                 device = inputs_embeds.device
-                dtype = torch.float16
+                dtype = inputs_embeds.dtype
                 past_key_values = create_static_cache(
                     self.engine_config,
                     self.config,
@@ -326,7 +326,9 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
         # determine if we can use the decoder stack
         bsz, q_len, _ = hidden_states.size()
-        dispatchable_dtype = hidden_states.dtype == torch.float16
+        dispatchable_dtype = (hidden_states.dtype == torch.float16) or (
+            hidden_states.dtype == torch.bfloat16
+        )
         dispatchable_input = (bsz == 1) and (q_len == 1) and dispatchable_dtype
         grad_checkpointing = self.gradient_checkpointing and self.training
         mui_cache = isinstance(past_key_values, MuiCache)
