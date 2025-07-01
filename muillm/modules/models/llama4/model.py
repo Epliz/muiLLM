@@ -347,7 +347,9 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         bsz, q_len, _ = hidden_states.size()
         grad_checkpointing = self.gradient_checkpointing and self.training
         mui_cache = isinstance(past_key_values, MuiCache)
-        dispatchable_dtype = hidden_states.dtype == torch.float16
+        dispatchable_dtype = (hidden_states.dtype == torch.float16) or (
+            hidden_states.dtype == torch.bfloat16
+        )
         no_outputs = (not output_hidden_states) and (not output_attentions)
         dispatchable_input = (bsz == 1) and (q_len == 1) and dispatchable_dtype
         dispatchable_to_stack = (
