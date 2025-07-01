@@ -47,6 +47,10 @@ def init_engine(
     if quantization_method is not None:
         quantize_layers(model=model, engine_config=engine_config, device=device)
 
+    # make sure everything is on the right device
+    if device is not None:
+        model = model.to(device=device)
+
     # store the config in the model
     setattr(model, "muillm_config", engine_config)
 
