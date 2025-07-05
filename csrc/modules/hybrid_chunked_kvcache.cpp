@@ -1,7 +1,7 @@
 #include "hybrid_chunked_kvcache.h"
 
-#include "../kvcaches/sliding_kvcache_kernels.cuh"
-#include "../kvcaches/static_kvcache_kernels.cuh"
+#include "../kvcaches/sliding_kvcache.hpp"
+#include "../kvcaches/static_kvcache.hpp"
 
 MuillmHybridChunkedKVCache::MuillmHybridChunkedKVCache(
     muillm_engine_t* engine,

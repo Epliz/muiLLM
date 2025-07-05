@@ -24,6 +24,14 @@ struct MuillmKVCache {
 
   virtual ~MuillmKVCache();
 
+  int get_set_seen_tokens(int seen_tokens) {
+    if (seen_tokens > this->_seen_tokens) {
+      // update the seen tokens only if the new value is greater
+      this->_seen_tokens = seen_tokens;
+    }
+    return this->_seen_tokens;
+  }
+
   int seen_tokens() {
     return this->_seen_tokens;
   }
@@ -40,8 +48,9 @@ typedef struct muillm_kvcache_module_ptr {
 } muillm_kvcache_module_ptr_t;
 
 // sync
-int muillm_kvcache_module_get_seen_tokens_trampoline(
-  muillm_kvcache_module_ptr_t module_ptr
+int muillm_kvcache_module_get_set_seen_tokens_trampoline(
+  muillm_kvcache_module_ptr_t module_ptr,
+  int seen_tokens
 );
 
 #endif /* __MUILLM_KVCACHE_H__ */

@@ -13,8 +13,9 @@ MuillmKVCache::MuillmKVCache(
 MuillmKVCache::~MuillmKVCache() {
 }
 
-int muillm_kvcache_module_get_seen_tokens_trampoline(
-  muillm_kvcache_module_ptr_t module_ptr
+int muillm_kvcache_module_get_set_seen_tokens_trampoline(
+  muillm_kvcache_module_ptr_t module_ptr,
+  int seen_tokens
 ) {
-  return module_ptr.ptr->seen_tokens();
+  return module_ptr.ptr->get_set_seen_tokens(seen_tokens);
 }

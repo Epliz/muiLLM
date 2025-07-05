@@ -77,13 +77,37 @@ class MuiDynamicCache(DynamicCache, MuiCache):
             self.cpp_engine, self.key_cache, self.value_cache, self._seen_tokens
         )
 
+    def _sync_seen_tokens(self):
+        if self.cpp_module is not None:
+            self._seen_tokens = muillm_ext.muillm_kvcache_module_get_set_seen_tokens(
+                self.cpp_module, self._seen_tokens
+            )
+
     def sync_back(self):
         self.key_cache, self.value_cache = (
             muillm_ext.muillm_dynamic_kvcache_module_sync_back(self.cpp_module)
         )
-        self._seen_tokens = muillm_ext.muillm_kvcache_module_get_seen_tokens(
-            self.cpp_module
-        )
+        self._sync_seen_tokens()
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # the HF dynamic cache might have its own counter
+        # this helps decouple a bit and not rely on knowing their logic
+        prev_seen_tokens = self._seen_tokens
+
+        k_out, v_out = super().update(key_states, value_states, layer_idx, cache_kwargs)
+
+        if layer_idx == 0:
+            # and update the seen counter (only for layer 0 to avoid double counting)
+            self._seen_tokens = prev_seen_tokens + key_states.shape[-2]
+            self._sync_seen_tokens()
+
+        return k_out, v_out
 
 
 class MuiStaticCache(StaticCache, MuiCache):
@@ -146,13 +170,17 @@ class MuiStaticCache(StaticCache, MuiCache):
             self.cpp_engine, self.key_cache, self.value_cache, self._seen_tokens
         )
 
+    def _sync_seen_tokens(self):
+        if self.cpp_module is not None:
+            self._seen_tokens = muillm_ext.muillm_kvcache_module_get_set_seen_tokens(
+                self.cpp_module, self._seen_tokens
+            )
+
     def sync_back(self):
         self.key_cache, self.value_cache = (
             muillm_ext.muillm_static_kvcache_module_sync_back(self.cpp_module)
         )
-        self._seen_tokens = muillm_ext.muillm_kvcache_module_get_seen_tokens(
-            self.cpp_module
-        )
+        self._sync_seen_tokens()
 
     def update(
         self,
@@ -167,6 +195,7 @@ class MuiStaticCache(StaticCache, MuiCache):
         if layer_idx == 0:
             # and update the seen counter (only for layer 0 to avoid double counting)
             self._seen_tokens += key_states.shape[-2]
+            self._sync_seen_tokens()
 
         # return the minimal slice of cache
         k_out = torch.narrow(k_out, 2, 0, self._seen_tokens)
@@ -338,7 +367,10 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
         self.finalize_init()
 
     def _check_dispatchable(self):
-        self.dispatchable = self.dtype == torch.float16 and self.key_cache[0].is_cuda
+        dispatchable_type = (self.dtype == torch.float16) or (
+            self.dtype == torch.bfloat16
+        )
+        self.dispatchable = dispatchable_type and self.key_cache[0].is_cuda
 
     def finalize_init(self):
         # cache the flags checking if it is dispatchable
@@ -356,13 +388,17 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
             self._seen_tokens,
         )
 
+    def _sync_seen_tokens(self):
+        if self.cpp_module is not None:
+            self._seen_tokens = muillm_ext.muillm_kvcache_module_get_set_seen_tokens(
+                self.cpp_module, self._seen_tokens
+            )
+
     def sync_back(self):
         self.key_cache, self.value_cache = (
             muillm_ext.muillm_hybrid_chunked_kvcache_module_sync_back(self.cpp_module)
         )
-        self._seen_tokens = muillm_ext.muillm_kvcache_module_get_seen_tokens(
-            self.cpp_module
-        )
+        self._sync_seen_tokens()
 
     def _init_cache_layer(self, layer_idx):
         if len(self.key_cache) > layer_idx:
@@ -500,17 +536,23 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
         k_out = self.key_cache[layer_idx]
         v_out = self.value_cache[layer_idx]
 
-        if layer_idx == 0:
-            # and update the seen counter (only for layer 0 to avoid double counting)
-            self._seen_tokens += key_states.shape[-2]
-
         if self.dispatchable:
+            if layer_idx == 0:
+                # update the seen counter (only for layer 0 to avoid double counting)
+                # the C++ side increments it too, so no need to sync
+                self._seen_tokens += key_states.shape[-2]
+
             # Use the C++ module to do the update
             k_out, v_out = _MuiHybridChunkedCacheUpdate.apply(
                 self.cpp_module, key_states, value_states, cache_position, layer_idx
             )
             return k_out, v_out
         else:
+            if layer_idx == 0:
+                # update the seen counter (only for layer 0 to avoid double counting)
+                self._seen_tokens += key_states.shape[-2]
+                self._sync_seen_tokens()
+
             if self.is_sliding[layer_idx]:
                 k_out, v_out = self._sliding_update(
                     cache_position,

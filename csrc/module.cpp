@@ -76,8 +76,8 @@ at::Tensor muillm_int8_gateupsilu_forward(
 #include "reduce/reduce.cuh"
 #include "topk/topk.cuh"
 #include "rope/rotary.h"
-#include "kvcaches/static_kvcache_kernels.cuh"
-#include "kvcaches/sliding_kvcache_kernels.cuh"
+#include "kvcaches/static_kvcache.hpp"
+#include "kvcaches/sliding_kvcache.hpp"
 #include "temperaturetuning/temperature_tuning.cuh"
 
 #include "attention/causal_transformer_decoding.cuh"
@@ -333,7 +333,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<muillm_kvcache_module_ptr_t> cl_kvcache_module(m, "muillm_kvcache_module_ptr");
   cl_kvcache_module.def(pybind11::init<>());
 
-  m.def("muillm_kvcache_module_get_seen_tokens", &muillm_kvcache_module_get_seen_tokens_trampoline, "muillm kvcache module get seen tokens", py::arg("module"));
+  m.def("muillm_kvcache_module_get_set_seen_tokens", &muillm_kvcache_module_get_set_seen_tokens_trampoline, "muillm kvcache module get set seen tokens", py::arg("module"), py::arg("seen_tokens"));
   
   // static KV cache
   m.def("muillm_static_kvcache_module_init", &muillm_static_kvcache_module_init_trampoline, "muillm static kvcache module init", py::arg("engine"), py::arg("key_cache"), py::arg("value_cache"), py::arg("seen_tokens"));
