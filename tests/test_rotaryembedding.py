@@ -17,6 +17,8 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama4.modeling_llama4 import Llama4TextRotaryEmbedding
 from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 
+from muillm.replacement.replacementcontext import MuiReplacementContext
+
 from .test_utils import tensors_equal
 
 
@@ -57,10 +59,14 @@ def _test_basic_mistral_rotary(device: str, dtype: torch.dtype):
     rotary_emb_copy = copy_mistral_rotary(rotary_emb)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    mui_rotary = MuiRotaryEmbedding.replace(
-        prev_module=rotary_emb_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    mui_rotary = MuiRotaryEmbedding.replace(
+        replacement_context=replacement_context,
+        prev_module=rotary_emb_copy,
     )
 
     input_position_ids = torch.arange(
@@ -132,10 +138,14 @@ def _test_basic_llama3_rotary(device: str, dtype: torch.dtype):
     rotary_emb_copy = copy_llama3_rotary(rotary_emb)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    mui_rotary = MuiRotaryEmbedding.replace(
-        prev_module=rotary_emb_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    mui_rotary = MuiRotaryEmbedding.replace(
+        replacement_context=replacement_context,
+        prev_module=rotary_emb_copy,
     )
 
     input_position_ids = torch.arange(
@@ -207,10 +217,14 @@ def _test_basic_llama4_rotary(device: str, dtype: torch.dtype):
     rotary_emb_copy = copy_llama4_rotary(rotary_emb)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    mui_rotary = MuiRotaryEmbedding.replace(
-        prev_module=rotary_emb_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    mui_rotary = MuiRotaryEmbedding.replace(
+        replacement_context=replacement_context,
+        prev_module=rotary_emb_copy,
     )
 
     input_position_ids = torch.arange(

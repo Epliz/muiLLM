@@ -1,4 +1,8 @@
 from typing import List, Optional, Union
+from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
+from muillm.engineconfig import (
+    MuiEngineConfig,
+)
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
@@ -11,8 +15,10 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.norm.rmsnorm import _MuiRMSNorm
 import muillm_ext
+
+from muillm.modules.norm.rmsnorm import MuiRMSNorm
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiParallelLinear(torch.autograd.Function):
@@ -157,11 +163,12 @@ class MuiParallelLinear(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union["MuiParallelLinear", MuiLinear, nn.Linear],
-        engine_config: MuiEngineConfig,
         prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None,
-        device=None,
     ) -> "MuiParallelLinear":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
@@ -170,6 +177,20 @@ class MuiParallelLinear(MuiModule):
         ):
             # nothing would be changing if we created a new module, so might as well return the previous one
             return prev_module
+
+        if not isinstance(prev_module, (MuiParallelLinear, MuiLinear)):
+            # Make sure we convert the previous module to a local module
+            # so that we can safely copy its parameters
+            prev_module = replacement_context.to_local_module(prev_module)
+
+        if (prev_layernorm_module is not None) and (
+            not isinstance(prev_layernorm_module, MuiRMSNorm)
+        ):
+            # Make sure we convert the previous layernorm module to a local module
+            # so that we can safely copy its parameters
+            prev_layernorm_module = replacement_context.to_local_module(
+                prev_layernorm_module
+            )
 
         if isinstance(prev_module, MuiParallelLinear):
             # gather back into a MuiLinear layer to simplify conversion
@@ -246,31 +267,6 @@ class MuiParallelLinear(MuiModule):
             prev_module=prev_module, norm_weights=norm_weights, device=device
         )
 
-        # delete the previous module to save memory
-        if isinstance(prev_module, MuiParallelLinear) or isinstance(
-            prev_module, MuiLinear
-        ):
-            prev_module._severe_ties()
-        else:
-            prev_weights = prev_module.weight
-            prev_module.weight = None
-            del prev_weights
-
-            if prev_module.bias is not None:
-                prev_bias = prev_module.bias
-                prev_module.bias = None
-                del prev_bias
-
-        if prev_layernorm_module is not None:
-            prev_layernorm_weights = prev_layernorm_module.weight
-            prev_layernorm_module.weight = None
-            del prev_layernorm_weights
-
-        del prev_module
-
-        # trigger GC to save memory
-        trigger_gc()
-
         return new_module
 
     def _set_norm_weights(
@@ -279,6 +275,9 @@ class MuiParallelLinear(MuiModule):
         if norm_weights is None:
             self.norm_weights = nn.ParameterList([None])
             return
+
+        # we don't preserve requires_grad with to_local_tensor so save it first
+        norm_weights_requires_grad = norm_weights.requires_grad
 
         if not hasattr(self, "norm_weights") or self.norm_weights is None:
             self.norm_weights = nn.ParameterList(
@@ -292,7 +291,7 @@ class MuiParallelLinear(MuiModule):
             (
                 requires_grads
                 if requires_grads is not None
-                else norm_weights.requires_grad
+                else norm_weights_requires_grad
             ),
         )
 
@@ -302,6 +301,10 @@ class MuiParallelLinear(MuiModule):
     def _set_weights(
         self, weights: torch.Tensor, requires_grads: Optional[bool] = None
     ) -> None:
+
+        # we don't preserve requires_grad with to_local_tensor so save it first
+        weights_requires_grad = weights.requires_grad
+
         if not hasattr(self, "weights") or self.weights is None:
             self.weights = nn.ParameterList([weights.contiguous().clone().detach()])
         else:
@@ -309,7 +312,7 @@ class MuiParallelLinear(MuiModule):
 
         MuiParallelLinear._set_requires_grads(
             self.weights,
-            requires_grads if requires_grads is not None else weights.requires_grad,
+            requires_grads if requires_grads is not None else weights_requires_grad,
         )
 
     def _set_bias(
@@ -319,6 +322,9 @@ class MuiParallelLinear(MuiModule):
             self.biases = nn.ParameterList([None])
             return
 
+        # we don't preserve requires_grad with to_local_tensor so save it first
+        bias_requires_grad = bias.requires_grad
+
         if not hasattr(self, "biases") or self.biases is None:
             self.biases = nn.ParameterList([bias.contiguous().clone().detach()])
         else:
@@ -326,7 +332,7 @@ class MuiParallelLinear(MuiModule):
 
         MuiParallelLinear._set_requires_grads(
             self.biases,
-            requires_grads if requires_grads is not None else bias.requires_grad,
+            requires_grads if requires_grads is not None else bias_requires_grad,
         )
 
     def copy_module(
@@ -419,6 +425,7 @@ class MuiParallelLinear(MuiModule):
         tensor_parallelism: int,
         sharding_dim: int,
     ) -> Tensor:
+
         rank = engine_config.comms.rank
         tensor = torch.tensor_split(tensor, tensor_parallelism, sharding_dim)[rank]
         return tensor.contiguous()

@@ -1,6 +1,7 @@
 from enum import IntEnum
 import math
 from typing import List, Optional, Union
+from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
 from muillm.modules.module import MuiModule
@@ -20,6 +21,7 @@ from transformers.models.llama4.modeling_llama4 import (
 
 from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 import muillm_ext
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiParallelGateUpSiLUMethod(IntEnum):
@@ -156,6 +158,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union[
             "MuiParallelGateUpDownMLP",
             MuiGateUpDownMLP,
@@ -163,12 +166,12 @@ class MuiParallelGateUpDownMLP(MuiModule):
             MistralMLP,
             Llama4TextMLP,
         ],
-        engine_config: MuiEngineConfig,
         prev_layernorm_module: Union[
             LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
         ] = None,
-        device=None,
     ) -> "MuiGateUpDownMLP":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
@@ -177,6 +180,20 @@ class MuiParallelGateUpDownMLP(MuiModule):
         ):
             # re-creating a module would replace nothing so we can avoid it
             return prev_module
+
+        if not isinstance(prev_module, (MuiParallelGateUpDownMLP, MuiGateUpDownMLP)):
+            # Make sure we convert the previous module to a local module
+            # so that we can safely copy its parameters
+            prev_module = replacement_context.to_local_module(prev_module)
+
+        if (prev_layernorm_module is not None) and (
+            not isinstance(prev_layernorm_module, MuiRMSNorm)
+        ):
+            # Make sure we convert the previous layernorm module to a local module
+            # so that we can safely copy its parameters
+            prev_layernorm_module = replacement_context.to_local_module(
+                prev_layernorm_module
+            )
 
         if isinstance(prev_module.gate_proj, MuiParallelLinear):
             dtype = prev_module.gate_proj.weights[0].dtype
@@ -261,12 +278,6 @@ class MuiParallelGateUpDownMLP(MuiModule):
             prev_module=prev_module, norm_weights=norm_weights, device=device
         )
 
-        # delete the previous module to save memory
-        del prev_module
-
-        # trigger GC to save memory
-        trigger_gc()
-
         return new_module
 
     def copy_module(
@@ -309,8 +320,10 @@ class MuiParallelGateUpDownMLP(MuiModule):
         if norm_weights is not None:
             # the rescaling weights are not fused in the matrices due to instabilities
 
+            # we don't preserve requires_grad with to_local_tensor so save it first
             norm_weights_requires_grad = norm_weights.requires_grad
-            self.norm_weights = nn.ParameterList([norm_weights.detach()])
+
+            self.norm_weights = nn.ParameterList([norm_weights.clone().detach()])
             MuiParallelLinear._set_requires_grads(
                 self.norm_weights, norm_weights_requires_grad
             )

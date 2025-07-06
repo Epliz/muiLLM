@@ -84,7 +84,6 @@ void sliding_kvcache_update_xx16(
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-
 std::tuple<at::Tensor, at::Tensor> muillm_sliding_kvcache_update(
     torch::Tensor& k_in,
     torch::Tensor& v_in,

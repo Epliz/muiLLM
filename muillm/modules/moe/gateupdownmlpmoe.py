@@ -1,5 +1,6 @@
 from typing import Optional, Tuple, Union
 from muillm.engineconfig import MuiEngineConfig
+from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
@@ -16,6 +17,7 @@ from transformers.models.llama4.modeling_llama4 import (
 
 from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 from muillm.modules.topk import topk_sigmoid
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiGateUpDownMoe(torch.autograd.Function):
@@ -143,25 +145,28 @@ class MuiGateUpDownMLPMoe(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Llama4TextMoe,
-        engine_config: MuiEngineConfig,
         prev_layernorm_module: Union[MuiRMSNorm, Llama4TextRMSNorm] = None,
-        device=None,
     ) -> "MuiGateUpDownMLPMoe":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
-
+        prev_module = replacement_context.to_local_module(prev_module)
+        if (prev_layernorm_module is not None) and (
+            not isinstance(prev_layernorm_module, MuiRMSNorm)
+        ):
+            prev_layernorm_module = replacement_context.to_local_module(
+                prev_layernorm_module
+            )
         device = prev_module.router.weight.device if device is None else device
         dtype = prev_module.router.weight.dtype
-
         num_dynamic_experts = prev_module.num_experts
         top_k = prev_module.top_k
-
         hidden_size = prev_module.shared_expert.gate_proj.in_features
         intermediate_size = prev_module.shared_expert.gate_proj.out_features
-
         activation_function = prev_module.experts.act_fn
-
         new_module = MuiGateUpDownMLPMoe(
             engine_config=engine_config,
             num_dynamic_experts=num_dynamic_experts,
@@ -173,15 +178,11 @@ class MuiGateUpDownMLPMoe(MuiModule):
             device=device,
             dtype=dtype,
         )
-
         new_module.copy_module(
             prev_module=prev_module,
             prev_layernorm_module=prev_layernorm_module,
             device=device,
         )
-
-        del prev_module
-        trigger_gc()
 
         return new_module
 
@@ -207,10 +208,15 @@ class MuiGateUpDownMLPMoe(MuiModule):
             device=device,
         )
 
-        # Copy the experts
+        ## Copy the experts
         prev_experts = prev_module.experts
 
-        gate_chunk, up_chunk = prev_experts.gate_up_proj.chunk(2, dim=2)
+        # ensure we have local tensors
+        prev_experts_gate_up_proj = prev_experts.gate_up_proj
+        prev_experts_down_proj = prev_experts.down_proj
+
+        # reshape the dynamic expert weights to match the expected shape
+        gate_chunk, up_chunk = prev_experts_gate_up_proj.chunk(2, dim=2)
         gate_weights = (
             gate_chunk.transpose(1, 2)
             .reshape(self.num_dynamic_experts * self.intermediate_size, self.hidden_dim)
@@ -222,12 +228,14 @@ class MuiGateUpDownMLPMoe(MuiModule):
             .contiguous()
         )
         down_weights = (
-            prev_experts.down_proj.transpose(1, 2)
+            prev_experts_down_proj.transpose(1, 2)
             .reshape(self.num_dynamic_experts * self.hidden_dim, self.intermediate_size)
             .contiguous()
         )
 
-        # Shared expert weights
+        ## Shared expert weights
+
+        # ensure we have local tensors
         shared_gate_weight = prev_module.shared_expert.gate_proj.weight
         shared_up_weight = prev_module.shared_expert.up_proj.weight
         shared_down_weight = prev_module.shared_expert.down_proj.weight

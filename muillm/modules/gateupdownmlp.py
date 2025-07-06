@@ -1,6 +1,7 @@
 from enum import Enum
 import math
 from typing import Optional, Union
+from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.module import MuiModule
 import torch
@@ -17,6 +18,7 @@ from muillm.modules.linear import MuiLinear
 
 from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 import muillm_ext
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiGateUpSiLUMethod(Enum):
@@ -187,13 +189,14 @@ class MuiGateUpDownMLP(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union["MuiGateUpDownMLP", LlamaMLP, MistralMLP, Llama4TextMLP],
-        engine_config: MuiEngineConfig,
         prev_layernorm_module: Union[
             MuiRMSNorm, LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
         ] = None,
-        device=None,
     ) -> "MuiGateUpDownMLP":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
@@ -202,6 +205,22 @@ class MuiGateUpDownMLP(MuiModule):
         ):
             # re-creating a module would replace nothing so we can avoid it
             return prev_module
+
+        if not isinstance(prev_module, MuiGateUpDownMLP):
+            # Make sure we convert the previous module to a local module
+            # so that we can safely copy its parameters
+            # and avoid any DTensor issues
+            prev_module = replacement_context.to_local_module(prev_module)
+
+        if (prev_layernorm_module is not None) and (
+            not isinstance(prev_layernorm_module, MuiRMSNorm)
+        ):
+            # Make sure we convert the previous layernorm module to a local module
+            # so that we can safely copy its parameters
+            # and avoid any DTensor issues
+            prev_layernorm_module = replacement_context.to_local_module(
+                prev_layernorm_module
+            )
 
         dtype = prev_module.gate_proj.weight.dtype
         device = prev_module.gate_proj.weight.device if device is None else device
@@ -270,12 +289,6 @@ class MuiGateUpDownMLP(MuiModule):
         new_module.copy_module(
             prev_module=prev_module, norm_weights=norm_weights, device=device
         )
-
-        # delete the previous module to save memory
-        del prev_module
-
-        # trigger GC to save memory
-        trigger_gc()
 
         return new_module
 

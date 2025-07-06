@@ -6,6 +6,7 @@ from muillm.modules.attention.parallelllama4attention import (
 )
 from muillm.modules.kvcache.cache_utils import MuiCache
 from muillm.modules.module import MuiModule
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 import torch
 
@@ -119,10 +120,11 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union[Llama4TextDecoderLayer, "MuiParallelLlama4TextDecoderLayer"],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiParallelLlama4TextDecoderLayer":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
@@ -131,9 +133,6 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
             return prev_module
 
         prev_attn = prev_module.self_attn
-
-        # severe the reference to be able to delete the previous module
-        prev_module.self_attn = None
 
         qkv_proj = None
         new_attention = None
@@ -144,35 +143,18 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
                 prev_attn.v_proj,
             )
 
-            # severe the reference to be able to delete the previous module
-            prev_attn.q_proj = None
-            prev_attn.k_proj = None
-            prev_attn.v_proj = None
-
             input_layernorm = prev_module.input_layernorm
             qkv_proj = MuiParallelMultiLinear.replace(
+                replacement_context,
                 prev_modules=[prev_q, prev_k, prev_v],
                 prev_layernorm_module=input_layernorm,
-                engine_config=engine_config,
-                device=device,
                 sharding_dim=0,  # row-wise sharding to split attention heads
             )
 
-            del prev_q
-            del prev_k
-            del prev_v
-
-            # trigger GC to save memory
-            trigger_gc()
-
             new_attention = MuiParallelLlama4TextAttention.replace(
-                prev_attn, engine_config=engine_config, device=device
+                replacement_context,
+                prev_attn,
             )
-
-            del prev_attn
-
-            # trigger GC to save memory
-            trigger_gc()
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
 
@@ -183,20 +165,18 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
         ):
             # MoE layer
             feed_forward = MuiParallelGateUpDownMLPMoe.replace(
+                replacement_context,
                 prev_module=prev_module.feed_forward,
-                engine_config=engine_config,
                 prev_layernorm_module=post_attention_layernorm,
-                device=device,
             )
         elif isinstance(prev_module.feed_forward, Llama4TextMLP) or isinstance(
             prev_module.feed_forward, MuiParallelGateUpDownMLP
         ):
             # dense layer
             feed_forward = MuiParallelGateUpDownMLP.replace(
+                replacement_context,
                 prev_module=prev_module.feed_forward,
-                engine_config=engine_config,
                 prev_layernorm_module=post_attention_layernorm,
-                device=device,
             )
         else:
             raise ValueError(
@@ -210,12 +190,6 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
             self_attn=new_attention,
             feed_forward=feed_forward,
         )
-
-        # delete the previous module to save memory
-        del prev_module
-
-        # trigger GC to save memory
-        trigger_gc()
 
         return new_module
 

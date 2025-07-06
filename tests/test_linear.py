@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 
 from muillm.modules.multilinear import MuiMultiLinear
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 from .test_utils import copy_linear, random_linear, tensors_equal
 
@@ -22,10 +23,14 @@ def _test_basic_linear(in_features: int, device: str = "cpu", dtype=torch.float1
     linear_copy = copy_linear(linear)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    muilinear = MuiLinear.replace(
-        prev_module=linear_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    muilinear = MuiLinear.replace(
+        replacement_context=replacement_context,
+        prev_module=linear_copy,
     )
     muilinear.finalize_init()
 
@@ -75,10 +80,14 @@ def _test_linear_bias(in_features: int, device: str, dtype=torch.float16):
     linear_copy = copy_linear(linear)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    muilinear = MuiLinear.replace(
-        prev_module=linear_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    muilinear = MuiLinear.replace(
+        replacement_context=replacement_context,
+        prev_module=linear_copy,
     )
     muilinear.finalize_init()
 

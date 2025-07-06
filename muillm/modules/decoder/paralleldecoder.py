@@ -19,6 +19,7 @@ import muillm_ext
 from transformers.cache_utils import Cache
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaMLP
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralMLP
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiParallelDecoder(torch.autograd.Function):
@@ -103,10 +104,13 @@ class MuiParallelDecoderLayer(MuiModule):
 
     @staticmethod
     def replace(
-        prev_module: Union[LlamaDecoderLayer, MistralDecoderLayer],
-        engine_config: MuiEngineConfig,
-        device=None,
-    ) -> "MuiParallelGateUpDownMLP":
+        replacement_context: MuiReplacementContext,
+        prev_module: Union[
+            LlamaDecoderLayer, MistralDecoderLayer, "MuiParallelDecoderLayer"
+        ],
+    ) -> "MuiParallelDecoderLayer":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
@@ -125,10 +129,9 @@ class MuiParallelDecoderLayer(MuiModule):
             elif isinstance(prev_module.qkv_proj, MuiMultiLinear):
                 # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
                 qkv_proj = MuiParallelMultiLinear.replace(
-                    prev_modules=qkv_proj,
-                    engine_config=engine_config,
+                    replacement_context,
+                    prev_modules=prev_module.qkv_proj,
                     sharding_dim=0,
-                    device=device,
                 )
             else:
                 raise ValueError(f"Not supported {type(prev_module.qkv_proj)}")
@@ -137,7 +140,8 @@ class MuiParallelDecoderLayer(MuiModule):
             if not isinstance(self_attn, MuiParallelBaseAttention):
                 # replace the attention module itself if necessary
                 self_attn = MuiParallelSdpaAttention.replace(
-                    self_attn, engine_config=engine_config, device=device
+                    replacement_context,
+                    self_attn,
                 )
 
         elif isinstance(prev_module, MistralDecoderLayer) or isinstance(
@@ -146,14 +150,14 @@ class MuiParallelDecoderLayer(MuiModule):
             input_layernorm = prev_module.input_layernorm
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
             qkv_proj = MuiParallelMultiLinear.replace(
+                replacement_context,
                 prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj],
-                engine_config=engine_config,
                 prev_layernorm_module=input_layernorm,
                 sharding_dim=0,
-                device=device,
             )
             self_attn = MuiParallelSdpaAttention.replace(
-                prev_attn, engine_config=engine_config, device=device
+                replacement_context,
+                prev_attn,
             )
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
@@ -164,28 +168,25 @@ class MuiParallelDecoderLayer(MuiModule):
         if isinstance(prev_module.mlp, MuiParallelGateUpDownMLP):
             # we migth need to replace the module so that it uses the layernorm module
             mlp = MuiParallelGateUpDownMLP.replace(
+                replacement_context,
                 prev_module=prev_module.mlp,
-                engine_config=engine_config,
                 prev_layernorm_module=post_attention_layernorm,
-                device=device,
             )
         elif isinstance(prev_module.mlp, MuiGateUpDownMLP):
             # need to replace the module so that it uses the layernorm module as well as
             # shards the weights correctly
             mlp = MuiParallelGateUpDownMLP.replace(
+                replacement_context,
                 prev_module=prev_module.mlp,
-                engine_config=engine_config,
                 prev_layernorm_module=post_attention_layernorm,
-                device=device,
             )
         elif isinstance(prev_module.mlp, MistralMLP) or isinstance(
             prev_module.mlp, LlamaMLP
         ):
             mlp = MuiParallelGateUpDownMLP.replace(
+                replacement_context,
                 prev_module=prev_module.mlp,
-                engine_config=engine_config,
                 prev_layernorm_module=post_attention_layernorm,
-                device=device,
             )
         else:
             raise ValueError(f"Not supported {type(prev_module.mlp)}")
@@ -193,12 +194,6 @@ class MuiParallelDecoderLayer(MuiModule):
         new_decoder = MuiParallelDecoderLayer(
             engine_config=engine_config, qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp
         )
-
-        # delete the previous module to save memory
-        del prev_module
-
-        # trigger GC to save memory
-        trigger_gc()
 
         return new_decoder
 

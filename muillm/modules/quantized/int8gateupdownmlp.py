@@ -1,5 +1,6 @@
 import math
 from typing import Optional, Tuple, Union
+from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.modules.module import MuiModule
 import torch
 from torch import Tensor
@@ -14,6 +15,8 @@ from muillm.quantization.rtnquantizer import RTNQuantizer
 from muillm.quantization.quantizationmethod import Int8WeightOnlyQuantizationMethod
 
 import muillm_ext
+
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiInt8GateDequantize(torch.autograd.Function):
@@ -149,14 +152,22 @@ class MuiInt8GateUpDownMLP(MuiModule):
 
     @staticmethod
     def replace(
-        prev_module: MuiGateUpDownMLP, engine_config: MuiEngineConfig, device=None
+        replacement_context: MuiReplacementContext,
+        prev_module: MuiGateUpDownMLP,
     ) -> "MuiInt8GateUpDownMLP":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
         if isinstance(prev_module, MuiInt8GateUpDownMLP):
             # re-creating a module would replace nothing so we can avoid it
             return prev_module
+
+        if not isinstance(prev_module, MuiGateUpDownMLP):
+            # Make sure we convert the previous module to a local module
+            # so that we can safely copy its parameters
+            prev_module = replacement_context.to_local_module(prev_module)
 
         dtype = prev_module.gate_proj.weight.dtype
         device = prev_module.gate_proj.weight.device if device is None else device
@@ -265,7 +276,7 @@ class MuiInt8GateUpDownMLP(MuiModule):
             # the rescaling weights are not fused in the matrices due to instabilities
 
             norm_weights_requires_grad = prev_module.norm_weights.requires_grad
-            self.norm_weights = nn.Parameter(prev_module.norm_weights.detach())
+            self.norm_weights = nn.Parameter(prev_module.norm_weights.clone().detach())
             self.norm_weights.requires_grad = norm_weights_requires_grad
 
             self.norm_weights = prev_module.norm_weights

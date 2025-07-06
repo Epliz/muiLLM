@@ -13,6 +13,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.llama4.modeling_llama4 import Llama4TextRMSNorm
 
 from muillm.modules.norm.rmsnorm import MuiRMSNorm
+from muillm.replacement.replacementcontext import MuiReplacementContext
 from .test_utils import tensors_equal
 
 
@@ -48,10 +49,14 @@ def _test_basic_mistral_rmsnorm(dtype: torch.dtype, device: str):
     norm_copy = copy_mistral_rmsnorm(norm)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    muinorm = MuiRMSNorm.replace(
-        prev_module=norm_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    muinorm = MuiRMSNorm.replace(
+        replacement_context=replacement_context,
+        prev_module=norm_copy,
     )
 
     input_tensor = torch.rand(size=(4, hidden_size), device=device, dtype=dtype)
@@ -105,10 +110,14 @@ def test_basic_llama3_rmsnorm():
     norm_copy = copy_llama3_rmsnorm(norm)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    muinorm = MuiRMSNorm.replace(
-        prev_module=norm_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device="cpu",
+    )
+    muinorm = MuiRMSNorm.replace(
+        replacement_context=replacement_context,
+        prev_module=norm_copy,
     )
 
     input_tensor = torch.rand(size=(4, hidden_size))
@@ -146,10 +155,14 @@ def test_basic_llama4_rmsnorm():
     norm_copy = copy_llama4_rmsnorm(norm)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    muinorm = MuiRMSNorm.replace(
-        prev_module=norm_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device="cpu",
+    )
+    muinorm = MuiRMSNorm.replace(
+        replacement_context=replacement_context,
+        prev_module=norm_copy,
     )
 
     input_tensor = torch.rand(size=(4, hidden_size))

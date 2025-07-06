@@ -22,6 +22,7 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.attention.kvcache import repeat_kv
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 logger = logging.get_logger(__name__)
 
@@ -53,10 +54,11 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union[LlamaAttention, MistralAttention],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiParallelSdpaAttention":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
@@ -75,9 +77,8 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
         )
 
         new_o_proj = MuiParallelLinear.replace(
+            replacement_context,
             prev_module.o_proj,
-            engine_config=engine_config,
-            device=device,
         )
 
         new_module = MuiParallelSdpaAttention(

@@ -1,4 +1,5 @@
 from typing import Union
+from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.module import MuiModule
 import torch
@@ -13,6 +14,8 @@ from transformers.models.llama4.modeling_llama4 import Llama4TextRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
 from muillm.engineconfig import MuiEngineConfig
+from muillm.torch.dtensor import to_local_tensor
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiRMSNorm(torch.autograd.Function):
@@ -70,18 +73,24 @@ class MuiRMSNorm(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union[
             "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
         ],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiRMSNorm":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
         if isinstance(prev_module, MuiRMSNorm):
             # nothing would be changing if we created a new module, so might as well return the previous one
             return prev_module
+
+        if not isinstance(prev_module, MuiRMSNorm):
+            # Make sure we convert the previous module to a local module
+            # so that we can safely copy its parameters
+            prev_module = replacement_context.to_local_module(prev_module)
 
         device = prev_module.weight.device if device is None else device
 
@@ -103,20 +112,18 @@ class MuiRMSNorm(MuiModule):
         )
         new_module.copy_module(prev_module.weight, device=device)
 
-        # delete the previous module to save memory
-        del prev_module
-
-        # trigger GC to save memory
-        trigger_gc()
-
         return new_module
 
     def copy_module(self, prev_module: nn.Parameter, device=None):
         if device is None:
             raise ValueError("device was None")
 
+        # we don't preserve requires_grad with to_local_tensor so save it first
+        prev_module_requires_grad = prev_module.requires_grad
+
         self.weight = nn.Parameter(prev_module.detach())
-        self.weight.requires_grad = prev_module.requires_grad
+
+        self.weight.requires_grad = prev_module_requires_grad
 
         # put ourselves on the right device
         self.to(device=device)

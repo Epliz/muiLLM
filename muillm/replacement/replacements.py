@@ -57,6 +57,9 @@ from transformers.models.llama4.modeling_llama4 import (
 )
 
 from muillm.modules.decoder.decoder import MuiDecoderLayer
+from muillm.replacement.replacementcontext import (
+    MuiReplacementContext,
+)
 
 
 
@@ -145,10 +148,11 @@ def _no_further_replacement(module: nn.Module) -> bool:
 
 def replace_layers(
     module: nn.Module,
-    engine_config: MuiEngineConfig,
-    device="cuda",
+    replacement_context: MuiReplacementContext,
     name_prefix="",
 ) -> nn.Module:
+    engine_config = replacement_context.engine_config
+
     module_type = type(module)
 
     replacements = _LAYER_REPLACEMENTS
@@ -158,18 +162,16 @@ def replace_layers(
         # use the correct replacements
         replacements = _TP_LAYER_REPLACEMENTS
 
-    if engine_config.is_rank0():
-        print(f"Replace {name_prefix} ({module_type})?")
+    # if engine_config.is_rank0():
+    #     print(f"Replace {name_prefix} ({module_type})?")
 
     if (module_type in replacements) and not _no_further_replacement(module):
         new_module_type = replacements[module_type]
 
-        if engine_config.is_rank0():
-            print(f"Replacing {name_prefix} ({module_type} to {new_module_type}) ...")
+        # if engine_config.is_rank0():
+        #     print(f"Replacing {name_prefix} ({module_type} to {new_module_type}) ...")
 
-        new_module = new_module_type.replace(
-            module, engine_config=engine_config, device=device
-        )
+        new_module = new_module_type.replace(replacement_context, module)
 
         # delete the previous module to save memory
         if new_module != module:
@@ -195,8 +197,7 @@ def replace_layers(
         # replace modules in this module (updated or not) recursively
         new_sub_module = replace_layers(
             sub_module,
-            engine_config=engine_config,
-            device=device,
+            replacement_context=replacement_context,
             name_prefix=full_module_name,
         )
 

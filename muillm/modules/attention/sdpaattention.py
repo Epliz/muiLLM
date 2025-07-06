@@ -18,6 +18,7 @@ from muillm.modules.attention.causaltransformerdecoding import (
 from muillm.modules.attention.kvcache import repeat_kv
 from muillm.modules.attention.baseattention import MuiBaseAttention
 from muillm.modules.linear import MuiLinear
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 logger = logging.get_logger(__name__)
 
@@ -90,10 +91,11 @@ class MuiSdpaAttention(MuiBaseAttention):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union[LlamaAttention, MistralAttention],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiSdpaAttention":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
@@ -108,9 +110,8 @@ class MuiSdpaAttention(MuiBaseAttention):
         )
 
         new_o_proj = MuiLinear.replace(
+            replacement_context,
             prev_module.o_proj,
-            engine_config=engine_config,
-            device=device,
         )
 
         new_module = MuiSdpaAttention(

@@ -16,6 +16,7 @@ from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from transformers.models.llama4.modeling_llama4 import Llama4TextRotaryEmbedding
 
 import muillm_ext
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
@@ -270,10 +271,11 @@ class MuiRotaryEmbedding(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union[LlamaRotaryEmbedding, MistralRotaryEmbedding],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiRotaryEmbedding":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 

@@ -78,7 +78,7 @@ def run(rank, size):
     tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
 
     # load the original configuration
-    config = AutoConfig.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+    config = AutoConfig.from_pretrained(model_id, torch_dtype=torch.float)
 
     # make the model smaller
     config.text_config.num_hidden_layers = 4
@@ -86,11 +86,12 @@ def run(rank, size):
 
     print("Config : ", config)
 
-    model: nn.Module = AutoModel.from_config(config, torch_dtype=torch.bfloat16)
+    # creating in fp32 gives faster initialization on CPU
+    model: nn.Module = AutoModel.from_config(config, torch_dtype=torch.float)
 
     print("Model : ", model)
 
-    model = model.to(device="cuda", dtype=torch.bfloat16)
+    model = model.to(dtype=torch.bfloat16, device="cuda")
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

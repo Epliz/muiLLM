@@ -13,6 +13,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from muillm.modules.parallellinear import MuiParallelLinear
+from muillm.replacement.replacementcontext import MuiReplacementContext
 from .test_utils import (
     copy_linear,
     execute_distributed,
@@ -36,10 +37,14 @@ def _test_basic_linear(
     linear_copy = copy_linear(linear)
 
     engine_config = MuiEngineConfig(tensor_parallelism=None)
-    muilinear = MuiParallelLinear.replace(
-        prev_module=linear_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    muilinear = MuiParallelLinear.replace(
+        replacement_context=replacement_context,
+        prev_module=linear_copy,
     )
     muilinear.finalize_init()
 
@@ -73,10 +78,14 @@ def _test_linear_bias(
     linear_copy = copy_linear(linear)
 
     engine_config = MuiEngineConfig(tensor_parallelism=None)
-    muilinear = MuiParallelLinear.replace(
-        prev_module=linear_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    muilinear = MuiParallelLinear.replace(
+        replacement_context=replacement_context,
+        prev_module=linear_copy,
     )
     muilinear.finalize_init()
 

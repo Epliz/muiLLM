@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
+from muillm.replacement.replacementcontext import MuiReplacementContext
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.decoder.llama4decoder import MuiLlama4TextDecoderLayer
@@ -137,28 +138,24 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
 
     @staticmethod
     def _replace_layers(
+        replacement_context: MuiReplacementContext,
         prev_layers: nn.ModuleList,
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> nn.ModuleList:
+        engine_config = replacement_context.engine_config
         layers = nn.ModuleList()
-
         for i in range(len(prev_layers)):
             decoder_layer = prev_layers[i]
-
             if engine_config.tensor_parallelism < 2:
                 # no tensor parallelism
                 layer = MuiLlama4TextDecoderLayer.replace(
+                    replacement_context,
                     prev_module=decoder_layer,
-                    engine_config=engine_config,
-                    device=device,
                 )
             else:
                 # tensor parallelism
                 layer = MuiParallelLlama4TextDecoderLayer.replace(
+                    replacement_context,
                     prev_module=decoder_layer,
-                    engine_config=engine_config,
-                    device=device,
                 )
 
             layers.append(layer)
@@ -172,41 +169,29 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_model: Union["MuiLlama4TextModel", Llama4TextModel],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiLlama4TextModel":
         if isinstance(prev_model, MuiLlama4TextModel):
             # nothing would be changing if we created a new module, so might as well return the previous one
             return prev_model
+
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
 
         config = prev_model.config
         embed_tokens = prev_model.embed_tokens
         prev_layers = prev_model.layers
         prev_norm = prev_model.norm
 
-        # we will re-create it from scratch
-        prev_model.rotary_emb = None
-
-        # delete the previous module to save memory
-        del prev_model
-
-        # trigger GC to save memory
-        trigger_gc()
-
         layers = MuiLlama4TextModel._replace_layers(
+            replacement_context=replacement_context,
             prev_layers=prev_layers,
-            engine_config=engine_config,
-            device=device,
         )
 
-        prev_layers = None
-
-        # trigger GC to save memory
-        trigger_gc()
-
         norm = MuiRMSNorm.replace(
-            prev_module=prev_norm, engine_config=engine_config, device=device
+            replacement_context,
+            prev_module=prev_norm,
         )
 
         rotary_emb = MuiRotaryEmbedding(
@@ -724,39 +709,33 @@ class MuiLlama4ForCausalLM(Llama4PreTrainedModel, MuiGenerationMixin):
             self.post_init()
 
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_model: Union["MuiLlama4ForCausalLM", Llama4ForCausalLM],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiLlama4ForCausalLM":
         if isinstance(prev_model, MuiLlama4ForCausalLM):
             # nothing would be changing if we created a new module, so might as well return the previous one
             return prev_model
 
+        engine_config = replacement_context.engine_config
+
         prev_lm_head = prev_model.lm_head
         prev_model_model = prev_model.model
-
-        # delete the previous module to save memory
-        del prev_model
-
-        # trigger GC to save memory
-        trigger_gc()
 
         # replace the LM head first to potentially save memory
         if engine_config.tensor_parallelism < 2:
             lm_head = MuiLinear.replace(
-                prev_module=prev_lm_head,
-                engine_config=engine_config,
-                device=device,
+                replacement_context,
+                prev_lm_head,
             )
         else:
             lm_head = MuiParallelLinear.replace(
-                prev_module=prev_lm_head,
-                engine_config=engine_config,
-                device=device,
+                replacement_context,
+                prev_lm_head,
             )
 
         model = MuiLlama4TextModel.replace(
-            prev_model=prev_model_model, engine_config=engine_config, device=device
+            replacement_context,
+            prev_model_model,
         )
 
         new_model = MuiLlama4ForCausalLM(
@@ -924,30 +903,23 @@ class MuiLlama4ForConditionalGeneration(Llama4PreTrainedModel, MuiGenerationMixi
             self.post_init()
 
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_model: Union[
             "MuiLlama4ForConditionalGeneration", Llama4ForConditionalGeneration
         ],
-        engine_config: MuiEngineConfig,
-        device=None,
-    ) -> "MuiLlama4ForCausalLM":
+    ) -> "MuiLlama4ForConditionalGeneration":
         if isinstance(prev_model, MuiLlama4ForConditionalGeneration):
             # nothing would be changing if we created a new module, so might as well return the previous one
             return prev_model
 
         prev_language_model = prev_model.language_model
-        prev_model.language_model = None
 
         language_model = MuiLlama4ForCausalLM.replace(
+            replacement_context,
             prev_model=prev_language_model,
-            engine_config=engine_config,
-            device=device,
         )
 
-        del prev_language_model
-
-        # trigger GC to save memory
-        trigger_gc()
-
+        engine_config = replacement_context.engine_config
         new_model = MuiLlama4ForConditionalGeneration(
             engine_config=engine_config,
             model=prev_model,

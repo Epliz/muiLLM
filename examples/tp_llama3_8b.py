@@ -80,8 +80,8 @@ def run(rank, size):
 
     # we load the original model in fp16 precision
     model: nn.Module = AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=torch.float16
-    ).to(device="cuda", dtype=torch.float16)
+        model_id, torch_dtype=torch.bfloat16, tp_plan="auto"
+    ).to(device="cuda", dtype=torch.bfloat16)
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -102,16 +102,11 @@ def run(rank, size):
     num_output_tokens = 256
     num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
 
-    del model
-    from muillm.memorymanagement.gc import trigger_gc
-
-    trigger_gc()
-
     # Use the muiLLM replacements layers
-    from muillm.engine import load_model
+    from muillm.engine import init_engine
 
     # use auto-detected tensor parallelism level by setting to None
-    model = load_model(model_id, tensor_parallelism=None)
+    model = init_engine(model, tensor_parallelism=None)
 
     if rank == 0:
         print("Optimized models: ", model)

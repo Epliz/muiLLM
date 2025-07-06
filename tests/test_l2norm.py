@@ -6,6 +6,7 @@ import torch.nn as nn
 from transformers.models.llama4.modeling_llama4 import Llama4TextL2Norm
 
 from muillm.modules.norm.l2norm import MuiL2Norm
+from muillm.replacement.replacementcontext import MuiReplacementContext
 from .test_utils import tensors_equal
 
 
@@ -33,10 +34,14 @@ def _test_basic_llama4_l2norm(dtype: torch.dtype, device: str):
     norm_copy = copy_llama4_l2norm(norm)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    muinorm = MuiL2Norm.replace(
-        prev_module=norm_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    muinorm = MuiL2Norm.replace(
+        replacement_context=replacement_context,
+        prev_module=norm_copy,
     )
 
     input_tensor = torch.rand(size=(4, hidden_size), dtype=dtype, device=device)

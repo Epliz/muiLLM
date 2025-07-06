@@ -11,6 +11,7 @@ import muillm_ext
 from transformers.models.llama4.modeling_llama4 import Llama4TextL2Norm
 
 from muillm.engineconfig import MuiEngineConfig
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiL2Norm(torch.autograd.Function):
@@ -60,10 +61,11 @@ class MuiL2Norm(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union["MuiL2Norm", Llama4TextL2Norm],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiL2Norm":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
@@ -77,12 +79,6 @@ class MuiL2Norm(MuiModule):
             engine_config=engine_config,
             eps=eps,
         )
-
-        # delete the previous module to save memory
-        del prev_module
-
-        # trigger GC to save memory
-        trigger_gc()
 
         return new_module
 

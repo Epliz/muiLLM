@@ -10,6 +10,7 @@ from muillm.modules.attention.baseattention import MuiBaseAttention
 from muillm.modules.attention.sdpaattention import MuiSdpaAttention
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
 from muillm.modules.multilinear import MuiMultiLinear
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 from transformers.models.mistral.modeling_mistral import (
     MistralDecoderLayer,
@@ -35,10 +36,11 @@ class MuiDecoderLayer(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union["MuiDecoderLayer", LlamaDecoderLayer, MistralDecoderLayer],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiDecoderLayer":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
@@ -56,13 +58,13 @@ class MuiDecoderLayer(MuiModule):
         ):
             # When using tensor parallelism, we shard the attention by head, so we need to shard qkv by rows
             qkv_proj = MuiMultiLinear.replace(
+                replacement_context,
                 prev_modules=[prev_attn.q_proj, prev_attn.k_proj, prev_attn.v_proj],
-                engine_config=engine_config,
                 prev_layernorm_module=input_layernorm,
-                device=device,
             )
             self_attn = MuiSdpaAttention.replace(
-                prev_module.self_attn, engine_config=engine_config, device=device
+                replacement_context,
+                prev_module.self_attn,
             )
         else:
             raise ValueError(f"Not supported {type(prev_module.self_attn)}")
@@ -70,21 +72,14 @@ class MuiDecoderLayer(MuiModule):
         post_attention_layernorm = prev_module.post_attention_layernorm
         # even if we had a MuiGateUpDownMLP, we need to replace it with a new one to get the layernorm module
         mlp = MuiGateUpDownMLP.replace(
+            replacement_context,
             prev_module=prev_module.mlp,
-            engine_config=engine_config,
             prev_layernorm_module=post_attention_layernorm,
-            device=device,
         )
 
         new_decoder = MuiDecoderLayer(
             engine_config=engine_config, qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp
         )
-
-        # delete the previous module to save memory
-        del prev_module
-
-        # trigger GC to save memory
-        trigger_gc()
 
         return new_decoder
 

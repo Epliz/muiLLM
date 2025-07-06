@@ -35,9 +35,9 @@ from muillm.modules.kvcache.cache_utils import (
 )
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
-
 from muillm.modules.parallellinear import MuiParallelLinear
 from muillm.modules.norm.rmsnorm import MuiRMSNorm
+from muillm.replacement.replacementcontext import MuiReplacementContext
 import muillm_ext
 
 import torch
@@ -128,33 +128,27 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         )
 
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_model: Union["MuiLlamaModel", LlamaModel],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiLlamaModel":
         if isinstance(prev_model, MuiLlamaModel):
             # nothing would be changing if we created a new module, so might as well return the previous one
             return prev_model
 
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         config = prev_model.config
         embed_tokens = prev_model.embed_tokens
         prev_layers = prev_model.layers
         prev_norm = prev_model.norm
-
-        # delete the previous module to save memory
-        del prev_model
-
-        # trigger GC to save memory
-        trigger_gc()
 
         if engine_config.tensor_parallelism < 2:
             # no tensor parallelism
             layers = nn.ModuleList(
                 [
                     MuiDecoderLayer.replace(
-                        prev_module=decoder_layer,
-                        engine_config=engine_config,
-                        device=device,
+                        replacement_context,
+                        decoder_layer,
                     )
                     for decoder_layer in prev_layers
                 ]
@@ -164,16 +158,16 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             layers = nn.ModuleList(
                 [
                     MuiParallelDecoderLayer.replace(
-                        prev_module=decoder_layer,
-                        engine_config=engine_config,
-                        device=device,
+                        replacement_context,
+                        decoder_layer,
                     )
                     for decoder_layer in prev_layers
                 ]
             )
 
         norm = MuiRMSNorm.replace(
-            prev_module=prev_norm, engine_config=engine_config, device=device
+            replacement_context,
+            prev_norm,
         )
         rotary_emb = MuiRotaryEmbedding(
             engine_config=engine_config, config=config, layer_idx=0, device=device
@@ -602,39 +596,33 @@ class MuiLlamaForCausalLM(LlamaPreTrainedModel, MuiGenerationMixin):
             self.post_init()
 
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_model: Union["MuiLlamaForCausalLM", LlamaForCausalLM],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiLlamaForCausalLM":
         if isinstance(prev_model, MuiLlamaForCausalLM):
             # nothing would be changing if we created a new module, so might as well return the previous one
             return prev_model
 
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         prev_lm_head = prev_model.lm_head
         prev_model_model = prev_model.model
-
-        # delete the previous module to save memory
-        del prev_model
-
-        # trigger GC to save memory
-        trigger_gc()
 
         # replace the LM head first to potentially save memory
         if engine_config.tensor_parallelism < 2:
             lm_head = MuiLinear.replace(
-                prev_module=prev_lm_head,
-                engine_config=engine_config,
-                device=device,
+                replacement_context,
+                prev_lm_head,
             )
         else:
             lm_head = MuiParallelLinear.replace(
-                prev_module=prev_lm_head,
-                engine_config=engine_config,
-                device=device,
+                replacement_context,
+                prev_lm_head,
             )
 
         model = MuiLlamaModel.replace(
-            prev_model=prev_model_model, engine_config=engine_config, device=device
+            replacement_context,
+            prev_model_model,
         )
 
         new_model = MuiLlamaForCausalLM(

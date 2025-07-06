@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from muillm.modules.multilinear import MuiMultiLinear
+from muillm.replacement.replacementcontext import MuiReplacementContext
 from .test_utils import copy_linears, random_linears, tensors_equal
 
 
@@ -22,10 +23,14 @@ def test_basic_linears():
     linear_copies = copy_linears(linears)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    multilinear = MuiMultiLinear.replace(
-        prev_modules=linear_copies,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    multilinear = MuiMultiLinear.replace(
+        replacement_context=replacement_context,
+        prev_modules=linear_copies,
     )
     multilinear.finalize_init()
 
@@ -59,10 +64,14 @@ def test_replace_back():
     )
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    multilinear = MuiMultiLinear.replace(
-        prev_modules=linears,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    multilinear = MuiMultiLinear.replace(
+        replacement_context=replacement_context,
+        prev_modules=linears,
     )
 
     replaced_back_linears, _ = multilinear.replace_back()

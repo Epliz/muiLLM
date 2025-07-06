@@ -1,14 +1,19 @@
 from typing import Iterable, List, Tuple, Union
+from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
+from muillm.engineconfig import (
+    MuiEngineConfig,
+)
 from muillm.modules.module import MuiModule
 from muillm.modules.norm.rmsnorm import MuiRMSNorm
 import torch
 from torch import Tensor
 import torch.nn as nn
 
-from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.linear import MuiLinear
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
+
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 def _all_or_none(it: Iterable[bool], exception_message) -> bool:
@@ -66,13 +71,34 @@ class MuiMultiLinear(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_modules: List[Union[MuiLinear, nn.Linear]],
-        engine_config: MuiEngineConfig,
         prev_layernorm_module: Union[MuiRMSNorm, LlamaRMSNorm, MistralRMSNorm] = None,
-        device=None,
     ) -> "MuiMultiLinear":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
+
+        # Make sure we convert the previous modules to local modules
+        # so that we can safely copy their parameters
+        prev_modules = [
+            (
+                replacement_context.to_local_module(prev_module)
+                if not isinstance(prev_module, MuiLinear)
+                else prev_module
+            )
+            for prev_module in prev_modules
+        ]
+
+        if (prev_layernorm_module is not None) and (
+            not isinstance(prev_layernorm_module, MuiRMSNorm)
+        ):
+            # Make sure we convert the previous layernorm module to a local module
+            # so that we can safely copy its parameters
+            prev_layernorm_module = replacement_context.to_local_module(
+                prev_layernorm_module
+            )
 
         if len(prev_modules) < 1:
             raise ValueError(
@@ -171,19 +197,20 @@ class MuiMultiLinear(MuiModule):
         device = prev_modules[0].weight.device if device is None else device
         has_bias = self.linear.bias is not None
 
-        concat_weights = torch.cat(
-            [prev_module.weight.clone().detach() for prev_module in prev_modules],
-            dim=0,
-        )
         concat_weights_require_grads = _all_or_none(
             [prev_module.weight.requires_grad for prev_module in prev_modules],
             "all or none weights must required grads but got a mix",
+        )
+
+        concat_weights = torch.cat(
+            [prev_module.weight.detach() for prev_module in prev_modules],
+            dim=0,
         )
         self.linear._set_weights(concat_weights, concat_weights_require_grads)
 
         if has_bias:
             concat_biases = torch.cat(
-                [prev_module.bias.clone().detach() for prev_module in prev_modules],
+                [prev_module.bias.detach() for prev_module in prev_modules],
                 dim=0,
             )
             concat_biases_requires_grad = _all_or_none(

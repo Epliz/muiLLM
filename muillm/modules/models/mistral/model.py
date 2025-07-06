@@ -50,7 +50,10 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 
-from muillm.engineconfig import MuiEngineConfig
+from muillm.engineconfig import (
+    MuiEngineConfig,
+)
+from muillm.replacement.replacementcontext import MuiReplacementContext
 from muillm.sampling.generation import MuiGenerationMixin
 
 logger = logging.get_logger(__name__)
@@ -116,33 +119,27 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         )
 
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_model: Union["MuiMistralModel", MistralModel],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiMistralModel":
         if isinstance(prev_model, MuiMistralModel):
             # nothing would be changing if we created a new module, so might as well return the previous one
             return prev_model
 
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         config = prev_model.config
         embed_tokens = prev_model.embed_tokens
         prev_layers = prev_model.layers
         prev_norm = prev_model.norm
-
-        # delete the previous module to save memory
-        del prev_model
-
-        # trigger GC to save memory
-        trigger_gc()
 
         if engine_config.tensor_parallelism < 2:
             # no tensor parallelism
             layers = nn.ModuleList(
                 [
                     MuiDecoderLayer.replace(
-                        prev_module=decoder_layer,
-                        engine_config=engine_config,
-                        device=device,
+                        replacement_context,
+                        decoder_layer,
                     )
                     for decoder_layer in prev_layers
                 ]
@@ -152,15 +149,15 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
             layers = nn.ModuleList(
                 [
                     MuiParallelDecoderLayer.replace(
-                        prev_module=decoder_layer,
-                        engine_config=engine_config,
-                        device=device,
+                        replacement_context,
+                        decoder_layer,
                     )
                     for decoder_layer in prev_layers
                 ]
             )
         norm = MuiRMSNorm.replace(
-            prev_module=prev_norm, engine_config=engine_config, device=device
+            replacement_context,
+            prev_norm,
         )
         rotary_emb = MuiRotaryEmbedding(
             engine_config=engine_config, config=config, layer_idx=0, device=device
@@ -638,39 +635,33 @@ class MuiMistralForCausalLM(MistralPreTrainedModel, MuiGenerationMixin):
             self.post_init()
 
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_model: Union["MuiMistralForCausalLM", MistralForCausalLM],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiMistralForCausalLM":
         if isinstance(prev_model, MuiMistralForCausalLM):
             # nothing would be changing if we created a new module, so might as well return the previous one
             return prev_model
 
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         prev_lm_head = prev_model.lm_head
         prev_model_model = prev_model.model
-
-        # delete the previous module to save memory
-        del prev_model
-
-        # trigger GC to save memory
-        trigger_gc()
 
         # replace the LM head first to potentially save memory
         if engine_config.tensor_parallelism < 2:
             lm_head = MuiLinear.replace(
-                prev_module=prev_lm_head,
-                engine_config=engine_config,
-                device=device,
+                replacement_context,
+                prev_lm_head,
             )
         else:
             lm_head = MuiParallelLinear.replace(
-                prev_module=prev_lm_head,
-                engine_config=engine_config,
-                device=device,
+                replacement_context,
+                prev_lm_head,
             )
 
         model = MuiMistralModel.replace(
-            prev_model=prev_model_model, engine_config=engine_config, device=device
+            replacement_context,
+            prev_model_model,
         )
 
         new_model = MuiMistralForCausalLM(

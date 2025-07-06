@@ -11,8 +11,10 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from transformers import (
+    AutoModelForCausalLM,
     AutoTokenizer,
 )
+
 import torch
 import torch.nn as nn
 
@@ -78,26 +80,16 @@ def run(rank, size):
     ## Load the original model & tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
 
-    # 5 tokens prompt
-    prompt = "Hello my name is"
-
-    tokenized_prompts = tokenizer(prompt, return_tensors="pt", padding="longest")
-    if rank == 0:
-        print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
-
-    num_input_tokens = tokenized_prompts["input_ids"].shape[1]
-    batch_size = tokenized_prompts["input_ids"].shape[0]
-    num_output_tokens = 256
-    num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
-
     # Use the muiLLM replacements layers
     from muillm.engine import load_model
 
     # use auto-detected tensor parallelism level by setting to None
-    model = load_model(model_id, model_dtype=torch.float16, tensor_parallelism=None)
+    model = load_model(model_id, tensor_parallelism=None)
 
     if rank == 0:
         print("Optimized models: ", model)
+
+    prompt = "Hello my name is"
 
     tokenized_prompts = tokenizer(prompt, return_tensors="pt", padding="longest")
 

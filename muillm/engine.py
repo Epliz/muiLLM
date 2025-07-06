@@ -1,10 +1,9 @@
 from typing import Optional
-import torch
 import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.replacements import replace_layers
-from muillm.sampling.wrapping import wrap_model
+from muillm.replacement.replacementcontext import MuiReplacementContext
+from muillm.replacement.replacements import replace_layers
 from muillm.quantization.quantizationmethod import QuantizationMethod
 from muillm.quantization.quantizedreplacements import quantize_layers
 
@@ -37,12 +36,11 @@ def init_engine(
     quantization_method = engine_config.quantization_method
     tensor_parallelism = engine_config.tensor_parallelism
 
-    # TODO: debug memory usage
-    # a) have destructors for cpp modules
-    # b) check with the gc module what tensors are kept in memory
-
     # replace full modules/layers first, then quantize
-    model = replace_layers(module=model, engine_config=engine_config, device=device)
+    replacement_context = MuiReplacementContext(
+        engine_config, model=model, device=device
+    )
+    model = replace_layers(module=model, replacement_context=replacement_context)
 
     if quantization_method is not None:
         quantize_layers(model=model, engine_config=engine_config, device=device)

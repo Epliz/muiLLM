@@ -1,4 +1,5 @@
 from typing import List, Optional, Union
+from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.module import MuiModule
 import torch
@@ -12,6 +13,7 @@ from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 import muillm_ext
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiLinear(torch.autograd.Function):
@@ -132,17 +134,34 @@ class MuiLinear(MuiModule, nn.Linear):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union["MuiLinear", nn.Linear],
-        engine_config: MuiEngineConfig,
         prev_layernorm_module: Union[MuiRMSNorm, LlamaRMSNorm, MistralRMSNorm] = None,
-        device=None,
     ) -> "MuiLinear":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
         if isinstance(prev_module, MuiLinear) and (prev_layernorm_module is None):
             # re-creating a module would change nothing, we can just avoid id
             return prev_module
+
+        if not isinstance(prev_module, MuiLinear):
+            # Make sure we convert the previous module to a local module
+            # so that we can safely copy its parameters
+            # and avoid any DTensor issues
+            prev_module = replacement_context.to_local_module(prev_module)
+
+        if (prev_layernorm_module is not None) and not isinstance(
+            prev_layernorm_module, MuiRMSNorm
+        ):
+            # Make sure we convert the previous layernorm module to a local module
+            # so that we can safely copy its parameters
+            # and avoid any DTensor issues
+            prev_layernorm_module = replacement_context.to_local_module(
+                prev_layernorm_module
+            )
 
         device = prev_module.weight.device if device is None else device
         dtype = prev_module.weight.dtype
@@ -208,35 +227,13 @@ class MuiLinear(MuiModule, nn.Linear):
             prev_module=prev_module, norm_weights=norm_weights, device=device
         )
 
-        # delete the previous module to save memory
-        if isinstance(prev_module, MuiLinear):
-            prev_module._severe_ties()
-        else:
-            prev_weights = prev_module.weight
-            prev_module.weight = None
-            del prev_weights
-
-            if prev_module.bias is not None:
-                prev_bias = prev_module.bias
-                prev_module.bias = None
-                del prev_bias
-
-        if prev_layernorm_module is not None:
-            prev_layernorm_weights = prev_layernorm_module.weight
-            prev_layernorm_module.weight = None
-            del prev_layernorm_weights
-
-        del prev_module
-
-        # trigger GC to save memory
-        trigger_gc()
-
         return new_module
 
     def _set_weights(
         self, weights: torch.Tensor, requires_grads: Optional[bool] = None
     ) -> None:
         weights_requires_grad = weights.requires_grad
+
         self.weight.data.copy_(weights.data)
         MuiLinear._set_requires_grads(
             self.weight,
@@ -248,6 +245,7 @@ class MuiLinear(MuiModule, nn.Linear):
     ) -> None:
         if bias is not None:
             bias_requires_grad = bias.requires_grad
+
             self.bias.data.copy_(bias.data)
             MuiLinear._set_requires_grads(
                 self.bias,
@@ -260,6 +258,7 @@ class MuiLinear(MuiModule, nn.Linear):
         self, norm_weights: torch.Tensor, requires_grads: Optional[bool] = None
     ) -> None:
         norm_weights_requires_grad = norm_weights.requires_grad
+
         self.norm_weights.data.copy_(norm_weights.data)
         MuiLinear._set_requires_grads(
             self.norm_weights,

@@ -1,6 +1,7 @@
 from typing import List, Optional, Tuple, Union
 from muillm.comms.communicator import MuiCommunicator
 from muillm.engineconfig import MuiEngineConfig
+from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
@@ -20,6 +21,7 @@ from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 import muillm_ext
 
 from muillm.modules.topk import topk_sigmoid
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiParallelGateUpDownMoe(torch.autograd.Function):
@@ -170,14 +172,30 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Llama4TextMoe,
-        engine_config: MuiEngineConfig,
         prev_layernorm_module: Union[MuiRMSNorm, Llama4TextRMSNorm] = None,
-        device=None,
     ) -> "MuiParallelGateUpDownMLPMoe":
-
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
+
+        # Make sure we convert the previous module to a local module
+        prev_module.experts = replacement_context.to_local_module(prev_module.experts)
+        prev_module.shared_expert = replacement_context.to_local_module(
+            prev_module.shared_expert
+        )
+        prev_module.router = replacement_context.to_local_module(prev_module.router)
+
+        if (prev_layernorm_module is not None) and (
+            not isinstance(prev_layernorm_module, MuiRMSNorm)
+        ):
+            # Make sure we convert the previous layernorm module to a local module
+            # so that we can safely copy its parameters
+            prev_layernorm_module = replacement_context.to_local_module(
+                prev_layernorm_module
+            )
 
         device = prev_module.router.weight.device if device is None else device
         dtype = prev_module.router.weight.dtype
@@ -209,16 +227,10 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
             device=device,
         )
 
-        # delete the previous module to save memory
-        del prev_module
-
-        # trigger GC to save memory
-        trigger_gc()
-
         return new_module
 
     def _extract_expert_linears(
-        self, tensor: torch.Tensor, device, dtype
+        self, tensor: torch.Tensor, device, dtype, requires_grad: Optional[bool] = None
     ) -> List[nn.Linear]:
         num_experts, out_features, in_features = tensor.shape
 
@@ -244,6 +256,7 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
             linear.weight = nn.Parameter(
                 tensors[i].reshape(out_features, in_features).clone().detach()
             )
+            # TODO: check if requires_grad is set correctly
             linear.weight.requires_grad = tensor.requires_grad
 
             all_linears.append(linear)
@@ -279,7 +292,10 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         device = prev_experts.gate_up_proj.device if device is None else device
         dtype = prev_experts.gate_up_proj.dtype
 
-        # Shared expert weights
+        ## Shared expert weights
+
+        # reshape the shared expert weights to match the expected shape
+
         shared_gate_weight = prev_module.shared_expert.gate_proj.weight.view(
             1, self.expert_dim, self.hidden_dim
         )
@@ -290,9 +306,12 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
             1, self.hidden_dim, self.expert_dim
         )
 
-        # dynamic expert weights
+        ## dynamic expert weights
+
+        # reshape the dynamic expert weights to match the expected shape
         gate_chunk, up_chunk = prev_experts.gate_up_proj.chunk(2, dim=2)
         down_proj = prev_experts.down_proj
+
         gate_weights = gate_chunk.reshape(
             self.num_dynamic_experts, self.hidden_dim, self.expert_dim
         ).transpose(1, 2)
@@ -345,19 +364,8 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         )
 
         self.gate_projs.copy_modules(prev_modules=gate_linears, device=device)
-        for gate_linear in gate_linears:
-            del gate_linear
-        trigger_gc()
-
         self.up_projs.copy_modules(prev_modules=up_linears, device=device)
-        for up_linear in up_linears:
-            del up_linear
-        trigger_gc()
-
         self.down_projs.copy_modules(prev_modules=down_linears, device=device)
-        for down_linear in down_linears:
-            del down_linear
-        trigger_gc()
 
         MuiParallelLinear._sync_all(engine_config=self.engine_config)
 

@@ -1,4 +1,8 @@
 from typing import Optional, Union
+from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
+from muillm.engineconfig import (
+    MuiEngineConfig,
+)
 from muillm.modules.module import MuiModule
 import torch
 from torch import Tensor
@@ -11,6 +15,8 @@ from muillm.modules.norm.rmsnorm import _MuiRMSNorm
 from muillm.quantization.quantizationmethod import Int8WeightOnlyQuantizationMethod
 from muillm.quantization.rtnquantizer import RTNQuantizer
 import muillm_ext
+
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiInt8Dequantize(torch.autograd.Function):
@@ -147,16 +153,22 @@ class MuiInt8Linear(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_module: Union["MuiInt8Linear", nn.Linear, MuiLinear],
-        engine_config: MuiEngineConfig,
-        device=None,
     ) -> "MuiInt8Linear":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
         if isinstance(prev_module, MuiInt8Linear):
             # re-creating a module would replace nothing so we can avoid it
             return prev_module
+
+        if not isinstance(prev_module, MuiLinear):
+            # Make sure we convert the previous module to a local module
+            # so that we can safely copy its parameters
+            prev_module = replacement_context.to_local_module(prev_module)
 
         device = prev_module.weight.device if device is None else device
         dtype = prev_module.weight.dtype

@@ -7,6 +7,7 @@ from transformers.models.llama4.modeling_llama4 import Llama4TextMoe
 from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 
 from muillm.modules.moe.parallelgateupdownmlpmoe import MuiParallelGateUpDownMLPMoe
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 from .test_utils import execute_distributed, tensors_equal
 
@@ -109,10 +110,14 @@ def _test_basic_llama4_moe_mlp(
     moe_mlp_copy = copy_llama4_moe_mlp(moe_mlp)
 
     engine_config = MuiEngineConfig(tensor_parallelism=None)
-    muimlp = MuiParallelGateUpDownMLPMoe.replace(
-        prev_module=moe_mlp_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    muimlp = MuiParallelGateUpDownMLPMoe.replace(
+        replacement_context=replacement_context,
+        prev_module=moe_mlp_copy,
     )
     muimlp.finalize_init()
 

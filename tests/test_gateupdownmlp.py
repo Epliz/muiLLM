@@ -15,6 +15,8 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama4.modeling_llama4 import Llama4TextMLP
 from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 
+from muillm.replacement.replacementcontext import MuiReplacementContext
+
 from .test_utils import tensors_equal
 
 
@@ -66,10 +68,14 @@ def _test_basic_mistral_mlp(device: str = "cpu", dtype: torch.dtype = torch.floa
     mlp_copy = copy_mistral_mlp(mlp)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    muimlp = MuiGateUpDownMLP.replace(
-        prev_module=mlp_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device=device,
+    )
+    muimlp = MuiGateUpDownMLP.replace(
+        replacement_context=replacement_context,
+        prev_module=mlp_copy,
     )
     muimlp.finalize_init()
 
@@ -137,10 +143,14 @@ def test_basic_llama3_mlp():
     mlp_copy = copy_llama3_mlp(mlp)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    muimlp = MuiGateUpDownMLP.replace(
-        prev_module=mlp_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device="cpu",
+    )
+    muimlp = MuiGateUpDownMLP.replace(
+        replacement_context=replacement_context,
+        prev_module=mlp_copy,
     )
     muimlp.finalize_init()
 
@@ -192,10 +202,14 @@ def test_basic_llama4_mlp():
     mlp_copy = copy_llama4_mlp(mlp)
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
-    muimlp = MuiGateUpDownMLP.replace(
-        prev_module=mlp_copy,
+    replacement_context = MuiReplacementContext(
         engine_config=engine_config,
+        model=None,  # No model context needed for this test
         device="cpu",
+    )
+    muimlp = MuiGateUpDownMLP.replace(
+        replacement_context=replacement_context,
+        prev_module=mlp_copy,
     )
     muimlp.finalize_init()
 

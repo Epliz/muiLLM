@@ -45,6 +45,7 @@ from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 
 from muillm.modules.multilinear import MuiMultiLinear
 from muillm.modules.norm.qkl2norm import MuiQKL2Norm
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 logger = logging.get_logger(__name__)
 
@@ -176,18 +177,21 @@ class MuiLlama4TextAttention(MuiModule):
 
     @staticmethod
     def replace(
-        prev_module: Llama4TextAttention, engine_config: MuiEngineConfig, device=None
+        replacement_context: MuiReplacementContext,
+        prev_module: Llama4TextAttention,
     ) -> "MuiLlama4TextAttention":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         qk_norm = None
         if hasattr(prev_module, "qk_norm"):
             qk_norm = MuiQKL2Norm.replace(
-                prev_module.qk_norm, engine_config, device=device
+                replacement_context,
+                prev_module.qk_norm,
             )
 
         new_o_proj = MuiLinear.replace(
+            replacement_context,
             prev_module.o_proj,
-            engine_config=engine_config,
-            device=device,
         )
 
         return MuiLlama4TextAttention(

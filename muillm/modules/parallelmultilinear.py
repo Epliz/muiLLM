@@ -1,4 +1,8 @@
 from typing import Iterable, List, Optional, Tuple, Union
+from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
+from muillm.engineconfig import (
+    MuiEngineConfig,
+)
 from muillm.modules.module import MuiModule
 from muillm.modules.multilinear import MuiMultiLinear
 from muillm.modules.parallellinear import MuiParallelLinear
@@ -14,6 +18,7 @@ from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 import muillm_ext
 
 from muillm.modules.norm.rmsnorm import MuiRMSNorm
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
 class _MuiParallelMultiLinear(torch.autograd.Function):
@@ -141,27 +146,28 @@ class MuiParallelMultiLinear(MuiModule):
 
     @staticmethod
     def replace(
+        replacement_context: MuiReplacementContext,
         prev_modules: Union[MuiMultiLinear, List[nn.Linear]],
-        engine_config: MuiEngineConfig,
         prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None,
         sharding_dim: int = 1,
-        device=None,
     ) -> "MuiParallelMultiLinear":
+        engine_config = replacement_context.engine_config
+        device = replacement_context.device
         if device is None:
             raise ValueError("device was None")
 
         if isinstance(prev_modules, MuiMultiLinear):
             return MuiParallelMultiLinear._replace_multilinear(
+                replacement_context,
                 prev_module=prev_modules,
-                engine_config=engine_config,
                 prev_layernorm_module=prev_layernorm_module,
                 sharding_dim=sharding_dim,
                 device=device,
             )
         elif isinstance(prev_modules, list):
             return MuiParallelMultiLinear._replace_linears(
+                replacement_context,
                 prev_modules=prev_modules,
-                engine_config=engine_config,
                 prev_layernorm_module=prev_layernorm_module,
                 sharding_dim=sharding_dim,
                 device=device,
@@ -171,12 +177,14 @@ class MuiParallelMultiLinear(MuiModule):
 
     @staticmethod
     def _replace_multilinear(
+        replacement_context: MuiReplacementContext,
         prev_module: MuiMultiLinear,
-        engine_config: MuiEngineConfig,
         prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None,
         sharding_dim: int = 0,
         device=None,
     ) -> "MuiParallelMultiLinear":
+        engine_config = replacement_context.engine_config
+
         if device is None:
             raise ValueError("device was None")
 
@@ -220,12 +228,14 @@ class MuiParallelMultiLinear(MuiModule):
 
     @staticmethod
     def _replace_linears(
+        replacement_context: MuiReplacementContext,
         prev_modules: List[Union[MuiParallelLinear, nn.Linear]],
-        engine_config: MuiEngineConfig,
         prev_layernorm_module: Union[LlamaRMSNorm, MistralRMSNorm] = None,
         sharding_dim: int = 0,
         device=None,
     ) -> "MuiParallelMultiLinear":
+        engine_config = replacement_context.engine_config
+
         if device is None:
             raise ValueError("device was None")
 
@@ -239,10 +249,16 @@ class MuiParallelMultiLinear(MuiModule):
             (
                 prev_module.to_linear()
                 if isinstance(prev_module, MuiParallelLinear)
-                else prev_module
+                else replacement_context.to_local_module(prev_module)
             )
             for prev_module in prev_modules
         ]
+
+        if prev_layernorm_module is not None:
+            if not isinstance(prev_layernorm_module, MuiRMSNorm):
+                prev_layernorm_module = replacement_context.to_local_module(
+                    prev_layernorm_module
+                )
 
         has_bias = _all_or_none(
             [prev_module.bias is not None for prev_module in prev_modules],
