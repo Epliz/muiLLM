@@ -24,6 +24,7 @@ from muillm.modules.attention.causaltransformerdecoding import (
 )
 from muillm.modules.attention.rotaryembedding import _MuiComplexRotaryNoCache
 from muillm.modules.attention.temperaturetuning import _MuiTemperatureTuning
+from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
@@ -153,6 +154,7 @@ class MuiLlama4TextAttention(MuiModule):
         engine_config: MuiEngineConfig,
         prev_module: Llama4TextAttention,
         qk_norm: Optional[MuiQKL2Norm],
+        o_proj: MuiLinear,
     ):
         super().__init__(engine_config=engine_config)
         self.config = prev_module.config
@@ -168,7 +170,7 @@ class MuiLlama4TextAttention(MuiModule):
         self.attention_dropout = prev_module.attention_dropout
         self.is_causal = True
         self.use_rope = prev_module.use_rope
-        self.o_proj = prev_module.o_proj
+        self.o_proj = o_proj
         if self.config.use_qk_norm and self.use_rope:
             self.qk_norm = qk_norm
 
@@ -181,10 +183,18 @@ class MuiLlama4TextAttention(MuiModule):
             qk_norm = MuiQKL2Norm.replace(
                 prev_module.qk_norm, engine_config, device=device
             )
+
+        new_o_proj = MuiLinear.replace(
+            prev_module.o_proj,
+            engine_config=engine_config,
+            device=device,
+        )
+
         return MuiLlama4TextAttention(
             engine_config=engine_config,
             prev_module=prev_module,
             qk_norm=qk_norm,
+            o_proj=new_o_proj,
         )
 
     def forward(

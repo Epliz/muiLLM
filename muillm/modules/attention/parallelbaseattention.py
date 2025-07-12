@@ -91,6 +91,7 @@ class MuiParallelBaseAttention(MuiModule):
         engine_config: MuiEngineConfig,
         config: Union[LlamaConfig, MistralConfig],
         rotary_emb: MuiRotaryEmbedding,
+        o_proj: MuiParallelLinear,
         layer_idx: Optional[int] = None,
         device=None,
         dtype=None,
@@ -147,15 +148,7 @@ class MuiParallelBaseAttention(MuiModule):
         else:
             attention_bias = False
 
-        self.o_proj = MuiParallelLinear(
-            engine_config,
-            self.num_heads * self.head_dim,
-            self.hidden_size,
-            bias=attention_bias,
-            device=device,
-            dtype=dtype,
-            sharding_dim=1,
-        )
+        self.o_proj = o_proj
 
         self.rotary_emb = rotary_emb
 
@@ -230,16 +223,21 @@ class MuiParallelBaseAttention(MuiModule):
             engine_config, config, layer_idx, device, dtype
         )
 
+        new_o_proj = MuiParallelLinear.replace(
+            prev_module.o_proj,
+            engine_config=engine_config,
+            device=device,
+        )
+
         new_module = MuiParallelBaseAttention(
             engine_config=engine_config,
             config=config,
             rotary_emb=rotary_emb,
+            o_proj=new_o_proj,
             layer_idx=layer_idx,
             device=device,
             dtype=dtype,
         )
-
-        new_module.o_proj.copy_module(prev_module=prev_module.o_proj, device=device)
 
         return new_module
 

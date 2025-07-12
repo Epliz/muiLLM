@@ -74,16 +74,21 @@ class MuiParallelSdpaAttention(MuiParallelBaseAttention):
             engine_config, config, layer_idx, device, dtype
         )
 
+        new_o_proj = MuiParallelLinear.replace(
+            prev_module.o_proj,
+            engine_config=engine_config,
+            device=device,
+        )
+
         new_module = MuiParallelSdpaAttention(
             engine_config=engine_config,
             config=config,
             rotary_emb=rotary_emb,
+            o_proj=new_o_proj,
             layer_idx=layer_idx,
             device=device,
             dtype=dtype,
         )
-
-        new_module.o_proj.copy_module(prev_module=prev_module.o_proj, device=device)
 
         return new_module
 
