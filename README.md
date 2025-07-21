@@ -26,6 +26,7 @@ The following optimizations are already implemented:
 * optimized linear layers with faster GEMV
 * fused QKV
 * fused MLP (Gate/Up + SiLU)
+* fused MoE MLP (Gate/Up + SiLU, top-K sigmoid)
 * fused residuals in linear layers
 * fused RMSNorm in linear layers
 * fused ROPE with write out in static/dynamic cache
@@ -34,6 +35,7 @@ The following optimizations are already implemented:
 * reduced CPU/GPU synchronizations due to attention mask checks
 * reduced CPU/GPU synchronizations during sampling
 * static cache support
+* sliding cache support
 * reduced CPU overhead by using C++ modules instead of Python
 
 * tensor parallelism support (still being improved):
@@ -49,10 +51,12 @@ Future optimizations (by order of likely implementation):
 
 The numbers are changing at every commit, try it out by yourself!
 
-But if you can't, here is the (outdated) approximate performance on a small prompt, generating 256 tokens, for a single GPU:
-* fp16 on MI300x: 210 tokens/s average tokens/s
+But if you can't, here are approximate performance numbers on a small prompt, generating 256 tokens:
+* Llama 3 8B, fp16 on 1x MI300x: 210 tokens/s/user
+* Llama 3 8B, fp16 on 4x MI300x: 350 tokens/s/user
+* Llama 4 Scout, fp16 on 4x MI300x: 190 tokens/s/user
 
-TODO: MI100 results, tensor parallelism results, comparison to Nvidia TensorRT, HuggingFace stock + compiled stock performance
+TODO: MI100 results, comparison to Nvidia TensorRT, HuggingFace stock + compiled stock performance
 
 ## Installation
 
