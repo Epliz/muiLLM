@@ -2,7 +2,7 @@
 #define __MUILLM_PARALLEL_LLAMA4_DECODER_STACK_H__
 
 #include "../engine.h"
-#include "../comm_torch.h"
+#include "../comms/comm_torch.h"
 
 #include "parallel_llama4_decoder_module.h"
 #include "kvcache.h"

@@ -2,7 +2,7 @@
 #define __MUILLM_PARALLEL_LINEAR_MODULE_H__
 
 #include "../engine.h"
-#include "../comm_torch.h"
+#include "../comms/comm_torch.h"
 
 #include <optional>
 

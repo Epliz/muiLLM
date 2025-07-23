@@ -102,11 +102,11 @@ setup(
                 "csrc/reduce/reduce_fp16_kernels.cu",
                 "csrc/reduce/reduce_bf16_kernels.cu",
                 # comms
-                "csrc/comm_base.cpp",
-                "csrc/comm.cpp",
-                "csrc/comm_torch.cpp",
-                "csrc/comm_p2p.cu",
-                "csrc/comm_staged.cu",
+                "csrc/comms/comm_base.cpp",
+                "csrc/comms/comm.cpp",
+                "csrc/comms/comm_torch.cpp",
+                "csrc/comms/comm_p2p.cu",
+                "csrc/comms/comm_staged.cu",
                 # parallel
                 "csrc/parallel_linear_kernels.cu",
                 "csrc/parallel_gateup_kernels.cu",
