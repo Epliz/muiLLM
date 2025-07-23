@@ -41,7 +41,7 @@ The following optimizations are already implemented:
 
 * tensor parallelism support (still being improved):
     * sharded linear, mlp, attention layers
-    * custom low-latency fused GEMV-all-reduce: ~8us latency for 2 MI300x GPUs
+    * custom low-latency fused GEMV-all-reduce: ~5us latency for 8 MI300x GPUs
 
 Future optimizations (by order of likely implementation):
 * fp8 support
@@ -54,7 +54,7 @@ The numbers are changing at every commit, try it out by yourself!
 
 But if you can't, here are approximate performance numbers on a small prompt, generating 256 tokens:
 * Llama 3 8B, fp16 on 1x MI300x: 210 tokens/s/user
-* Llama 3 8B, fp16 on 4x MI300x: 410 tokens/s/user
+* Llama 3 8B, fp16 on 4x MI300x: 420 tokens/s/user
 * Llama 4 Scout, bf16 on 4x MI300x: 190 tokens/s/user
 
 TODO: MI100 results, comparison to Nvidia TensorRT, HuggingFace stock + compiled stock performance

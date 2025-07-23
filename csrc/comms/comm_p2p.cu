@@ -445,20 +445,29 @@ static muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* 
   return MUILLM_COMM_SUCCESS;
 }
 
-__global__ void __muillm_inc_wait_value_p2p_kernel(
+__device__ void __do_inc_wait_value_p2p(
   volatile uint32_t* signal,
   uint32_t seq_no
 ) {
   if (threadIdx.x == 0) {
     // increment the value
-    atomicAdd_system((uint32_t*) signal, 1);
+    uint32_t value = atomicAdd_system((uint32_t*) signal, 1) + 1;
     __threadfence_system();
 
     // wait for the other ranks
     // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
     // have seen the previous one
-    while (*signal < seq_no) __threadfence_system();
+    if (value < seq_no) {
+      while (*signal < seq_no) __threadfence_system();
+    }
   }
+}
+
+__global__ void __muillm_inc_wait_value_p2p_kernel(
+  volatile uint32_t* signal,
+  uint32_t seq_no
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
 }
 
 static muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
@@ -500,6 +509,7 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
 }
 
 #define THREADS_PER_BLOCK 256
+#define THREADS_PER_BLOCK_ULL 512
 
 
 // each threads can copy 16 bytes
@@ -553,7 +563,627 @@ static muillm_comm_error_t __muillm_gpu_copy(void* dst, const void* src, size_t 
 
   return MUILLM_COMM_SUCCESS;
 }
+//
+// Single step single-block all-reduce sum kernels
+//
+// TODO: vectorize, unroll, etc. for better performance
 
+// TP2 kernels
+
+__device__ float2 __add2(float2 a, float2 b) {
+  float2 res;
+  res.x = a.x + b.x;
+  res.y = a.y + b.y;
+  return res;
+}
+
+typedef struct half4 {
+  half x, y, z, w;
+} half4;
+
+typedef struct __hip_bfloat164 {
+  __hip_bfloat16 x, y, z, w;
+} __hip_bfloat164;
+
+__device__ half4 __hadd4(half4 a, half4 b) {
+  half4 res;
+  res.x = __hadd(a.x, b.x);
+  res.y = __hadd(a.y, b.y);
+  res.z = __hadd(a.z, b.z);
+  res.w = __hadd(a.w, b.w);
+  return res;
+}
+
+__device__ __hip_bfloat164 __hadd4(__hip_bfloat164 a, __hip_bfloat164 b) {
+  __hip_bfloat164 res;
+  res.x = __hadd(a.x, b.x);
+  res.y = __hadd(a.y, b.y);
+  res.z = __hadd(a.z, b.z);
+  res.w = __hadd(a.w, b.w);
+  return res;
+}
+
+__device__ float4 __add4(float4 a, float4 b) {
+  float4 res;
+  res.x = a.x + b.x;
+  res.y = a.y + b.y;
+  res.z = a.z + b.z;
+  res.w = a.w + b.w;
+  return res;
+}
+
+typedef struct half8 {
+  half x, y, z, w, a, b, c, d;
+} half8;
+
+typedef struct __hip_bfloat168 {
+  __hip_bfloat16 x, y, z, w, a, b, c, d;
+} __hip_bfloat168;
+
+__device__ half8 __hadd8(half8 a, half8 b) {
+  half8 res;
+  res.x = __hadd(a.x, b.x);
+  res.y = __hadd(a.y, b.y);
+  res.z = __hadd(a.z, b.z);
+  res.w = __hadd(a.w, b.w);
+  res.a = __hadd(a.a, b.a);
+  res.b = __hadd(a.b, b.b);
+  res.c = __hadd(a.c, b.c);
+  res.d = __hadd(a.d, b.d);
+  return res;
+}
+
+__device__ __hip_bfloat168 __hadd8(__hip_bfloat168 a, __hip_bfloat168 b) {
+  __hip_bfloat168 res;
+  res.x = __hadd(a.x, b.x);
+  res.y = __hadd(a.y, b.y);
+  res.z = __hadd(a.z, b.z);
+  res.w = __hadd(a.w, b.w);
+  res.a = __hadd(a.a, b.a);
+  res.b = __hadd(a.b, b.b);
+  res.c = __hadd(a.c, b.c);
+  res.d = __hadd(a.d, b.d);
+  return res;
+}
+
+__global__ void __all_reduce_fp16_tp2_p2p_ull_kernel(
+  volatile uint32_t* signal,
+  const half* x1,
+  const half* x2,
+  half* y,
+  uint32_t seq_no,
+  unsigned N
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
+  // make all threads of the block wait for the signal
+  __syncthreads();
+
+  // vectorized by 8
+  unsigned i = 8 * threadIdx.x;
+  for (; i + 7 < N; i += 8 * THREADS_PER_BLOCK_ULL) {
+    half8 res = __hadd8(*(const half8*)&x1[i], *(const half8*)&x2[i]);
+    *(half8*)&y[i] = res;
+  }
+
+  unsigned remainder = N % 8;
+  if (remainder > 0) {
+    // process the remaining elements
+    unsigned remainder_start = N - remainder;
+    // each thread processes on remaining element
+    unsigned j = remainder_start + threadIdx.x;
+    if (j < N) {
+      // handle the last elements
+      *(half4*)&y[j] = __hadd4(*(const half4*)&x1[j], *(const half4*)&x2[j]);
+    }
+  }
+}
+
+__global__ void __all_reduce_bf16_tp2_p2p_ull_kernel(
+  volatile uint32_t* signal,
+  const __hip_bfloat16* x1,
+  const __hip_bfloat16* x2,
+  __hip_bfloat16* y,
+  uint32_t seq_no,
+  unsigned N
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
+  // make all threads of the block wait for the signal
+  __syncthreads();
+
+  // vectorized by 8
+  unsigned i = 8 * threadIdx.x;
+  for (; i + 7 < N; i += 8 * THREADS_PER_BLOCK_ULL) {
+    __hip_bfloat168 res = __hadd8(*(const __hip_bfloat168*)&x1[i], *(const __hip_bfloat168*)&x2[i]);
+    *(__hip_bfloat168*)&y[i] = res;
+  }
+
+  unsigned remainder = N % 8;
+  if (remainder > 0) {
+    // process the remaining elements
+    unsigned remainder_start = N - remainder;
+    // each thread processes on remaining element
+    unsigned j = remainder_start + threadIdx.x;
+    if (j < N) {
+      // handle the last elements
+      *(__hip_bfloat164*)&y[j] = __hadd4(*(const __hip_bfloat164*)&x1[j], *(const __hip_bfloat164*)&x2[j]);
+    }
+  }
+}
+
+__global__ void __all_reduce_fp32_tp2_p2p_ull_kernel(
+  volatile uint32_t* signal,
+  const float* x1,
+  const float* x2,
+  float* y,
+  uint32_t seq_no,
+  unsigned N
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
+  // make all threads of the block wait for the signal
+  __syncthreads();
+
+  // vectorized by 4
+  unsigned i = 4 * threadIdx.x;
+  for (; i + 3 < N; i += 4 * THREADS_PER_BLOCK_ULL) {
+    float4 res = __add4(*(const float4*)&x1[i], *(const float4*)&x2[i]);
+    *(float4*)&y[i] = res;
+  }
+
+  unsigned remainder = N % 4;
+  if (remainder > 0) {
+    // process the remaining elements
+    unsigned remainder_start = N - remainder;
+    // each thread processes on remaining element
+    unsigned j = remainder_start + threadIdx.x;
+    if (j < N) {
+      // handle the last elements
+      y[j] = __hadd(x1[j], x2[j]);
+    }
+  }
+}
+
+// TP4 kernels
+
+__global__ void __all_reduce_fp16_tp4_p2p_ull_kernel(
+  volatile uint32_t* signal,
+  const half* x1,
+  const half* x2,
+  const half* x3,
+  const half* x4,
+  half* y,
+  uint32_t seq_no,
+  unsigned N
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
+  // make all threads of the block wait for the signal
+  __syncthreads();
+
+  // vectorized by 8
+  unsigned i = 8 * threadIdx.x;
+  for (; i + 7 < N; i += 8 * THREADS_PER_BLOCK_ULL) {
+    half8 x1x2 = __hadd8(*(const half8*)&x1[i], *(const half8*)&x2[i]);
+    half8 x3x4 = __hadd8(*(const half8*)&x3[i], *(const half8*)&x4[i]);
+    half8 res = __hadd8(x1x2, x3x4);
+    *(half8*)&y[i] = res;
+  }
+  unsigned remainder = N % 8;
+  if (remainder > 0) {
+    // process the remaining elements
+    unsigned remainder_start = N - remainder;
+    // each thread processes on remaining element
+    unsigned j = remainder_start + threadIdx.x;
+    if (j < N) {
+      // handle the last elements
+      half4 x1x2 = __hadd4(*(const half4*)&x1[j], *(const half4*)&x2[j]);
+      half4 x3x4 = __hadd4(*(const half4*)&x3[j], *(const half4*)&x4[j]);
+      half4 res = __hadd4(x1x2, x3x4);
+      *(half4*)&y[j] = res;
+    }
+  }
+}
+
+__global__ void __all_reduce_bf16_tp4_p2p_ull_kernel(
+  volatile uint32_t* signal,
+  const __hip_bfloat16* x1,
+  const __hip_bfloat16* x2,
+  const __hip_bfloat16* x3,
+  const __hip_bfloat16* x4,
+  __hip_bfloat16* y,
+  uint32_t seq_no,
+  unsigned N
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
+  // make all threads of the block wait for the signal
+  __syncthreads();
+
+  // vectorized by 8
+  unsigned i = 8 * threadIdx.x;
+  for (; i + 7 < N; i += 8 * THREADS_PER_BLOCK_ULL) {
+    __hip_bfloat168 x1x2 = __hadd8(*(const __hip_bfloat168*)&x1[i], *(const __hip_bfloat168*)&x2[i]);
+    __hip_bfloat168 x3x4 = __hadd8(*(const __hip_bfloat168*)&x3[i], *(const __hip_bfloat168*)&x4[i]);
+    __hip_bfloat168 res = __hadd8(x1x2, x3x4);
+    *(__hip_bfloat168*)&y[i] = res;
+  }
+
+  unsigned remainder = N % 8;
+  if (remainder > 0) {
+    // process the remaining elements
+    unsigned remainder_start = N - remainder;
+    // each thread processes on remaining element
+    unsigned j = remainder_start + threadIdx.x;
+    if (j < N) {
+      // handle the last elements
+      __hip_bfloat164 x1x2 = __hadd4(*(const __hip_bfloat164*)&x1[j], *(const __hip_bfloat164*)&x2[j]);
+      __hip_bfloat164 x3x4 = __hadd4(*(const __hip_bfloat164*)&x3[j], *(const __hip_bfloat164*)&x4[j]);
+      __hip_bfloat164 res = __hadd4(x1x2, x3x4);
+      *(__hip_bfloat164*)&y[j] = res;
+    }
+  }
+}
+
+__global__ void __all_reduce_fp32_tp4_p2p_ull_kernel(
+  volatile uint32_t* signal,
+  const float* x1,
+  const float* x2,
+  const float* x3,
+  const float* x4,
+  float* y,
+  uint32_t seq_no,
+  unsigned N
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
+  // make all threads of the block wait for the signal
+  __syncthreads();
+
+  // vectorized by 4
+  unsigned i = 4 * threadIdx.x;
+  for (; i + 3 < N; i += 4 * THREADS_PER_BLOCK_ULL) {
+    float4 x1x2 = __add4(*(const float4*)&x1[i], *(const float4*)&x2[i]);
+    float4 x3x4 = __add4(*(const float4*)&x3[i], *(const float4*)&x4[i]);
+    float4 res = __add4(x1x2, x3x4);
+    *(float4*)&y[i] = res;
+  }
+
+  unsigned remainder = N % 4;
+  if (remainder > 0) {
+    // process the remaining elements
+    unsigned remainder_start = N - remainder;
+    // each thread processes on remaining element
+    unsigned j = remainder_start + threadIdx.x;
+    if (j < N) {
+      // handle the last elements
+      float x1x2 = __hadd(x1[j], x2[j]);
+      float x3x4 = __hadd(x3[j], x4[j]);
+      float res = __hadd(x1x2, x3x4);
+      y[j] = res;
+    }
+  }
+}
+
+// TP8 kernels
+
+__global__ void __all_reduce_fp16_tp8_p2p_ull_kernel(
+  volatile uint32_t* signal,
+  const half* x1,
+  const half* x2,
+  const half* x3,
+  const half* x4,
+  const half* x5,
+  const half* x6,
+  const half* x7,
+  const half* x8,
+  half* y,
+  uint32_t seq_no,
+  unsigned N
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
+  // make all threads of the block wait for the signal
+  __syncthreads();
+
+  // vectorized by 8
+  unsigned i = 8 * threadIdx.x;
+  for (; i + 7 < N; i += 8 * THREADS_PER_BLOCK_ULL) {
+    half8 x1x2 = __hadd8(*(const half8*)&x1[i], *(const half8*)&x2[i]);
+    half8 x3x4 = __hadd8(*(const half8*)&x3[i], *(const half8*)&x4[i]);
+    half8 x1x4 = __hadd8(x1x2, x3x4);
+    half8 x5x6 = __hadd8(*(const half8*)&x5[i], *(const half8*)&x6[i]);
+    half8 x7x8 = __hadd8(*(const half8*)&x7[i], *(const half8*)&x8[i]);
+    half8 x5x8 = __hadd8(x5x6, x7x8);
+    half8 res = __hadd8(x1x4, x5x8);
+    *(half8*)&y[i] = res;
+  }
+
+  unsigned remainder = N % 8;
+  if (remainder > 0) {
+    // process the remaining elements
+    unsigned remainder_start = N - remainder;
+    // each thread processes on remaining element
+    unsigned j = remainder_start + threadIdx.x;
+    if (j < N) {
+      // handle the last elements
+      half x1x2 = __hadd(x1[j], x2[j]);
+      half x3x4 = __hadd(x3[j], x4[j]);
+      half x1x4 = __hadd(x1x2, x3x4);
+      half x5x6 = __hadd(x5[j], x6[j]);
+      half x7x8 = __hadd(x7[j], x8[j]);
+      half x5x8 = __hadd(x5x6, x7x8);
+      half res = __hadd(x1x4, x5x8);
+      y[j] = res;
+    }
+  }
+}
+
+__global__ void __all_reduce_bf16_tp8_p2p_ull_kernel(
+  volatile uint32_t* signal,
+  const __hip_bfloat16* x1,
+  const __hip_bfloat16* x2,
+  const __hip_bfloat16* x3,
+  const __hip_bfloat16* x4,
+  const __hip_bfloat16* x5,
+  const __hip_bfloat16* x6,
+  const __hip_bfloat16* x7,
+  const __hip_bfloat16* x8,
+  __hip_bfloat16* y,
+  uint32_t seq_no,
+  unsigned N
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
+  // make all threads of the block wait for the signal
+  __syncthreads();
+
+  // vectorized by 8
+  unsigned i = 8 * threadIdx.x;
+  for (; i + 7 < N; i += 8 * THREADS_PER_BLOCK_ULL) {
+    __hip_bfloat168 x1x2 = __hadd8(*(const __hip_bfloat168*)&x1[i], *(const __hip_bfloat168*)&x2[i]);
+    __hip_bfloat168 x3x4 = __hadd8(*(const __hip_bfloat168*)&x3[i], *(const __hip_bfloat168*)&x4[i]);
+    __hip_bfloat168 x1x4 = __hadd8(x1x2, x3x4);
+    __hip_bfloat168 x5x6 = __hadd8(*(const __hip_bfloat168*)&x5[i], *(const __hip_bfloat168*)&x6[i]);
+    __hip_bfloat168 x7x8 = __hadd8(*(const __hip_bfloat168*)&x7[i], *(const __hip_bfloat168*)&x8[i]);
+    __hip_bfloat168 x5x8 = __hadd8(x5x6, x7x8);
+    __hip_bfloat168 res = __hadd8(x1x4, x5x8);
+    *(__hip_bfloat168*)&y[i] = res;
+  }
+
+  unsigned remainder = N % 8;
+  if (remainder > 0) {
+    // process the remaining elements
+    unsigned remainder_start = N - remainder;
+    // each thread processes on remaining element
+    unsigned j = remainder_start + threadIdx.x;
+    if (j < N) {
+      // handle the last elements
+      __hip_bfloat16 x1x2 = __hadd(x1[j], x2[j]);
+      __hip_bfloat16 x3x4 = __hadd(x3[j], x4[j]);
+      __hip_bfloat16 x1x4 = __hadd(x1x2, x3x4);
+      __hip_bfloat16 x5x6 = __hadd(x5[j], x6[j]);
+      __hip_bfloat16 x7x8 = __hadd(x7[j], x8[j]);
+      __hip_bfloat16 x5x8 = __hadd(x5x6, x7x8);
+      __hip_bfloat16 res = __hadd(x1x4, x5x8);
+      y[j] = res;
+    }
+  }
+}
+
+__global__ void __all_reduce_fp32_tp8_p2p_ull_kernel(
+  volatile uint32_t* signal,
+  const float* x1,
+  const float* x2,
+  const float* x3,
+  const float* x4,
+  const float* x5,
+  const float* x6,
+  const float* x7,
+  const float* x8,
+  float* y,
+  uint32_t seq_no,
+  unsigned N
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
+  // make all threads of the block wait for the signal
+  __syncthreads();
+
+  // vectorized by 4
+  unsigned i = 4 * threadIdx.x;
+  for (; i + 3 < N; i += 4 * THREADS_PER_BLOCK_ULL) {
+    float4 x1x2 = __add4(*(const float4*)&x1[i], *(const float4*)&x2[i]);
+    float4 x3x4 = __add4(*(const float4*)&x3[i], *(const float4*)&x4[i]);
+    float4 x1x4 = __add4(x1x2, x3x4);
+    float4 x5x6 = __add4(*(const float4*)&x5[i], *(const float4*)&x6[i]);
+    float4 x7x8 = __add4(*(const float4*)&x7[i], *(const float4*)&x8[i]);
+    float4 x5x8 = __add4(x5x6, x7x8);
+    float4 res = __add4(x1x4, x5x8);
+    *(float4*)&y[i] = res;
+  }
+
+  unsigned remainder = N % 4;
+  if (remainder > 0) {
+    // process the remaining elements
+    unsigned remainder_start = N - remainder;
+    // each thread processes on remaining element
+    unsigned j = remainder_start + threadIdx.x;
+    if (j < N) {
+      // handle the last elements
+      float x1x2 = x1[j] + x2[j];
+      float x3x4 = x3[j] + x4[j];
+      float x1x4 = x1x2 + x3x4;
+      float x5x6 = x5[j] + x6[j];
+      float x7x8 = x7[j] + x8[j];
+      float x5x8 = x5x6 + x7x8;
+      float res = x1x4 + x5x8;
+      y[j] = res;
+    }
+  }
+}
+
+
+static inline muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum_ull(
+  muillm_comm_p2p_t* comm,
+  const void** src_ptrs,
+  void* dst_ptr,
+  size_t count,
+  muillm_comm_datatype_t datatype,
+  hipStream_t stream
+) {
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  hipError_t hip_error;
+  muillm_comm_error_t muillm_error;
+
+  uint32_t* signal = (uint32_t*) comm->signal;
+  comm->signal_seq_no += local_size;
+  uint64_t seq_no = comm->signal_seq_no;
+
+  // flush caches if needed
+  if (comm->cant_skip_cache_flush_event) {
+    // on MI100, we get a crash if not putting this event here
+    // record an event to flush caches
+    if (hipEventRecord(comm->cache_flush_event, stream) != hipSuccess) {
+      std::cout<<"Failed to record event "<<local_rank<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  }
+
+  // do the reduction
+  const int threads_per_blocks = THREADS_PER_BLOCK_ULL;
+  const int num_blocks = 1; // always one block
+
+  if (datatype == MUILLM_COMM_FP16) {
+    if (local_size == 8) {
+      __all_reduce_fp16_tp8_p2p_ull_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+        signal,
+        (const half*) src_ptrs[0],
+        (const half*) src_ptrs[1],
+        (const half*) src_ptrs[2],
+        (const half*) src_ptrs[3],
+        (const half*) src_ptrs[4],
+        (const half*) src_ptrs[5],
+        (const half*) src_ptrs[6],
+        (const half*) src_ptrs[7],
+        (half*) dst_ptr,
+        seq_no,
+        count
+      );
+    } else if (local_size == 4) {
+      __all_reduce_fp16_tp4_p2p_ull_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+        signal,
+        (const half*) src_ptrs[0],
+        (const half*) src_ptrs[1],
+        (const half*) src_ptrs[2],
+        (const half*) src_ptrs[3],
+        (half*) dst_ptr,
+        seq_no,
+        count
+      );
+    } else if (local_size == 2) {
+      __all_reduce_fp16_tp2_p2p_ull_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+        signal,
+        (const half*) src_ptrs[0],
+        (const half*) src_ptrs[1],
+        (half*) dst_ptr,
+        seq_no,
+        count
+      );
+    } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else if (datatype == MUILLM_COMM_BF16) {
+    if (local_size == 8) {
+      __all_reduce_bf16_tp8_p2p_ull_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+        signal,
+        (const __hip_bfloat16*) src_ptrs[0],
+        (const __hip_bfloat16*) src_ptrs[1],
+        (const __hip_bfloat16*) src_ptrs[2],
+        (const __hip_bfloat16*) src_ptrs[3],
+        (const __hip_bfloat16*) src_ptrs[4],
+        (const __hip_bfloat16*) src_ptrs[5],
+        (const __hip_bfloat16*) src_ptrs[6],
+        (const __hip_bfloat16*) src_ptrs[7],
+        (__hip_bfloat16*) dst_ptr,
+        seq_no,
+        count
+      );
+    } else if (local_size == 4) {
+      __all_reduce_bf16_tp4_p2p_ull_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+        signal,
+        (const __hip_bfloat16*) src_ptrs[0],
+        (const __hip_bfloat16*) src_ptrs[1],
+        (const __hip_bfloat16*) src_ptrs[2],
+        (const __hip_bfloat16*) src_ptrs[3],
+        (__hip_bfloat16*) dst_ptr,
+        seq_no,
+        count
+      );
+    } else if (local_size == 2) {
+      __all_reduce_bf16_tp2_p2p_ull_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+        signal,
+        (const __hip_bfloat16*) src_ptrs[0],
+        (const __hip_bfloat16*) src_ptrs[1],
+        (__hip_bfloat16*) dst_ptr,
+        seq_no,
+        count
+      );
+    } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else if (datatype == MUILLM_COMM_FP32) {
+    if (local_size == 8) {
+      __all_reduce_fp32_tp8_p2p_ull_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+        signal,
+        (const float*) src_ptrs[0],
+        (const float*) src_ptrs[1],
+        (const float*) src_ptrs[2],
+        (const float*) src_ptrs[3],
+        (const float*) src_ptrs[4],
+        (const float*) src_ptrs[5],
+        (const float*) src_ptrs[6],
+        (const float*) src_ptrs[7],
+        (float*) dst_ptr,
+        seq_no,
+        count
+      );
+    } else if (local_size == 4) {
+      __all_reduce_fp32_tp4_p2p_ull_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+        signal,
+        (const float*) src_ptrs[0],
+        (const float*) src_ptrs[1],
+        (const float*) src_ptrs[2],
+        (const float*) src_ptrs[3],
+        (float*) dst_ptr,
+        seq_no,
+        count
+      );
+    } else if (local_size == 2) {
+      __all_reduce_fp32_tp2_p2p_ull_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+        signal,
+        (const float*) src_ptrs[0],
+        (const float*) src_ptrs[1],
+        (float*) dst_ptr,
+        seq_no,
+        count
+      );
+    } else {
+      std::cout<<"reduction unsupported tp size"<<std::endl;
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  } else {
+    std::cout<<"reduction unsupported dtype"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  if (hipPeekAtLastError() != hipSuccess) {
+    printf("p2p reduce failed\n");
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+//
+// Single step all-reduce sum kernels
+//
 
 // TP2 kernels
 
@@ -720,8 +1350,7 @@ __global__ void __all_reduce_fp32_tp8_p2p_kernel(
   }
 }
 
-
-muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum(
+static inline muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum_ll(
   muillm_comm_p2p_t* comm,
   const void** src_ptrs,
   void* dst_ptr,
@@ -858,6 +1487,42 @@ muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum(
   }
 
   return MUILLM_COMM_SUCCESS;
+}
+
+#define MUILLM_COMM_P2P_SMALL_SIZE_THRESHOLD (128 * 1024) // 128 KB
+
+muillm_comm_error_t muillm_comm_p2p_placed_all_reduce_sum(
+  muillm_comm_p2p_t* comm,
+  const void** src_ptrs,
+  void* dst_ptr,
+  size_t count,
+  muillm_comm_datatype_t datatype,
+  hipStream_t stream
+) {
+  size_t byte_count = __comm_size(datatype, count);
+
+  if (byte_count < MUILLM_COMM_P2P_SMALL_SIZE_THRESHOLD) {
+    // if the size is small, we can use a simple kernel
+    // that is not communication efficient
+    return muillm_comm_p2p_placed_all_reduce_sum_ull(
+      comm,
+      src_ptrs,
+      dst_ptr,
+      count,
+      datatype,
+      stream
+    );
+  } else {
+    // TODO: use a more efficient kernel for larger sizes
+    return muillm_comm_p2p_placed_all_reduce_sum_ll(
+      comm,
+      src_ptrs,
+      dst_ptr,
+      count,
+      datatype,
+      stream
+    );
+  }
 }
 
 muillm_comm_error_t muillm_comm_p2p_all_reduce_sum(
