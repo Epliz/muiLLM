@@ -2,7 +2,7 @@
 
 #include "comm.h"
 #include "comm_base.h"
-#include "gpu_info.h"
+#include "../gpu_info.h"
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>

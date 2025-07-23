@@ -3,7 +3,7 @@
 
 
 #include "engine.h"
-#include "comm_torch.h"
+#include "comms/comm_torch.h"
 
 #include <torch/extension.h>
 

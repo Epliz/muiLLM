@@ -1,7 +1,7 @@
 #ifndef __MUILLM_COMM_BASE_HPP__
 #define __MUILLM_COMM_BASE_HPP__
 
-#include "base.h"
+#include "../base.h"
 
 #include <stdint.h>
 #include <stddef.h>

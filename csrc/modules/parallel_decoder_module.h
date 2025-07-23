@@ -3,7 +3,7 @@
 
 
 #include "../engine.h"
-#include "../comm_torch.h"
+#include "../comms/comm_torch.h"
 
 #include "parallel_multilinear_module.h"
 #include "parallel_attention_module.h"

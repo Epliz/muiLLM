@@ -2,8 +2,8 @@
 #define __MUILLM_COMM_P2P_HPP__
 
 #include "comm_base.h"
-#include "engine.h"
-#include "gpu_info.h"
+#include "../engine.h"
+#include "../gpu_info.h"
 
 typedef struct muillm_comm_p2p_buffer_set {
   void* buffers[MUILLM_COMM_MAX_GPUS];

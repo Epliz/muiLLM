@@ -2,7 +2,7 @@
 #define __MUILLM_COMM_HPP__
 
 #include "comm_base.h"
-#include "engine.h"
+#include "../engine.h"
 
 #include <stdint.h>
 #include <stddef.h>

@@ -2,7 +2,7 @@
 #define __MUILLM_COMM_STAGED_HPP__
 
 #include "comm_base.h"
-#include "engine.h"
+#include "../engine.h"
 
 typedef struct muillm_comm_staged_buffer_set {
   void* buffers[MUILLM_COMM_MAX_GPUS];

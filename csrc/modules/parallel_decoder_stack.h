@@ -2,7 +2,7 @@
 #define __MUILLM_PARALLEL_DECODER_STACK_H__
 
 #include "../engine.h"
-#include "../comm_torch.h"
+#include "../comms/comm_torch.h"
 
 #include "parallel_decoder_module.h"
 #include "kvcache.h"

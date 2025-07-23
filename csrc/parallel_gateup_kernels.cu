@@ -1,5 +1,5 @@
 #include "ffn/gateup.cuh"
-#include "comm_torch.h"
+#include "comms/comm_torch.h"
 
 #include <ATen/cuda/CUDAContext.h>
 
