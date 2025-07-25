@@ -22,21 +22,28 @@ from typing import List, Union
 
 
 def generate(
-    model, tokenizer, prompt: Union[str, List[str]], max_new_tokens=20
+    model, tokenizer, prompt: Union[str, List[str]], max_new_tokens=20, streamer=None
 ) -> Union[str, List[str]]:
+    if streamer is not None:
+        print("--- start streaming ---")
+
     single_prompt = isinstance(prompt, str)
     if single_prompt:
         prompts = [prompt]
     else:
         prompts = prompt
 
-    # TODO: modify to use the processor and chat template
     with torch.no_grad():
         inputs = tokenizer(prompts, return_tensors="pt", padding="longest").to(
             device="cuda"
         )
 
-    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True)
+    outputs = model.generate(
+        **inputs, streamer=streamer, max_new_tokens=max_new_tokens, do_sample=True
+    )
+
+    if streamer is not None:
+        print("--- end streaming ---")
 
     texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
@@ -68,6 +75,8 @@ def profile_func(f, trace_path="trace.json"):
 
 def run(rank, size):
 
+    stream_output = os.getenv("STREAM_OUTPUT", "1") == "1"
+
     # this example requires the meta-llama/Llama-4-Scout-17B-16E-Instruct model
     # Provided that you have a HF token to access the Llama models, you can download it with
     # huggingface-cli download --token <your_token> meta-llama/Llama-4-Scout-17B-16E-Instruct --local-dir Llama-4-Scout-17B-16E-Instruct
@@ -79,6 +88,14 @@ def run(rank, size):
 
     ## Load the original model & tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
+
+    from transformers import TextStreamer
+
+    streamer = (
+        TextStreamer(tokenizer, skip_prompt=True)
+        if (stream_output and rank == 0)
+        else None
+    )
 
     # Use the muiLLM replacements layers
     from muillm.engine import load_model
@@ -104,7 +121,7 @@ def run(rank, size):
     # Have a look at the speed
     text, time = time_func(lambda: generate(model, tokenizer, prompt, 10))
     text, time = time_func(
-        lambda: generate(model, tokenizer, prompt, num_output_tokens)
+        lambda: generate(model, tokenizer, prompt, num_output_tokens, streamer=streamer)
     )
 
     # check how many tokens were actually generated
@@ -114,6 +131,8 @@ def run(rank, size):
     ) * batch_size
 
     if rank == 0:
+        if streamer is None:
+            print("[Optimized] Completion: ", text)
         print("[Optimized] Completion: ", text)
         print("[Optimized] Time: ", time)
         print(

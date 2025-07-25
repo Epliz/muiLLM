@@ -149,6 +149,7 @@ def run(rank, size):
         print("Optimized models: ", model)
 
     for prompts in all_prompts:
+
         tokenized_prompts = tokenizer(prompts, return_tensors="pt", padding="longest")
 
         if rank == 0:
