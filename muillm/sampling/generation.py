@@ -175,6 +175,9 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
         # Force a CPU GPU sync
         torch.cuda.synchronize()
 
+        # we will keep around the next token tensors and move them to CPU when needed
+        all_next_tokens = [] if streamer is not None else None
+
         # All peers are syncrhonized by broadcasting the tokens, so they all finish at the same
         # time
         while not this_peer_finished:
@@ -267,9 +270,6 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
 
             # update generated ids, model inputs, and length for next step
             input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
-            if streamer is not None:
-                raise ValueError("Streaming is not supported at the moment")
-                # streamer.put(next_tokens.cpu())
 
             unfinished_sequences = unfinished_sequences & ~stopping_criteria(
                 input_ids, scores
@@ -280,9 +280,14 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
 
             cur_len += 1
 
+            if streamer is not None:
+                # keep the next tokens around for streaming it later
+                all_next_tokens.append(next_tokens)
+
             last_sync = last_sync + 1
             if (last_sync >= sync_frequency) or (max_remaining_generate <= 0):
                 last_sync = 0
+
                 # make sure we get a python boolean out to avoid sync anytime we access
                 # the variable
                 if synchronizer is not None:
@@ -291,6 +296,15 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
                     )
                 else:
                     this_peer_finished = (unfinished_sequences.max() == 0).item()
+
+                if streamer is not None:
+                    # stack then move to CPU all at once to save CPU<->GPU syncs
+                    concat_streamed_tokens = torch.stack(all_next_tokens, dim=0).cpu()
+                    all_next_tokens = []  # reset the list
+                    streamed_tokens = list(concat_streamed_tokens.unbind(dim=0))
+
+                    for streamed_token in streamed_tokens:
+                        streamer.put(streamed_token)
 
                 if sync_frequency < 16:
                     # decrease the sync frequency up to every 16 tokens
