@@ -120,16 +120,10 @@ def run(rank, size):
     num_output_tokens = 256
     num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
 
-    del model
-    from muillm.memorymanagement.gc import trigger_gc
-
-    trigger_gc()
-
-    # Use the muiLLM replacements layers
-    from muillm.engine import load_model
-
     # use auto-detected tensor parallelism level by setting to None
-    model = load_model(model_id, tensor_parallelism=None)
+    from muillm.engine import init_engine
+
+    model = init_engine(model, tensor_parallelism=None)
 
     if rank == 0:
         print("Optimized models: ", model)

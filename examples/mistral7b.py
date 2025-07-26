@@ -131,15 +131,10 @@ text, time = profile_func(
     trace_path="trace_mistral_orig_unbatched.json",
 )
 
-del model
-from muillm.memorymanagement.gc import trigger_gc
-
-trigger_gc()
-
 # Use the muiLLM replacements layers
-from muillm.engine import load_model
+from muillm.engine import init_engine
 
-model = load_model(model_id)
+model = init_engine(model, tensor_parallelism=1)
 
 print("Optimized models: ", model)
 
