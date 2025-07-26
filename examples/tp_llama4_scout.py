@@ -89,6 +89,10 @@ def run(rank, size):
     ## Load the original model & tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
 
+    model: nn.Module = AutoModelForCausalLM.from_pretrained(
+        model_id, tp_plan="auto"
+    ).to(dtype=torch.bfloat16)
+
     from transformers import TextStreamer
 
     streamer = (

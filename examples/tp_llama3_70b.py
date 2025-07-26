@@ -88,10 +88,9 @@ def run(rank, size):
     ## Load the original model & tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
 
-    # we load the original model in fp16 precision
     model: nn.Module = AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=torch.float16
-    ).to(device="cuda", dtype=torch.float16)
+        model_id, tp_plan="auto"
+    ).to(dtype=torch.float16)
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
