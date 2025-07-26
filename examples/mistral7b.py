@@ -80,10 +80,9 @@ model_id = os.getenv("MISTRAL_7B_PATH", "/storage/models/Mistral-7B-Instruct-v0.
 ## Load the original model & tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
 
-# we load the original model in fp16 precision
-model: nn.Module = AutoModelForCausalLM.from_pretrained(
-    model_id, torch_dtype=torch.float16
-).to(device="cuda", dtype=torch.float16)
+model: nn.Module = AutoModelForCausalLM.from_pretrained(model_id, device_map="cuda").to(
+    dtype=torch.float16
+)
 
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
@@ -131,15 +130,10 @@ text, time = profile_func(
     trace_path="trace_mistral_orig_unbatched.json",
 )
 
-del model
-from muillm.memorymanagement.gc import trigger_gc
-
-trigger_gc()
-
 # Use the muiLLM replacements layers
-from muillm.engine import load_model
+from muillm.engine import init_engine
 
-model = load_model(model_id)
+model = init_engine(model, tensor_parallelism=1)
 
 print("Optimized models: ", model)
 
