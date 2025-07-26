@@ -1,4 +1,5 @@
 """run.py:"""
+
 #!/usr/bin/env python
 
 # Example showing how to use muiLLM's tensor parallelism support on the Llama 3.3 70b model
@@ -9,13 +10,24 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase, PreTrainedModel
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedTokenizerBase,
+    PreTrainedModel,
+)
 import torch
 import torch.nn as nn
 
 from typing import List, Union
 
-def generate(model, tokenizer, prompt:Union[str, List[str]], max_new_tokens=20) -> Union[str, List[str]]:
+
+def generate(
+    model, tokenizer, prompt: Union[str, List[str]], max_new_tokens=20, streamer=None
+) -> Union[str, List[str]]:
+    if streamer is not None:
+        print("--- start streaming ---")
+
     single_prompt = isinstance(prompt, str)
     if single_prompt:
         prompts = [prompt]
@@ -23,51 +35,75 @@ def generate(model, tokenizer, prompt:Union[str, List[str]], max_new_tokens=20) 
         prompts = prompt
 
     with torch.no_grad():
-        inputs = tokenizer(prompts, return_tensors="pt", padding="longest").to(device="cuda")
+        inputs = tokenizer(prompts, return_tensors="pt", padding="longest").to(
+            device="cuda"
+        )
 
-    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True)
+    outputs = model.generate(
+        **inputs, streamer=streamer, max_new_tokens=max_new_tokens, do_sample=True
+    )
+
+    if streamer is not None:
+        print("--- end streaming ---")
 
     texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-    texts = [text[len(prompts[i]):] for i, text in enumerate(texts)]
+    texts = [text[len(prompts[i]) :] for i, text in enumerate(texts)]
     if single_prompt:
         return texts[0]
     else:
         return texts
 
+
 def time_func(f):
     import time
+
     start_time = time.time()
     ret = f()
     end_time = time.time()
     elapsed_time = end_time - start_time
     return ret, elapsed_time
 
-def profile_func(f, trace_path= "trace.json"):
+
+def profile_func(f, trace_path="trace.json"):
     from torch.profiler import profile, ProfilerActivity
+
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         ret = f()
     prof.export_chrome_trace(trace_path)
     return ret
-  
+
+
 def run(rank, size):
 
+    stream_output = os.getenv("STREAM_OUTPUT", "1") == "1"
+
     # this example requires the LLama 3.3 70B Instruct model
-    # Provided that you have a HF token to access the Llama models, you can download it with 
+    # Provided that you have a HF token to access the Llama models, you can download it with
     # huggingface-cli download --token <your_token> meta-llama/Llama-3.3-70B-Instruct --local-dir Llama-3.3-70B-Instruct
 
     # either set this environment variable before running the example, or adapt the path
     model_id = os.getenv("LLAMA3_70B_PATH", "/storage/models/Llama-3.3-70B-Instruct/")
 
     ## Load the original model & tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_id,padding_side="left")
+    tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
 
     # we load the original model in fp16 precision
-    model: nn.Module = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16).to(device="cuda", dtype=torch.float16)
+    model: nn.Module = AutoModelForCausalLM.from_pretrained(
+        model_id, torch_dtype=torch.float16
+    ).to(device="cuda", dtype=torch.float16)
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         model.resize_token_embeddings(len(tokenizer))
+
+    from transformers import TextStreamer
+
+    streamer = (
+        TextStreamer(tokenizer, skip_prompt=True)
+        if (stream_output and rank == 0)
+        else None
+    )
 
     if rank == 0:
         print("Model : ", model)
@@ -86,10 +122,12 @@ def run(rank, size):
 
     del model
     from muillm.memorymanagement.gc import trigger_gc
+
     trigger_gc()
 
     # Use the muiLLM replacements layers
     from muillm.engine import load_model
+
     # use auto-detected tensor parallelism level by setting to None
     model = load_model(model_id, tensor_parallelism=None)
 
@@ -108,28 +146,41 @@ def run(rank, size):
 
     # Have a look at the speed
     text, time = time_func(lambda: generate(model, tokenizer, prompt, 10))
-    text, time = time_func(lambda: generate(model, tokenizer, prompt, num_output_tokens))
+    text, time = time_func(
+        lambda: generate(model, tokenizer, prompt, num_output_tokens, streamer=streamer)
+    )
 
     # check how many tokens were actually generated
     tokenized_outputs = tokenizer(text, return_tensors="pt", padding="longest")
-    num_total_tokens = (num_input_tokens + tokenized_outputs["input_ids"].shape[1]) * batch_size
+    num_total_tokens = (
+        num_input_tokens + tokenized_outputs["input_ids"].shape[1]
+    ) * batch_size
 
     if rank == 0:
-        print("[Optimized] Completion: ", text)
+        if streamer is None:
+            print("[Optimized] Completion: ", text)
         print("[Optimized] Time: ", time)
-        print(f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})")
+        print(
+            f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})"
+        )
 
     # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
-    text, time = profile_func(lambda: time_func(lambda: generate(model, tokenizer, prompt, num_output_tokens)), trace_path=f"trace_llama70b_muillm_tp{size}_unbatched_rank{rank}.json")
+    text, time = profile_func(
+        lambda: time_func(
+            lambda: generate(model, tokenizer, prompt, num_output_tokens)
+        ),
+        trace_path=f"trace_llama70b_muillm_tp{size}_unbatched_rank{rank}.json",
+    )
 
-def init_process(rank, size, fn, backend='nccl'):
-    """ Initialize the distributed environment. """
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
-    os.environ['WORLD_SIZE'] = str(size)
-    os.environ['LOCAL_SIZE'] = str(size)
-    os.environ['RANK'] = str(rank)
-    os.environ['LOCAL_RANK'] = str(rank)
+
+def init_process(rank, size, fn, backend="nccl"):
+    """Initialize the distributed environment."""
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = "29500"
+    os.environ["WORLD_SIZE"] = str(size)
+    os.environ["LOCAL_SIZE"] = str(size)
+    os.environ["RANK"] = str(rank)
+    os.environ["LOCAL_RANK"] = str(rank)
 
     local_size = torch.cuda.device_count()
     print(f"(rank {rank}) local_size = {local_size}")

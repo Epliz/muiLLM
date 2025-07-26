@@ -21,8 +21,11 @@ from typing import List, Union
 
 
 def generate(
-    model, tokenizer, prompt: Union[str, List[str]], max_new_tokens=20
+    model, tokenizer, prompt: Union[str, List[str]], max_new_tokens=20, streamer=None
 ) -> Union[str, List[str]]:
+    if streamer is not None:
+        print("--- start streaming ---")
+
     single_prompt = isinstance(prompt, str)
     if single_prompt:
         prompts = [prompt]
@@ -34,7 +37,12 @@ def generate(
             device="cuda"
         )
 
-    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True)
+    outputs = model.generate(
+        **inputs, streamer=streamer, max_new_tokens=max_new_tokens, do_sample=True
+    )
+
+    if streamer is not None:
+        print("--- end streaming ---")
 
     texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
@@ -65,6 +73,9 @@ def profile_func(f, trace_path="trace.json"):
 
 
 def run(rank, size):
+
+    stream_output = os.getenv("STREAM_OUTPUT", "1") == "1"
+
     # this example requires the Mistral 7b Instruct v0.2 model
     # Provided that you have a HF token to access the Mistral models, you can download it with
     # huggingface-cli download --token <your_hf_token> mistralai/Mistral-7B-Instruct-v0.2 --local-dir Mistral-7B-Instruct-v0.2 --revision 41b61a33a2483885c981aa79e0df6b32407ed873
@@ -84,6 +95,14 @@ def run(rank, size):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         model.resize_token_embeddings(len(tokenizer))
+
+    from transformers import TextStreamer
+
+    streamer = (
+        TextStreamer(tokenizer, skip_prompt=True)
+        if (stream_output and rank == 0)
+        else None
+    )
 
     if rank == 0:
         print("Model : ", model)
@@ -122,7 +141,7 @@ def run(rank, size):
     # Have a look at the speed
     text, time = time_func(lambda: generate(model, tokenizer, prompt, 10))
     text, time = time_func(
-        lambda: generate(model, tokenizer, prompt, num_output_tokens)
+        lambda: generate(model, tokenizer, prompt, num_output_tokens, streamer=streamer)
     )
 
     # check how many tokens were actually generated
@@ -132,7 +151,8 @@ def run(rank, size):
     ) * batch_size
 
     if rank == 0:
-        print("[Optimized] Completion: ", text)
+        if streamer is None:
+            print("[Optimized] Completion: ", text)
         print("[Optimized] Time: ", time)
         print(
             f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})"
