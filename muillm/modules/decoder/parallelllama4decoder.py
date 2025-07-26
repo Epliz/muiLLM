@@ -191,6 +191,15 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
             feed_forward=feed_forward,
         )
 
+        # delete the previous modules to free memory
+        del prev_module.self_attn
+        del prev_module.feed_forward
+        del prev_module.input_layernorm
+        del prev_module.post_attention_layernorm
+
+        # trigger garbage collection to free memory
+        trigger_gc()
+
         return new_module
 
     def parallel_forward(

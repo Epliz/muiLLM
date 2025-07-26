@@ -278,6 +278,15 @@ class MuiParallelGateUpDownMLP(MuiModule):
             prev_module=prev_module, norm_weights=norm_weights, device=device
         )
 
+        # delete the previous modules to free memory
+        if not isinstance(prev_module, (MuiParallelGateUpDownMLP, MuiGateUpDownMLP)):
+            del prev_module.gate_proj
+            del prev_module.up_proj
+            del prev_module.down_proj
+
+            # trigger garbage collection to free memory
+            trigger_gc()
+
         return new_module
 
     def copy_module(

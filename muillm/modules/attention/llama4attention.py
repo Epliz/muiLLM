@@ -57,6 +57,7 @@ def apply_rotary_emb(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     dtype = xq.dtype
     if (xq.is_cuda) and ((dtype == torch.float16) or (dtype == torch.bfloat16)):
+        freqs_cis = freqs_cis.contiguous()
         # can dispatch to the custom kernel
         return _MuiComplexRotaryNoCache.apply(
             xq,

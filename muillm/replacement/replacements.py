@@ -62,7 +62,6 @@ from muillm.replacement.replacementcontext import (
 )
 
 
-
 _LAYER_REPLACEMENTS = {
     # Linear
     nn.Linear: MuiLinear,
@@ -162,14 +161,11 @@ def replace_layers(
         # use the correct replacements
         replacements = _TP_LAYER_REPLACEMENTS
 
-    # if engine_config.is_rank0():
-    #     print(f"Replace {name_prefix} ({module_type})?")
-
     if (module_type in replacements) and not _no_further_replacement(module):
         new_module_type = replacements[module_type]
 
-        # if engine_config.is_rank0():
-        #     print(f"Replacing {name_prefix} ({module_type} to {new_module_type}) ...")
+        if engine_config.is_rank0():
+            print(f"Replacing {name_prefix} ({module_type} to {new_module_type}) ...")
 
         new_module = new_module_type.replace(replacement_context, module)
 

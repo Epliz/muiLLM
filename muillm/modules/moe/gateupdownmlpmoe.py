@@ -151,22 +151,28 @@ class MuiGateUpDownMLPMoe(MuiModule):
     ) -> "MuiGateUpDownMLPMoe":
         engine_config = replacement_context.engine_config
         device = replacement_context.device
+
         if device is None:
             raise ValueError("device was None")
+
         prev_module = replacement_context.to_local_module(prev_module)
+
         if (prev_layernorm_module is not None) and (
             not isinstance(prev_layernorm_module, MuiRMSNorm)
         ):
             prev_layernorm_module = replacement_context.to_local_module(
                 prev_layernorm_module
             )
+
         device = prev_module.router.weight.device if device is None else device
         dtype = prev_module.router.weight.dtype
+
         num_dynamic_experts = prev_module.num_experts
         top_k = prev_module.top_k
         hidden_size = prev_module.shared_expert.gate_proj.in_features
         intermediate_size = prev_module.shared_expert.gate_proj.out_features
         activation_function = prev_module.experts.act_fn
+
         new_module = MuiGateUpDownMLPMoe(
             engine_config=engine_config,
             num_dynamic_experts=num_dynamic_experts,
@@ -178,11 +184,20 @@ class MuiGateUpDownMLPMoe(MuiModule):
             device=device,
             dtype=dtype,
         )
+
         new_module.copy_module(
             prev_module=prev_module,
             prev_layernorm_module=prev_layernorm_module,
             device=device,
         )
+
+        # delete the previous modules to free memory
+        del prev_module.shared_expert
+        del prev_module.experts
+        del prev_module.router
+
+        # trigger garbage collection to free memory
+        trigger_gc()
 
         return new_module
 

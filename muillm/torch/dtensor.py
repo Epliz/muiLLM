@@ -21,9 +21,9 @@ def to_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
             tensor = tensor.data
 
         if isinstance(tensor, DTensor):
-            return tensor.full_tensor()
+            tensor = tensor.full_tensor()
 
-        return tensor  # normal tensor
+        return tensor.detach()  # normal tensor
     except ImportError:
         # If DTensor is not available, return the tensor as is
         return tensor

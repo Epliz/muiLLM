@@ -81,8 +81,12 @@ def run(rank, size):
     config = AutoConfig.from_pretrained(model_id, torch_dtype=torch.float)
 
     # make the model smaller
-    config.text_config.num_hidden_layers = 4
-    config.vision_config.num_hidden_layers = 4
+    config.text_config.num_hidden_layers = 8
+    config.text_config.hidden_size = 256
+    config.text_config.intermediate_size = 1024
+    config.vision_config.num_hidden_layers = 8
+    config.vision_config.hidden_size = 256
+    config.vision_config.intermediate_size = 1024
 
     print("Config : ", config)
 

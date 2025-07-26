@@ -314,7 +314,7 @@ class MuiParallelLlama4TextAttention(MuiModule):
                     key_states,
                     value_states,
                     attention_mask,
-                    residual=residual,
+                    residual,
                 )
 
             attn_weights = None
