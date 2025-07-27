@@ -197,6 +197,7 @@ class MuiGateUpDownMLP(MuiModule):
     ) -> "MuiGateUpDownMLP":
         engine_config = replacement_context.engine_config
         device = replacement_context.device
+
         if device is None:
             raise ValueError("device was None")
 
@@ -289,6 +290,15 @@ class MuiGateUpDownMLP(MuiModule):
         new_module.copy_module(
             prev_module=prev_module, norm_weights=norm_weights, device=device
         )
+
+        # delete the previous modules to free memory
+        if not isinstance(prev_module, MuiGateUpDownMLP):
+            del prev_module.gate_proj
+            del prev_module.up_proj
+            del prev_module.down_proj
+
+            # trigger garbage collection to free memory
+            trigger_gc()
 
         return new_module
 

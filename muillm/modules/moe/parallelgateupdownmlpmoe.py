@@ -227,6 +227,14 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
             device=device,
         )
 
+        # delete the previous modules to free memory
+        del prev_module.shared_expert
+        del prev_module.experts
+        del prev_module.router
+
+        # trigger garbage collection to free memory
+        trigger_gc()
+
         return new_module
 
     def _extract_expert_linears(

@@ -143,7 +143,8 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
     ) -> nn.ModuleList:
         engine_config = replacement_context.engine_config
         layers = nn.ModuleList()
-        for i in range(len(prev_layers)):
+        # replace the layers in reverse order to be able to remove them from the previous list
+        for i in reversed(range(len(prev_layers))):
             decoder_layer = prev_layers[i]
             if engine_config.tensor_parallelism < 2:
                 # no tensor parallelism
@@ -158,9 +159,11 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
                     prev_module=decoder_layer,
                 )
 
-            layers.append(layer)
+            layers.insert(0, layer)  # add to the begining of the list
 
-            prev_layers[i] = None
+            # delete the previous decoder layer to save memory
+            del decoder_layer
+            del prev_layers[i]
 
             # trigger GC to save memory
             trigger_gc()
@@ -181,18 +184,20 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
 
         config = prev_model.config
         embed_tokens = prev_model.embed_tokens
-        prev_layers = prev_model.layers
-        prev_norm = prev_model.norm
 
         layers = MuiLlama4TextModel._replace_layers(
             replacement_context=replacement_context,
-            prev_layers=prev_layers,
+            prev_layers=prev_model.layers,
         )
+
+        del prev_model.layers
 
         norm = MuiRMSNorm.replace(
             replacement_context,
-            prev_module=prev_norm,
+            prev_module=prev_model.norm,
         )
+
+        del prev_model.norm
 
         rotary_emb = MuiRotaryEmbedding(
             engine_config=engine_config, config=config, layer_idx=0, device=device
@@ -718,25 +723,26 @@ class MuiLlama4ForCausalLM(Llama4PreTrainedModel, MuiGenerationMixin):
 
         engine_config = replacement_context.engine_config
 
-        prev_lm_head = prev_model.lm_head
-        prev_model_model = prev_model.model
-
         # replace the LM head first to potentially save memory
         if engine_config.tensor_parallelism < 2:
             lm_head = MuiLinear.replace(
                 replacement_context,
-                prev_lm_head,
+                prev_model.lm_head,
             )
         else:
             lm_head = MuiParallelLinear.replace(
                 replacement_context,
-                prev_lm_head,
+                prev_model.lm_head,
             )
+
+        del prev_model.lm_head
 
         model = MuiLlama4TextModel.replace(
             replacement_context,
-            prev_model_model,
+            prev_model.model,
         )
+
+        del prev_model.model
 
         new_model = MuiLlama4ForCausalLM(
             model=model,

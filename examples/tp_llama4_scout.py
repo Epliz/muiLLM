@@ -136,7 +136,6 @@ def run(rank, size):
     if rank == 0:
         if streamer is None:
             print("[Optimized] Completion: ", text)
-        print("[Optimized] Completion: ", text)
         print("[Optimized] Time: ", time)
         print(
             f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})"
@@ -154,7 +153,7 @@ def run(rank, size):
 def init_process(rank, size, fn, backend="nccl"):
     """Initialize the distributed environment."""
     os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = "29500"
+    os.environ["MASTER_PORT"] = "29700"
     os.environ["WORLD_SIZE"] = str(size)
     os.environ["LOCAL_SIZE"] = str(size)
     os.environ["RANK"] = str(rank)

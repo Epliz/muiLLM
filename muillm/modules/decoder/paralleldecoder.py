@@ -195,6 +195,15 @@ class MuiParallelDecoderLayer(MuiModule):
             engine_config=engine_config, qkv_proj=qkv_proj, self_attn=self_attn, mlp=mlp
         )
 
+        # delete the previous modules to free memory
+        del prev_module.self_attn
+        del prev_module.mlp
+        del prev_module.input_layernorm
+        del prev_module.post_attention_layernorm
+
+        # trigger garbage collection to free memory
+        trigger_gc()
+
         return new_decoder
 
     def parallel_forward(

@@ -2,6 +2,7 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 
+from muillm.memorymanagement.gc import trigger_gc
 from muillm.torch.dtensor import to_local_tensor
 
 
@@ -239,5 +240,8 @@ def _to_local_module(model: nn.Module, module: nn.Module, name: str = "") -> nn.
         )
 
         setattr(param_module, param_type, converted_param)
+
+        # trigger garbage collection to free memory
+        trigger_gc()
 
     return module
