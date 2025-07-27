@@ -29,6 +29,8 @@ from muillm.sampling.multinomial import muillm_multinomial_sample_one_no_sync
 from transformers.generation import GenerationMixin
 from transformers.cache_utils import Cache
 
+from torch.profiler import record_function
+
 
 class MuiGenerationMixin(MuiModule, GenerationMixin):
     def __init__(self, engine_config: MuiEngineConfig = None, **kargs):
@@ -181,8 +183,11 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
         # All peers are syncrhonized by broadcasting the tokens, so they all finish at the same
         # time
         while not this_peer_finished:
-            # prepare model inputs
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            with record_function("prepare_inputs_for_generation"):
+                # prepare model inputs
+                model_inputs = self.prepare_inputs_for_generation(
+                    input_ids, **model_kwargs
+                )
 
             if not checked_mask_content:
                 checked_mask_content = True
@@ -209,71 +214,76 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
             else:
                 outputs = model_forward(**model_inputs, return_dict=True)
 
-            # synced_gpus: don't waste resources running the code we don't need; kwargs must be updated before skipping
-            model_kwargs = self._update_model_kwargs_for_generation(
-                outputs,
-                model_kwargs,
-                is_encoder_decoder=self.config.is_encoder_decoder,
-            )
+            with record_function("update_model_kwargs_for_generation"):
+                # synced_gpus: don't waste resources running the code we don't need; kwargs must be updated before skipping
+                model_kwargs = self._update_model_kwargs_for_generation(
+                    outputs,
+                    model_kwargs,
+                    is_encoder_decoder=self.config.is_encoder_decoder,
+                )
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
 
-            # Copy is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
-            # (the clone itself is always small)
-            next_token_logits = outputs.logits[:, -1, :].to(
-                copy=True, dtype=torch.float32, device=input_ids.device
-            )
+            with record_function("sample"):
+                # Copy is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
+                # (the clone itself is always small)
+                next_token_logits = outputs.logits[:, -1, :].to(
+                    copy=True, dtype=torch.float32, device=input_ids.device
+                )
 
-            # pre-process distribution
-            next_token_scores = logits_processor(input_ids, next_token_logits)
+                # pre-process distribution
+                next_token_scores = logits_processor(input_ids, next_token_logits)
 
-            # Store scores, attentions and hidden_states when required
-            if return_dict_in_generate:
-                if output_scores:
-                    scores += (next_token_scores,)
-                if output_logits:
-                    raw_logits += (next_token_logits,)
-                if output_attentions:
-                    decoder_attentions += (
-                        (outputs.decoder_attentions,)
-                        if self.config.is_encoder_decoder
-                        else (outputs.attentions,)
+                # Store scores, attentions and hidden_states when required
+                if return_dict_in_generate:
+                    if output_scores:
+                        scores += (next_token_scores,)
+                    if output_logits:
+                        raw_logits += (next_token_logits,)
+                    if output_attentions:
+                        decoder_attentions += (
+                            (outputs.decoder_attentions,)
+                            if self.config.is_encoder_decoder
+                            else (outputs.attentions,)
+                        )
+                        if self.config.is_encoder_decoder:
+                            cross_attentions += (outputs.cross_attentions,)
+
+                    if output_hidden_states:
+                        decoder_hidden_states += (
+                            (outputs.decoder_hidden_states,)
+                            if self.config.is_encoder_decoder
+                            else (outputs.hidden_states,)
+                        )
+
+                # token selection
+                if do_sample:
+                    probs = nn.functional.softmax(next_token_scores, dim=-1)
+                    # avoid GPU sync
+                    next_tokens = muillm_multinomial_sample_one_no_sync(probs).squeeze(
+                        1
                     )
-                    if self.config.is_encoder_decoder:
-                        cross_attentions += (outputs.cross_attentions,)
-
-                if output_hidden_states:
-                    decoder_hidden_states += (
-                        (outputs.decoder_hidden_states,)
-                        if self.config.is_encoder_decoder
-                        else (outputs.hidden_states,)
-                    )
-
-            # token selection
-            if do_sample:
-                probs = nn.functional.softmax(next_token_scores, dim=-1)
-                # avoid GPU sync
-                next_tokens = muillm_multinomial_sample_one_no_sync(probs).squeeze(1)
-            else:
-                next_tokens = torch.argmax(next_token_scores, dim=-1)
+                else:
+                    next_tokens = torch.argmax(next_token_scores, dim=-1)
 
             # broadcast the next_tokens from the rank 0 if we are using tensor parallelism
             if tensor_parallelism > 1:
                 next_tokens = comms.broadcast(next_tokens, src=0)
 
-            # finished sentences should have their next token be a padding token
-            if has_eos_stopping_criteria:
-                next_tokens = next_tokens * unfinished_sequences + pad_token_id * (
-                    1 - unfinished_sequences
+            with record_function("check_stopping_criteria"):
+                # finished sentences should have their next token be a padding token
+                if has_eos_stopping_criteria:
+                    next_tokens = next_tokens * unfinished_sequences + pad_token_id * (
+                        1 - unfinished_sequences
+                    )
+
+                # update generated ids, model inputs, and length for next step
+                input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
+
+                unfinished_sequences = unfinished_sequences & ~stopping_criteria(
+                    input_ids, scores
                 )
-
-            # update generated ids, model inputs, and length for next step
-            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
-
-            unfinished_sequences = unfinished_sequences & ~stopping_criteria(
-                input_ids, scores
-            )
 
             if max_remaining_generate is not None:
                 max_remaining_generate = max_remaining_generate - 1
