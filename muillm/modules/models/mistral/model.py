@@ -455,13 +455,18 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         # to infer the attention mask.
 
         # cache_position must be valid here no matter which cache we use
-        past_seen_tokens = cache_position[0] if past_key_values is not None else 0
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
         using_static_cache = isinstance(past_key_values, StaticCache)
         using_sliding_window_cache = isinstance(past_key_values, SlidingWindowCache)
 
+        # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
+        # the eager implementation needs a 4d attention mask that we need to prepare
         if (
             self.config._attn_implementation == "sdpa"
-            and not (using_static_cache or using_sliding_window_cache)
+            # and not using_static_cache  # using static cache doesn't matter for muiLLM
+            and not using_sliding_window_cache
             and not output_attentions
         ):
             if _ignore_causal_mask_sdpa(

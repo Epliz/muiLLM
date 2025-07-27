@@ -66,7 +66,6 @@ from transformers.models.llama.modeling_llama import (
 
 from muillm.sampling.generation import MuiGenerationMixin
 
-
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "LlamaConfig"
@@ -443,9 +442,10 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         using_static_cache = isinstance(past_key_values, StaticCache)
 
         # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
+        # the eager implementation needs a 4d attention mask that we need to prepare
         if (
             self.config._attn_implementation == "sdpa"
-            and not using_static_cache
+            # and not using_static_cache  # using static cache doesn't matter for muiLLM
             and not output_attentions
         ):
             if _ignore_causal_mask_sdpa(
@@ -535,33 +535,56 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             mask_length = attention_mask.shape[-1]
             target_length = max(target_length, mask_length)
 
+        # sequence length is the same as query_length
+        # target_length is the same as key_value_length
+
         device = cache_position.device
         if attention_mask is not None and attention_mask.dim() == 4:
             # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
             causal_mask = attention_mask
         else:
             min_dtype = torch.finfo(dtype).min
+
+            # just makes a tensor full with -inf
             causal_mask = torch.full(
                 (sequence_length, target_length),
                 fill_value=min_dtype,
                 dtype=dtype,
                 device=device,
             )
+
             if sequence_length != 1:
+                # mask the right upper part (queries don't attend to future keys) with -inf
+                # (-inf denotes masked)
+                # diagonal=1 so that we get 0s on the diagonal so that the queries attend to themselves
                 causal_mask = torch.triu(causal_mask, diagonal=1)
-            causal_mask *= torch.arange(
-                target_length, device=device
-            ) > cache_position.reshape(-1, 1)
+
+            # aranged has shaped [target_length]
+            aranged = torch.arange(target_length, device=device)
+            # cache_position has shape [sequence_length]
+            # pos_mask has shape [sequence_length, target_length]
+            # and contains False where we want to attend, True where we want to mask
+            pos_mask = aranged > cache_position.reshape(-1, 1)
+
+            causal_mask *= pos_mask
+
+            # causal_mask has shape [sequence_length, target_length]
+            # we need to expand it to [batch_size, 1, sequence_length, target_length]
+            # so that it can be used in the attention
             causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
             if attention_mask is not None:
                 causal_mask = (
                     causal_mask.clone()
                 )  # copy to contiguous memory for in-place edit
                 mask_length = attention_mask.shape[-1]
+
+                # the attention mask is 0 where we pad, and 1 where we don't
+                # so wherever is 0 after addition, we need to not attend and put -inf there
                 padding_mask = (
                     causal_mask[:, :, :, :mask_length]
                     + attention_mask[:, None, None, :]
                 )
+
                 padding_mask = padding_mask == 0
                 causal_mask[:, :, :, :mask_length] = causal_mask[
                     :, :, :, :mask_length

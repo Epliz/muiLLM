@@ -182,7 +182,10 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
         # time
         while not this_peer_finished:
             # prepare model inputs
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            model_inputs = self.prepare_inputs_for_generation(
+                input_ids,
+                **model_kwargs,
+            )
 
             if not checked_mask_content:
                 checked_mask_content = True
@@ -262,18 +265,19 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
             if tensor_parallelism > 1:
                 next_tokens = comms.broadcast(next_tokens, src=0)
 
-            # finished sentences should have their next token be a padding token
-            if has_eos_stopping_criteria:
-                next_tokens = next_tokens * unfinished_sequences + pad_token_id * (
-                    1 - unfinished_sequences
+            with record_function("check_stopping_criteria"):
+                # finished sentences should have their next token be a padding token
+                if has_eos_stopping_criteria:
+                    next_tokens = next_tokens * unfinished_sequences + pad_token_id * (
+                        1 - unfinished_sequences
+                    )
+
+                # update generated ids, model inputs, and length for next step
+                input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
+
+                unfinished_sequences = unfinished_sequences & ~stopping_criteria(
+                    input_ids, scores
                 )
-
-            # update generated ids, model inputs, and length for next step
-            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
-
-            unfinished_sequences = unfinished_sequences & ~stopping_criteria(
-                input_ids, scores
-            )
 
             if max_remaining_generate is not None:
                 max_remaining_generate = max_remaining_generate - 1
