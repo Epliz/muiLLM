@@ -446,9 +446,10 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             using_static_cache = isinstance(past_key_values, StaticCache)
 
             # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
+            # the eager implementation needs a 4d attention mask that we need to prepare
             if (
                 self.config._attn_implementation == "sdpa"
-                and not using_static_cache
+                # and not using_static_cache  # using static cache doesn't matter for muiLLM
                 and not output_attentions
             ):
                 if _ignore_causal_mask_sdpa(

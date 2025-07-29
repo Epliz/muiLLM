@@ -57,6 +57,7 @@ def _ignore_causal_mask_sdpa(
         # Thus, we only set `ignore_causal_mask = True` if the model is set to training.
         #
         # Besides, jit.trace can not handle the `q_len > 1` condition for `is_causal` (`TypeError: scaled_dot_product_attention(): argument 'is_causal' must be bool, not Tensor`).
+        # if we are here, there is no padding being done otherwise we would have an attention_mask (e.g if batching irregular sequences).
         if (
             (is_training or not is_tracing)
             and (query_length == 1 or key_value_length == query_length)
