@@ -82,6 +82,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
 
 #include "attention/causal_transformer_decoding.cuh"
 
+#include "generation/generation.cuh"
 #include "sync.h"
 
 // needed because Pybind11 can't seem to be able to deal with opaque pointers
@@ -249,6 +250,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_rmsnorm_forward", &muillm_rmsnorm_forward, "muillm rmsnorm forward");
   m.def("muillm_reduce_sum_forward", &muillm_reduce_sum_forward, "muillm reduce sum forward");
   m.def("muillm_topk_sigmoid_forward", &muillm_topk_sigmoid_forward, "muillm topk sigmoid forward");
+
+  // temperature tuning
+  m.def("muillm_apply_temperature_tuning", &muillm_apply_temperature_tuning, "muillm apply temperature tuning",
+        py::arg("query_states"), py::arg("cache_position"), py::arg("attn_scale"), py::arg("floor_scale"));
+
+  // generation
+  m.def("muillm_add_tokens_check_finished", &muillm_add_tokens_check_finished, "muillm add tokens check finished",
+        py::arg("input_ids"), py::arg("next_tokens"), py::arg("unfinished_sequences"),
+        py::arg("has_eos_stopping_criteria"), py::arg("pad_token_id"), py::arg("eos_token_id"),
+        py::arg("has_max_length_stopping_criteria"), py::arg("max_length"));
+
   // rotary
   m.def("muillm_rope_forward_no_cache", &muillm_rope_forward_no_cache, "muillm rotary forward no cache");
   m.def("muillm_rope_forward_dynamic_cache", &muillm_rope_forward_dynamic_cache, "muillm rotary forward dynamic cache");
@@ -358,10 +370,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_rotary_embedding_module_init", &muillm_rotary_embedding_module_init_trampoline, "muillm rotary embedding module init", py::arg("engine"), py::arg("layer_idx"), py::arg("cos_cached"), py::arg("sin_cached"));
   m.def("muillm_rotary_embedding_module_deinit", &muillm_rotary_embedding_module_deinit_trampoline, "muillm rotary embedding module deinit", py::arg("module"));
   m.def("muillm_rotary_embedding_module_forward", &muillm_rotary_embedding_module_forward_trampoline, "muillm rotary embedding module forward", py::arg("module"), py::arg("cache"), py::arg("q_in"), py::arg("k_in"), py::arg("v_in"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
-
-  // temperature tuning
-  m.def("muillm_apply_temperature_tuning", &muillm_apply_temperature_tuning, "muillm apply temperature tuning",
-        py::arg("query_states"), py::arg("cache_position"), py::arg("attn_scale"), py::arg("floor_scale"));
 
   // parallel attention
   pybind11::class_<muillm_parallel_attention_module_ptr_t> cl_parallel_attention_module(m, "muillm_parallel_attention_module_ptr");
