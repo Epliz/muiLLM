@@ -239,11 +239,11 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
         # All peers are syncrhonized by broadcasting the tokens, so they all finish at the same
         # time
         while not this_peer_finished:
-            with record_function("prepare_inputs_for_generation"):
-                # prepare model inputs
-                model_inputs = self.prepare_inputs_for_generation(
-                    input_ids, **model_kwargs
-                )
+            # prepare model inputs
+            model_inputs = self.prepare_inputs_for_generation(
+                input_ids,
+                **model_kwargs,
+            )
 
             if not checked_mask_content:
                 checked_mask_content = True

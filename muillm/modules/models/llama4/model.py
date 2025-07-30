@@ -79,8 +79,6 @@ if is_torch_flex_attn_available():
 
     from transformers.integrations.flex_attention import make_flex_block_causal_mask
 
-from torch.profiler import record_function
-
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "Llama4Config"
@@ -432,162 +430,159 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         chunked_attention_mask=None,
         use_cache=True,
     ):
-        with record_function("_update_causal_mask"):
-            if self.config._attn_implementation == "flash_attention_2":
-                if attention_mask is not None and (attention_mask == 0.0).any():
-                    return (
-                        attention_mask,
-                        attention_mask,
-                    )  # flash does not support chunked attn TODO support flash
-                return None, None
-
-            if self.config._attn_implementation not in [
-                "sdpa",
-                "flex_attention",
-                "eager",
-            ]:
-                return None, None
-
-            sequence_length = input_tensor.shape[1]
-            cache_position = cache_position.to(self.device)
-            attention_chunk_size = self.config.attention_chunk_size
-
-            first_cache_position = cache_position[0]
-
-            if past_key_values is not None:
-                full_cache_length = (
-                    past_key_values.get_max_cache_shape() or sequence_length
-                )
-            else:
-                full_cache_length = (
-                    attention_mask.shape[-1]
-                    if attention_mask is not None
-                    else sequence_length
-                )
-
-            cond1 = first_cache_position >= attention_chunk_size
-            cond2 = (first_cache_position < attention_chunk_size) & (
-                first_cache_position + sequence_length > attention_chunk_size
-            )
-            key_length = (
-                torch.where(
-                    cond1,
-                    attention_chunk_size + sequence_length - 1,
-                    torch.where(
-                        cond2,
-                        first_cache_position + sequence_length,
-                        attention_chunk_size,
-                    ),
-                )
-                if use_cache
-                else full_cache_length
-            )
-
-            if self.config._attn_implementation == "flex_attention":
-                if isinstance(attention_mask, torch.Tensor):
-                    offsets = (
-                        first_cache_position,
-                        max(first_cache_position - attention_chunk_size + 1, 0),
-                    )
-                    chunked_attention_mask = make_flex_block_causal_mask(
-                        attention_mask,
-                        self.config.attention_chunk_size,
-                        sequence_length,
-                        key_length,
-                        offsets=offsets,
-                    )
-                    attention_mask = make_flex_block_causal_mask(
-                        attention_mask,
-                        query_length=sequence_length,
-                        key_length=full_cache_length,
-                        offsets=(first_cache_position, 0),
-                    )
-                    return attention_mask, chunked_attention_mask
-                if isinstance(attention_mask, BlockMask):
-                    return attention_mask, chunked_attention_mask
-
-            # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
-            dtype, device = input_tensor.dtype, input_tensor.device
-            causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
-                attention_mask,
-                sequence_length=sequence_length,
-                target_length=max(full_cache_length, attention_chunk_size),
-                dtype=dtype,
-                cache_position=cache_position,
-                batch_size=input_tensor.shape[0],
-            )
-            if full_cache_length > self.config.attention_chunk_size:
-                start_idx = max(first_cache_position - attention_chunk_size + 1, 0)
-                end_idx = start_idx + key_length
-                chunked_attention_mask = self.create_chunked_attention_mask(
-                    self.config.attention_chunk_size,
-                    start=start_idx,  # same offset as with flex
-                    end=end_idx,
-                    device=device,
-                )
-
-                local_attention_mask = attention_mask[
-                    :, start_idx:end_idx
-                ]  # offset here as well
-                # It may be smaller than attention_chunk_size -> pad it
-                requires_padding = local_attention_mask.shape[-1] < attention_chunk_size
-                if requires_padding:
-                    local_attention_mask = nn.functional.pad(
-                        local_attention_mask,
-                        (0, attention_chunk_size - local_attention_mask.shape[-1]),
-                    )
-                # Depending on the padding, take the query tokens from the end or the cache_position
-                if not requires_padding:
-                    chunked_attention_mask = chunked_attention_mask[
-                        None, None, -sequence_length:, :
-                    ]
-                else:
-                    chunked_attention_mask = chunked_attention_mask[
-                        None, None, cache_position, :
-                    ]
-
-                chunked_attention_mask = chunked_attention_mask.expand(
-                    input_tensor.shape[0], -1, -1, -1
-                )
-                chunked_attention_mask = (
-                    chunked_attention_mask * local_attention_mask[:, None, None, :]
-                )
-                if self.config._attn_implementation == "eager":
-                    min_dtype = torch.finfo(dtype).min
-                    chunked_attention_mask = torch.where(
-                        chunked_attention_mask == 0, min_dtype, 0.0
-                    ).to(dtype)
-
-            if (
-                self.config._attn_implementation == "sdpa"
-                and attention_mask is not None
-                and attention_mask.device.type in ["cuda", "xpu"]
-                and attention_mask.ndim == 4
-                and not output_attentions  # Only unmask for 4d masks
-            ):
-                # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
-                # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
-                # Details: https://github.com/pytorch/pytorch/issues/110213
-                min_dtype = torch.finfo(dtype).min
-                causal_mask = AttentionMaskConverter._unmask_unattended(
-                    causal_mask, min_dtype
-                )
-
-            # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
-            if (
-                self.config._attn_implementation == "sdpa"
-                and chunked_attention_mask is not None
-            ):
-                chunked_attention_mask = chunked_attention_mask.bool()
-                causal_mask = causal_mask.bool()
-                # TODO: replace with our version that doesn't sync
-                if AttentionMaskConverter._ignore_causal_mask_sdpa(
+        if self.config._attn_implementation == "flash_attention_2":
+            if attention_mask is not None and (attention_mask == 0.0).any():
+                return (
                     attention_mask,
-                    inputs_embeds=input_tensor,
-                    past_key_values_length=first_cache_position,
-                    is_training=self.training,
-                ):
-                    causal_mask = None
+                    attention_mask,
+                )  # flash does not support chunked attn TODO support flash
+            return None, None
+
+        if self.config._attn_implementation not in [
+            "sdpa",
+            "flex_attention",
+            "eager",
+        ]:
+            return None, None
+
+        sequence_length = input_tensor.shape[1]
+        cache_position = cache_position.to(self.device)
+        attention_chunk_size = self.config.attention_chunk_size
+
+        first_cache_position = cache_position[0]
+
+        if past_key_values is not None:
+            full_cache_length = past_key_values.get_max_cache_shape() or sequence_length
+        else:
+            full_cache_length = (
+                attention_mask.shape[-1]
+                if attention_mask is not None
+                else sequence_length
+            )
+
+        cond1 = first_cache_position >= attention_chunk_size
+        cond2 = (first_cache_position < attention_chunk_size) & (
+            first_cache_position + sequence_length > attention_chunk_size
+        )
+        key_length = (
+            torch.where(
+                cond1,
+                attention_chunk_size + sequence_length - 1,
+                torch.where(
+                    cond2,
+                    first_cache_position + sequence_length,
+                    attention_chunk_size,
+                ),
+            )
+            if use_cache
+            else full_cache_length
+        )
+
+        if self.config._attn_implementation == "flex_attention":
+            if isinstance(attention_mask, torch.Tensor):
+                offsets = (
+                    first_cache_position,
+                    max(first_cache_position - attention_chunk_size + 1, 0),
+                )
+                chunked_attention_mask = make_flex_block_causal_mask(
+                    attention_mask,
+                    self.config.attention_chunk_size,
+                    sequence_length,
+                    key_length,
+                    offsets=offsets,
+                )
+                attention_mask = make_flex_block_causal_mask(
+                    attention_mask,
+                    query_length=sequence_length,
+                    key_length=full_cache_length,
+                    offsets=(first_cache_position, 0),
+                )
+                return attention_mask, chunked_attention_mask
+            if isinstance(attention_mask, BlockMask):
+                return attention_mask, chunked_attention_mask
+
+        # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
+        dtype, device = input_tensor.dtype, input_tensor.device
+        causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
+            attention_mask,
+            sequence_length=sequence_length,
+            target_length=max(full_cache_length, attention_chunk_size),
+            dtype=dtype,
+            cache_position=cache_position,
+            batch_size=input_tensor.shape[0],
+        )
+        if full_cache_length > self.config.attention_chunk_size:
+            start_idx = max(first_cache_position - attention_chunk_size + 1, 0)
+            end_idx = start_idx + key_length
+            chunked_attention_mask = self.create_chunked_attention_mask(
+                self.config.attention_chunk_size,
+                start=start_idx,  # same offset as with flex
+                end=end_idx,
+                device=device,
+            )
+
+            local_attention_mask = attention_mask[
+                :, start_idx:end_idx
+            ]  # offset here as well
+            # It may be smaller than attention_chunk_size -> pad it
+            requires_padding = local_attention_mask.shape[-1] < attention_chunk_size
+            if requires_padding:
+                local_attention_mask = nn.functional.pad(
+                    local_attention_mask,
+                    (0, attention_chunk_size - local_attention_mask.shape[-1]),
+                )
+            # Depending on the padding, take the query tokens from the end or the cache_position
+            if not requires_padding:
+                chunked_attention_mask = chunked_attention_mask[
+                    None, None, -sequence_length:, :
+                ]
+            else:
+                chunked_attention_mask = chunked_attention_mask[
+                    None, None, cache_position, :
+                ]
+
+            chunked_attention_mask = chunked_attention_mask.expand(
+                input_tensor.shape[0], -1, -1, -1
+            )
+            chunked_attention_mask = (
+                chunked_attention_mask * local_attention_mask[:, None, None, :]
+            )
+            if self.config._attn_implementation == "eager":
+                min_dtype = torch.finfo(dtype).min
+                chunked_attention_mask = torch.where(
+                    chunked_attention_mask == 0, min_dtype, 0.0
+                ).to(dtype)
+
+        if (
+            self.config._attn_implementation == "sdpa"
+            and attention_mask is not None
+            and attention_mask.device.type in ["cuda", "xpu"]
+            and attention_mask.ndim == 4
+            and not output_attentions  # Only unmask for 4d masks
+        ):
+            # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
+            # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
+            # Details: https://github.com/pytorch/pytorch/issues/110213
+            min_dtype = torch.finfo(dtype).min
+            causal_mask = AttentionMaskConverter._unmask_unattended(
+                causal_mask, min_dtype
+            )
+
+        # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
+        if (
+            self.config._attn_implementation == "sdpa"
+            and chunked_attention_mask is not None
+        ):
+            chunked_attention_mask = chunked_attention_mask.bool()
+            causal_mask = causal_mask.bool()
+            # TODO: replace with our version that doesn't sync
+            if AttentionMaskConverter._ignore_causal_mask_sdpa(
+                attention_mask,
+                inputs_embeds=input_tensor,
+                past_key_values_length=first_cache_position,
+                is_training=self.training,
+            ):
+                causal_mask = None
         return causal_mask, chunked_attention_mask
 
     def create_chunked_attention_mask(
