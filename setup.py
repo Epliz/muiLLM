@@ -93,6 +93,7 @@ setup(
                 "csrc/attention/flash_decoding.cu",
                 "csrc/attention/flash_decoding_fp16_kernels.cu",
                 "csrc/attention/flash_decoding_bf16_kernels.cu",
+                "csrc/generation/generation.cu",
                 "csrc/sync.cu",
                 "csrc/sync_torch.cpp",
                 "csrc/reduce/reduce.cu",
