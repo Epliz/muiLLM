@@ -231,7 +231,12 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
         # Force a CPU GPU sync
         torch.cuda.synchronize()
 
+        # we leverage it to avoid some computations when preparing inputs
+        prev_position_ids = None
+
         # we will keep around the next token tensors and move them to CPU when needed
+        # we also leverage next_tokens to avoid some computations when preparing inputs
+        next_tokens = None
         all_next_tokens = [] if streamer is not None else None
 
         # All peers are syncrhonized by broadcasting the tokens, so they all finish at the same
@@ -240,6 +245,8 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(
                 input_ids,
+                next_tokens=next_tokens,
+                prev_position_ids=prev_position_ids,
                 **model_kwargs,
             )
 
@@ -261,6 +268,9 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
                 if output_hidden_states
                 else {}
             )
+
+            # for the next iteration
+            prev_position_ids = model_inputs.get("position_ids", None)
 
             if is_prefill:
                 outputs = self(**model_inputs, return_dict=True)
