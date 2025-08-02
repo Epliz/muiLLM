@@ -83,7 +83,7 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         self,
         engine_config: MuiEngineConfig,
         config: LlamaConfig,
-        embed_tokens,
+        embed_tokens: nn.Embedding,
         layers,
         norm: MuiRMSNorm,
         rotary_emb: MuiRotaryEmbedding,

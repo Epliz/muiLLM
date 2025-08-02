@@ -74,7 +74,7 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         self,
         engine_config: MuiEngineConfig,
         config: MistralConfig,
-        embed_tokens,
+        embed_tokens: nn.Embedding,
         layers,
         norm: MuiRMSNorm,
         rotary_emb: MuiRotaryEmbedding,
