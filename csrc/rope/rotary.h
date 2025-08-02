@@ -7,6 +7,14 @@
 
 #include "rotary_position_layout.h"
 
+// out: cos, sin
+std::tuple<at::Tensor, at::Tensor> muillm_compute_rotary_embed_positions(
+    torch::Tensor& x,
+    torch::Tensor& position_ids, // shape [batch_size, seq_len]
+    torch::Tensor& cos_cached,
+    torch::Tensor& sin_cached
+);
+
 // out: query, key
 std::tuple<at::Tensor, at::Tensor> muillm_rope_forward_no_cache(
     torch::Tensor& position_ids,

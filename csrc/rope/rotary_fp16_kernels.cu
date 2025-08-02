@@ -22,6 +22,71 @@ static inline T* __device__ addr(T* p, unsigned index) {
   return (T*) (p8 + byte_offset);
 }
 
+void __global__ compute_rotary_position_embeddings_fp16_kernel(
+  // inputs
+  const uint64_t* position_ids, // shape [B, T]
+  const half* cos_cached, // shape [S, E]
+  const half* sin_cached, // shape [S, E]
+  //outputs
+  half* embeds_cos, // shape [B, T, E]
+  half* embeds_sin, // shape [B, T, E]
+  // tensor dimension sizes
+  unsigned B,
+  unsigned T,
+  unsigned E
+) {
+
+  unsigned batch_idx = blockIdx.y;
+  unsigned tok_idx = blockIdx.x;
+  unsigned pos_idx = batch_idx * T + tok_idx;
+
+  unsigned position_id = position_ids[pos_idx];
+
+  // realign the cos/sin caches to the position
+  cos_cached = &cos_cached[position_id * E];
+  sin_cached = &sin_cached[position_id * E];
+
+  // compute the embeddings
+  embeds_cos = &embeds_cos[pos_idx * E];
+  embeds_sin = &embeds_sin[pos_idx * E];
+
+  // copy the cos/sin cached values to the output
+  for (unsigned d = threadIdx.x; d < E; d += THREADS_PER_BLOCK) {
+    *addr(embeds_cos, d) = *addr(cos_cached, d);
+    *addr(embeds_sin, d) = *addr(sin_cached, d);
+  }
+}
+
+void muillm_compute_rotary_embed_positions_fp16(
+  hipStream_t stream,
+  unsigned B,
+  unsigned T,
+  unsigned E,
+  const uint64_t* position_ids,
+  const half* cos_cached,
+  const half* sin_cached,
+  half* embeds_cos,
+  half* embeds_sin
+) {
+
+  const unsigned threads_per_block = THREADS_PER_BLOCK;
+  // TODO: grid size cannot be bigger than 65535, so we would need to make a persistent kernel
+  // if above
+  const dim3 num_blocks = dim3(T, B);
+
+  compute_rotary_position_embeddings_fp16_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+    (const uint64_t*)position_ids,
+    (const half*)cos_cached,
+    (const half*)sin_cached,
+    (half*)embeds_cos,
+    (half*)embeds_sin,
+    // tensor dimension sizes
+    B,
+    T,
+    E
+  );
+}
+
 // TODOs:
 // 1) check layouts
 // 2) optimize array addressing in loops
