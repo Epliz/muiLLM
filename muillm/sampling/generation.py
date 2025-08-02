@@ -258,6 +258,13 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
                     # used to avoid some checks when updating masks later on
                     # as we generate we just add more ones, so the flag won't change
                     self.all_ones_mask = torch.all(attention_mask == 1).item()
+                else:
+                    # No attention mask mean all ones as well
+                    self.all_ones_mask = True
+
+            if self.all_ones_mask is not None:
+                # Add the all_ones_mask as input
+                model_inputs["all_ones_mask"] = self.all_ones_mask
 
             # prepare variable output controls (note: some models won't accept all output controls)
             model_inputs.update(

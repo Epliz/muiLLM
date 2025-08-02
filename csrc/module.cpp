@@ -149,6 +149,7 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "comm_torch.h"
 
 #include "modules/linear_module.h"
+#include "modules/embedding_module.h"
 
 #include "parallel_linear_kernels.cuh"
 #include "parallel_gateupmoe_kernels.cuh"
@@ -310,6 +311,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_module_deinit", &muillm_linear_module_deinit_trampoline, "muillm linear module deinit", py::arg("module"));
   m.def("muillm_linear_module_forward", &muillm_linear_module_forward_trampoline, "muillm linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none());
 
+  // embedding
+  pybind11::class_<muillm_embedding_module_ptr_t> cl_embedding_module(m, "muillm_embedding_module_ptr");
+  cl_embedding_module.def(pybind11::init<>());
+
+  m.def("muillm_embedding_module_init", &muillm_embedding_module_init_trampoline, "muillm embedding module init", py::arg("engine"), py::arg("weights"));
+  m.def("muillm_embedding_module_deinit", &muillm_embedding_module_deinit_trampoline, "muillm embedding module deinit", py::arg("module"));
+  m.def("muillm_embedding_module_forward", &muillm_embedding_module_forward_trampoline, "muillm embedding module forward", py::arg("module"), py::arg("inputs"));
+
 
   // parallel linear
   pybind11::class_<muillm_parallel_linear_module_ptr_t> cl_parallel_linear_module(m, "muillm_parallel_linear_module_ptr");
@@ -409,9 +418,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<muillm_parallel_decoder_stack_ptr_t> cl_parallel_decoder_stack(m, "muillm_parallel_decoder_stack_ptr");
   cl_parallel_decoder_stack.def(pybind11::init<>());
 
-  m.def("muillm_parallel_decoder_stack_init", &muillm_parallel_decoder_stack_init_trampoline, "muillm parallel decoder stack init", py::arg("engine"), py::arg("comm"), py::arg("rotary_emb_module"), py::arg("decoders"));
+  m.def("muillm_parallel_decoder_stack_init", &muillm_parallel_decoder_stack_init_trampoline, "muillm parallel decoder stack init", py::arg("engine"), py::arg("comm"), py::arg("embed_tokens_module"), py::arg("rotary_emb_module"), py::arg("decoders"));
   m.def("muillm_parallel_decoder_stack_deinit", &muillm_parallel_decoder_stack_deinit_trampoline, "muillm parallel decoder stack deinit", py::arg("module"));
-  m.def("muillm_parallel_decoder_stack_forward", &muillm_parallel_decoder_stack_forward_trampoline, "muillm parallel decoder stack forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("m"), py::arg("position_ids"), py::arg("cache_positions"));
+  m.def("muillm_parallel_decoder_stack_forward", &muillm_parallel_decoder_stack_forward_trampoline, "muillm parallel decoder stack forward", py::arg("module"), py::arg("cache"), py::arg("input_ids"), py::arg("input_embeds"), py::arg("m"), py::arg("position_ids"), py::arg("cache_positions"));
 
   // parallel llama4 decoder stack
   pybind11::class_<muillm_parallel_llama4_decoder_stack_ptr_t> cl_parallel_llama4_decoder_stack(m, "muillm_parallel_llama4_decoder_stack_ptr");

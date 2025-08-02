@@ -19,6 +19,8 @@ import torch
 import torch.nn as nn
 
 from muillm.engineconfig import MuiEngineConfig
+from muillm.modules.attention.sdpaattention import _ignore_causal_mask_sdpa
+from muillm.modules.embedding import MuiEmbedding
 from muillm.replacement.replacementcontext import MuiReplacementContext
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
@@ -93,7 +95,7 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         self,
         engine_config: MuiEngineConfig,
         config: Llama4TextConfig,
-        embed_tokens,
+        embed_tokens: MuiEmbedding,
         layers,
         norm: MuiRMSNorm,
         rotary_emb: MuiRotaryEmbedding,
@@ -104,6 +106,10 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
 
         self.cpp_engine = engine_config.cpp_engine
         self.comms = engine_config.comms
+
+        # HF has a computed property called device, so we name ours "mdevice"
+        self.mdevice = embed_tokens.weight.device
+        self.mdtype = embed_tokens.weight.dtype
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -183,7 +189,11 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         device = replacement_context.device
 
         config = prev_model.config
-        embed_tokens = prev_model.embed_tokens
+
+        embed_tokens = MuiEmbedding.replace(
+            replacement_context=replacement_context,
+            prev_module=prev_model.embed_tokens,
+        )
 
         layers = MuiLlama4TextModel._replace_layers(
             replacement_context=replacement_context,
@@ -235,6 +245,7 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        all_ones_mask: Optional[bool] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
@@ -263,17 +274,18 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
             )
             use_cache = False
 
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(
-                input_ids.to(self.embed_tokens.weight.device)
-            )
+        inputs_shape = input_ids.shape if input_ids is not None else inputs_embeds.shape
 
-        batch_size = inputs_embeds.shape[0]
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        batch_size = inputs_shape[0]
+        q_len = inputs_shape[1]
 
         past_seen_tokens = (
             past_key_values.get_seq_length() if past_key_values is not None else 0
         )
-        tot_seq_len = past_seen_tokens + inputs_embeds.shape[1]
+        tot_seq_len = past_seen_tokens + q_len
 
         if use_cache:
             # If we have a cache, but not a MuiCache, drop it
@@ -285,8 +297,8 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
             no_cache = past_key_values is None
             if no_cache:
                 # create a hybrid cache
-                device = inputs_embeds.device
-                dtype = inputs_embeds.dtype
+                device = self.mdevice
+                dtype = self.mdtype
                 past_key_values = create_hybrid_chunked_cache(
                     self.engine_config,
                     self.config,
@@ -309,7 +321,7 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
             cache_position = torch.arange(
                 past_seen_tokens,
                 tot_seq_len,
-                device=inputs_embeds.device,
+                device=self.mdevice,
             )
 
         if position_ids is None:
@@ -317,12 +329,19 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
 
         causal_mask, chunk_causal_mask = self._update_causal_mask(
             attention_mask,
-            inputs_embeds,
+            inputs_shape,
             cache_position,
             past_key_values,
             output_attentions,
             use_cache=use_cache,
+            all_ones_mask=all_ones_mask,
         )
+
+        if all_ones_mask is None:
+            # if not specified, assume it might not have just ones
+            all_ones_mask = False
+        if all_ones_mask:
+            causal_mask = None
 
         hidden_states = inputs_embeds
 
@@ -334,14 +353,13 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         all_self_attns = () if output_attentions else None
 
         # determine if we can use the decoder stack
-        bsz, q_len, _ = hidden_states.size()
         grad_checkpointing = self.gradient_checkpointing and self.training
         mui_cache = isinstance(past_key_values, MuiCache)
-        dispatchable_dtype = (hidden_states.dtype == torch.float16) or (
-            hidden_states.dtype == torch.bfloat16
+        dispatchable_dtype = (self.mdtype == torch.float16) or (
+            self.mdtype == torch.bfloat16
         )
         no_outputs = (not output_hidden_states) and (not output_attentions)
-        dispatchable_input = (bsz == 1) and (q_len == 1) and dispatchable_dtype
+        dispatchable_input = (batch_size == 1) and (q_len == 1) and dispatchable_dtype
         dispatchable_to_stack = (
             (self.cpp_module is not None)
             and no_outputs
@@ -423,12 +441,13 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
     def _update_causal_mask(
         self,
         attention_mask: torch.Tensor,
-        input_tensor: torch.Tensor,
+        inputs_shape: torch.Size,
         cache_position: torch.Tensor,
         past_key_values: Cache,
         output_attentions: bool = False,
         chunked_attention_mask=None,
         use_cache=True,
+        all_ones_mask: Optional[bool] = None,
     ):
         if self.config._attn_implementation == "flash_attention_2":
             if attention_mask is not None and (attention_mask == 0.0).any():
@@ -445,11 +464,14 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         ]:
             return None, None
 
-        sequence_length = input_tensor.shape[1]
-        cache_position = cache_position.to(self.device)
+        sequence_length = inputs_shape[1]
+        cache_position = cache_position.to(self.mdevice)
         attention_chunk_size = self.config.attention_chunk_size
 
-        first_cache_position = cache_position[0]
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+        tot_seq_length = past_seen_tokens + sequence_length
 
         if past_key_values is not None:
             full_cache_length = past_key_values.get_max_cache_shape() or sequence_length
@@ -460,18 +482,16 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
                 else sequence_length
             )
 
-        cond1 = first_cache_position >= attention_chunk_size
-        cond2 = (first_cache_position < attention_chunk_size) & (
-            first_cache_position + sequence_length > attention_chunk_size
+        cond1 = past_seen_tokens >= attention_chunk_size
+        cond2 = (past_seen_tokens < attention_chunk_size) & (
+            tot_seq_length > attention_chunk_size
         )
         key_length = (
-            torch.where(
-                cond1,
-                attention_chunk_size + sequence_length - 1,
-                torch.where(
-                    cond2,
-                    first_cache_position + sequence_length,
-                    attention_chunk_size,
+            (
+                (
+                    (attention_chunk_size + sequence_length - 1)
+                    if cond1
+                    else (tot_seq_length if cond2 else attention_chunk_size)
                 ),
             )
             if use_cache
@@ -481,8 +501,8 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         if self.config._attn_implementation == "flex_attention":
             if isinstance(attention_mask, torch.Tensor):
                 offsets = (
-                    first_cache_position,
-                    max(first_cache_position - attention_chunk_size + 1, 0),
+                    past_seen_tokens,
+                    max(past_seen_tokens - attention_chunk_size + 1, 0),
                 )
                 chunked_attention_mask = make_flex_block_causal_mask(
                     attention_mask,
@@ -495,24 +515,24 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
                     attention_mask,
                     query_length=sequence_length,
                     key_length=full_cache_length,
-                    offsets=(first_cache_position, 0),
+                    offsets=(past_seen_tokens, 0),
                 )
                 return attention_mask, chunked_attention_mask
             if isinstance(attention_mask, BlockMask):
                 return attention_mask, chunked_attention_mask
 
         # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
-        dtype, device = input_tensor.dtype, input_tensor.device
+        dtype, device = self.mdtype, self.mdevice
         causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
             attention_mask,
             sequence_length=sequence_length,
             target_length=max(full_cache_length, attention_chunk_size),
             dtype=dtype,
             cache_position=cache_position,
-            batch_size=input_tensor.shape[0],
+            batch_size=inputs_shape[0],
         )
         if full_cache_length > self.config.attention_chunk_size:
-            start_idx = max(first_cache_position - attention_chunk_size + 1, 0)
+            start_idx = max(past_seen_tokens - attention_chunk_size + 1, 0)
             end_idx = start_idx + key_length
             chunked_attention_mask = self.create_chunked_attention_mask(
                 self.config.attention_chunk_size,
@@ -542,7 +562,7 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
                 ]
 
             chunked_attention_mask = chunked_attention_mask.expand(
-                input_tensor.shape[0], -1, -1, -1
+                inputs_shape[0], -1, -1, -1
             )
             chunked_attention_mask = (
                 chunked_attention_mask * local_attention_mask[:, None, None, :]
@@ -575,12 +595,12 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
         ):
             chunked_attention_mask = chunked_attention_mask.bool()
             causal_mask = causal_mask.bool()
-            # TODO: replace with our version that doesn't sync
-            if AttentionMaskConverter._ignore_causal_mask_sdpa(
+            if _ignore_causal_mask_sdpa(
                 attention_mask,
-                inputs_embeds=input_tensor,
-                past_key_values_length=first_cache_position,
+                inputs_shape=inputs_shape,
+                past_key_values_length=past_seen_tokens,
                 is_training=self.training,
+                all_ones_mask=all_ones_mask,
             ):
                 causal_mask = None
         return causal_mask, chunked_attention_mask
@@ -786,6 +806,7 @@ class MuiLlama4ForCausalLM(Llama4PreTrainedModel, MuiGenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
+        all_ones_mask: Optional[bool] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -820,6 +841,9 @@ class MuiLlama4ForCausalLM(Llama4PreTrainedModel, MuiGenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
+        if all_ones_mask is not None:
+            self.all_ones_mask = all_ones_mask
+
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -846,6 +870,7 @@ class MuiLlama4ForCausalLM(Llama4PreTrainedModel, MuiGenerationMixin):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            all_ones_mask=self.all_ones_mask,
             **kwargs,
         )
 

@@ -26,7 +26,7 @@ logger = logging.get_logger(__name__)
 # Modified to avoid a sync
 def _ignore_causal_mask_sdpa(
     attention_mask: Optional[torch.Tensor],
-    inputs_embeds: torch.Tensor,
+    inputs_shape: torch.Size,
     past_key_values_length: int,
     sliding_window: Optional[int] = None,
     all_ones_mask: Optional[bool] = None,
@@ -40,12 +40,12 @@ def _ignore_causal_mask_sdpa(
     allowing to dispatch to the flash attention kernel (that can otherwise not be used if a custom `attn_mask` is passed).
     """
 
-    _, query_length = inputs_embeds.shape[0], inputs_embeds.shape[1]
+    query_length = inputs_shape[1]
     key_value_length = query_length + past_key_values_length
 
     is_tracing = (
         torch.jit.is_tracing()
-        or isinstance(inputs_embeds, torch.fx.Proxy)
+        # or isinstance(inputs_embeds, torch.fx.Proxy)
         or (hasattr(torch, "_dynamo") and torch._dynamo.is_compiling())
     )
 

@@ -51,6 +51,8 @@ setup(
                 "csrc/linear/linear.cu",
                 "csrc/linear/linear_fp16_kernels.cu",
                 "csrc/linear/linear_bf16_kernels.cu",
+                "csrc/embedding/embedding.cu",
+                "csrc/embedding/embedding_xx16_kernels.cu",
                 "csrc/int8_dequantization_kernel.cu",
                 "csrc/int8_linear_kernels.cu",
                 "csrc/ffn/gateup.cu",
@@ -111,6 +113,7 @@ setup(
                 "csrc/parallel_gateupmoe_kernels.cu",
                 # modules
                 "csrc/modules/linear_module.cpp",
+                "csrc/modules/embedding_module.cpp",
                 "csrc/modules/kvcache.cpp",
                 "csrc/modules/static_kvcache.cpp",
                 "csrc/modules/dynamic_kvcache.cpp",

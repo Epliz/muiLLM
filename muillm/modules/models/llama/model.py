@@ -26,6 +26,7 @@ from muillm.modules.attention.sdpaattention import _ignore_causal_mask_sdpa
 from muillm.modules.decoder.decoder import MuiDecoderLayer
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
 from muillm.modules.decoder.paralleldecoderstack import _MuiParallelDecoderStack
+from muillm.modules.embedding import MuiEmbedding
 from muillm.modules.kvcache.cache_utils import (
     MuiCache,
     MuiDynamicCache,
@@ -83,7 +84,7 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         self,
         engine_config: MuiEngineConfig,
         config: LlamaConfig,
-        embed_tokens,
+        embed_tokens: MuiEmbedding,
         layers,
         norm: MuiRMSNorm,
         rotary_emb: MuiRotaryEmbedding,
@@ -94,6 +95,10 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
 
         self.cpp_engine = engine_config.cpp_engine
         self.comms = engine_config.comms
+
+        # HF has a computed property called device, so we name ours "mdevice"
+        self.mdevice = embed_tokens.weight.device
+        self.mdtype = embed_tokens.weight.dtype
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -123,6 +128,7 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         self.cpp_module = muillm_ext.muillm_parallel_decoder_stack_init(
             self.cpp_engine,
             self.comms.comms,
+            self.embed_tokens.cpp_module,
             self.rotary_emb.cpp_module,
             [layer.cpp_module for layer in self.layers],
         )
@@ -140,7 +146,12 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         dtype = prev_model.embed_tokens.weight.dtype
 
         config = prev_model.config
-        embed_tokens = prev_model.embed_tokens
+
+        embed_tokens = MuiEmbedding.replace(
+            replacement_context=replacement_context,
+            prev_module=prev_model.embed_tokens,
+        )
+
         prev_layers = prev_model.layers
         prev_norm = prev_model.norm
 
@@ -239,15 +250,15 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             )
             use_cache = False
 
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+        inputs_shape = input_ids.shape if input_ids is not None else inputs_embeds.shape
 
-        batch_size = inputs_embeds.shape[0]
+        batch_size = inputs_shape[0]
+        q_len = inputs_shape[1]
 
         past_seen_tokens = (
             past_key_values.get_seq_length() if past_key_values is not None else 0
         )
-        tot_seq_len = past_seen_tokens + inputs_embeds.shape[1]
+        tot_seq_len = past_seen_tokens + q_len
 
         if use_cache:
             # If we have a cache, but not a MuiCache, drop it
@@ -263,8 +274,8 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
 
             if no_cache:
                 # create a cache from scratch
-                device = inputs_embeds.device
-                dtype = inputs_embeds.dtype
+                device = self.mdevice
+                dtype = self.mdtype
                 past_key_values = create_static_cache(
                     self.engine_config,
                     self.config,
@@ -286,7 +297,7 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
 
         if cache_position is None:
             cache_position = torch.arange(
-                past_seen_tokens, tot_seq_len, device=inputs_embeds.device
+                past_seen_tokens, tot_seq_len, device=self.mdevice
             )
 
         if position_ids is None:
@@ -294,22 +305,21 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
 
         causal_mask = self._update_causal_mask(
             attention_mask,
-            inputs_embeds,
+            inputs_shape,
             cache_position,
             past_key_values,
             output_attentions,
             all_ones_mask,
         )
-        hidden_states = inputs_embeds
-
-        if causal_mask is not None:
-            causal_mask = causal_mask[:, :, :, :tot_seq_len]
 
         if all_ones_mask is None:
             # if not specified, assume it might not have just ones
             all_ones_mask = False
+
         if all_ones_mask:
             causal_mask = None
+        elif causal_mask is not None:
+            causal_mask = causal_mask[:, :, :, :tot_seq_len]
 
         position_ids = position_ids.contiguous()
 
@@ -319,14 +329,13 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         next_decoder_cache = None
 
         # determine if we can use the decoder stack
-        bsz, q_len, _ = hidden_states.size()
         grad_checkpointing = self.gradient_checkpointing and self.training
         mui_cache = isinstance(past_key_values, MuiCache)
-        dispatchable_dtype = (hidden_states.dtype == torch.float16) or (
-            hidden_states.dtype == torch.bfloat16
+        dispatchable_dtype = (self.mdtype == torch.float16) or (
+            self.mdtype == torch.bfloat16
         )
         no_outputs = (not output_hidden_states) and (not output_attentions)
-        dispatchable_input = (bsz == 1) and (q_len == 1) and dispatchable_dtype
+        dispatchable_input = (batch_size == 1) and (q_len == 1) and dispatchable_dtype
         dispatchable_to_stack = (
             (self.cpp_module is not None)
             and no_outputs
@@ -339,7 +348,8 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             hidden_states = _MuiParallelDecoderStack.apply(
                 self.cpp_module,
                 past_key_values.cpp_module,
-                hidden_states,
+                input_ids,
+                inputs_embeds,
                 causal_mask,
                 position_ids,
                 cache_position,
@@ -347,6 +357,10 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
 
             next_decoder_cache = past_key_values
         else:
+            if inputs_embeds is None:
+                inputs_embeds = self.embed_tokens(input_ids)
+            hidden_states = inputs_embeds
+
             # create position embeddings to be shared across the decoder layers
             cos, sin = self.rotary_emb(hidden_states, position_ids)
             position_embeddings = cos, sin
@@ -423,7 +437,7 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
     def _update_causal_mask(
         self,
         attention_mask: torch.Tensor,
-        input_tensor: torch.Tensor,
+        inputs_shape: torch.Size,
         cache_position: torch.Tensor,
         past_key_values: Cache,
         output_attentions: bool,
@@ -456,15 +470,15 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         ):
             if _ignore_causal_mask_sdpa(
                 attention_mask,
-                inputs_embeds=input_tensor,
+                inputs_shape=inputs_shape,
                 past_key_values_length=past_seen_tokens,
                 is_training=self.training,
                 all_ones_mask=all_ones_mask,
             ):
                 return None
 
-        dtype, device = input_tensor.dtype, input_tensor.device
-        sequence_length = input_tensor.shape[1]
+        dtype = self.mdtype
+        sequence_length = inputs_shape[1]
         if False:  # using_static_cache:
             # modification compared to normal HF transformers
             # we use the same normal code as for dynamic cache
@@ -483,7 +497,7 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             target_length=target_length,
             dtype=dtype,
             cache_position=cache_position,
-            batch_size=input_tensor.shape[0],
+            batch_size=inputs_shape[0],
         )
 
         if (
@@ -854,10 +868,5 @@ class MuiLlamaForCausalLM(LlamaPreTrainedModel, MuiGenerationMixin):
                 "attention_mask": attention_mask,
             }
         )
-
-        if self.all_ones_mask is not None:
-            # was set externally, add it to the model inputs to avoid
-            # calls to torch.all in _prepare_4d_causal_attention_mask_for_sdpa
-            model_inputs["all_ones_mask"] = self.all_ones_mask
 
         return model_inputs
