@@ -115,6 +115,7 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         self.cpp_module = muillm_ext.muillm_parallel_decoder_stack_init(
             self.cpp_engine,
             self.comms.comms,
+            self.rotary_emb.cpp_module,
             [layer.cpp_module for layer in self.layers],
         )
 
@@ -128,6 +129,8 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
         engine_config = replacement_context.engine_config
         device = replacement_context.device
+        dtype = prev_model.embed_tokens.weight.dtype
+
         config = prev_model.config
         embed_tokens = prev_model.embed_tokens
         prev_layers = prev_model.layers
@@ -160,7 +163,11 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
             prev_norm,
         )
         rotary_emb = MuiRotaryEmbedding(
-            engine_config=engine_config, config=config, layer_idx=0, device=device
+            engine_config=engine_config,
+            config=config,
+            layer_idx=0,
+            device=device,
+            dtype=dtype,
         )
 
         new_model = MuiMistralModel(
@@ -312,10 +319,6 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
         position_ids = position_ids.contiguous()
 
-        # create position embeddings to be shared across the decoder layers
-        cos, sin = self.rotary_emb(hidden_states, position_ids)
-        position_embeddings = cos, sin
-
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -345,12 +348,15 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
                 hidden_states,
                 causal_mask,
                 position_ids,
-                position_embeddings,
                 cache_position,
             )
 
             next_decoder_cache = past_key_values
         else:
+            # create position embeddings to be shared across the decoder layers
+            cos, sin = self.rotary_emb(hidden_states, position_ids)
+            position_embeddings = cos, sin
+
             for decoder_layer in self.layers:
                 if output_hidden_states:
                     all_hidden_states += (hidden_states,)

@@ -128,7 +128,12 @@ std::tuple<torch::Tensor, torch::Tensor> MuillmRotaryEmbedding::compute_rotary_p
   torch::Tensor& x,
   torch::Tensor& position_ids
 ) {
-  TORCH_CHECK(false, "compute_rotary_pos_emb is not implemented");
+  return muillm_compute_rotary_embed_positions(
+    x,
+    position_ids, 
+    this->cos_cached,
+    this->sin_cached
+  );
 }
 
 muillm_rotary_embedding_module_ptr_t muillm_rotary_embedding_module_init_trampoline(
