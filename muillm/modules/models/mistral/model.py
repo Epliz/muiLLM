@@ -8,6 +8,7 @@ from muillm.modules.attention.sdpaattention import _ignore_causal_mask_sdpa
 from muillm.modules.decoder.decoder import MuiDecoderLayer
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
 from muillm.modules.decoder.paralleldecoderstack import _MuiParallelDecoderStack
+from muillm.modules.embedding import MuiEmbedding
 from muillm.modules.kvcache.cache_utils import (
     MuiCache,
     MuiDynamicCache,
@@ -74,7 +75,7 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         self,
         engine_config: MuiEngineConfig,
         config: MistralConfig,
-        embed_tokens,
+        embed_tokens: MuiEmbedding,
         layers,
         norm: MuiRMSNorm,
         rotary_emb: MuiRotaryEmbedding,
@@ -85,6 +86,10 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
         self.cpp_engine = engine_config.cpp_engine
         self.comms = engine_config.comms
+
+        # HF has a computed property called device, so we name ours "mdevice"
+        self.mdevice = embed_tokens.weight.device
+        self.mdtype = embed_tokens.weight.dtype
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -115,6 +120,8 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         self.cpp_module = muillm_ext.muillm_parallel_decoder_stack_init(
             self.cpp_engine,
             self.comms.comms,
+            self.embed_tokens.cpp_module,
+            self.rotary_emb.cpp_module,
             [layer.cpp_module for layer in self.layers],
         )
 
@@ -128,8 +135,15 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
         engine_config = replacement_context.engine_config
         device = replacement_context.device
+        dtype = prev_model.embed_tokens.weight.dtype
+
         config = prev_model.config
-        embed_tokens = prev_model.embed_tokens
+
+        embed_tokens = MuiEmbedding.replace(
+            replacement_context=replacement_context,
+            prev_module=prev_model.embed_tokens,
+        )
+
         prev_layers = prev_model.layers
         prev_norm = prev_model.norm
 
@@ -160,7 +174,11 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
             prev_norm,
         )
         rotary_emb = MuiRotaryEmbedding(
-            engine_config=engine_config, config=config, layer_idx=0, device=device
+            engine_config=engine_config,
+            config=config,
+            layer_idx=0,
+            device=device,
+            dtype=dtype,
         )
 
         new_model = MuiMistralModel(
@@ -214,17 +232,9 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         )
 
         # retrieve input_ids and inputs_embeds
-        if input_ids is not None and inputs_embeds is not None:
+        if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
-                "You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time"
-            )
-        elif input_ids is not None:
-            batch_size, seq_length = input_ids.shape
-        elif inputs_embeds is not None:
-            batch_size, seq_length, _ = inputs_embeds.shape
-        else:
-            raise ValueError(
-                "You have to specify either decoder_input_ids or decoder_inputs_embeds"
+                "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
             )
 
         if self.gradient_checkpointing and self.training:
@@ -234,15 +244,15 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
                 )
                 use_cache = False
 
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+        inputs_shape = input_ids.shape if input_ids is not None else inputs_embeds.shape
 
-        batch_size = inputs_embeds.shape[0]
+        batch_size = inputs_shape[0]
+        q_len = inputs_shape[1]
 
         past_seen_tokens = (
             past_key_values.get_seq_length() if past_key_values is not None else 0
         )
-        tot_seq_len = past_seen_tokens + inputs_embeds.shape[1]
+        tot_seq_len = past_seen_tokens + q_len
 
         if use_cache:
             # If we have a cache, but not a MuiCache, drop it
@@ -258,8 +268,8 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
             if no_cache:
                 # create a cache from scratch
-                device = inputs_embeds.device
-                dtype = inputs_embeds.dtype
+                device = self.mdevice
+                dtype = self.mdtype
                 past_key_values = create_static_cache(
                     self.engine_config,
                     self.config,
@@ -283,7 +293,7 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
         if cache_position is None:
             cache_position = torch.arange(
-                past_seen_tokens, tot_seq_len, device=inputs_embeds.device
+                past_seen_tokens, tot_seq_len, device=self.mdevice
             )
 
         if position_ids is None:
@@ -291,7 +301,7 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
         causal_mask = self._update_causal_mask(
             attention_mask,
-            inputs_embeds,
+            inputs_shape,
             cache_position,
             past_key_values,
             use_cache,
@@ -299,22 +309,15 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
             all_ones_mask,
         )
 
-        hidden_states = inputs_embeds
-
-        if causal_mask is not None:
-            causal_mask = causal_mask[:, :, :, :tot_seq_len]
-
         if all_ones_mask is None:
             # if not specified, assume it might not have just ones
             all_ones_mask = False
         if all_ones_mask:
             causal_mask = None
+        elif causal_mask is not None:
+            causal_mask = causal_mask[:, :, :, :tot_seq_len]
 
         position_ids = position_ids.contiguous()
-
-        # create position embeddings to be shared across the decoder layers
-        cos, sin = self.rotary_emb(hidden_states, position_ids)
-        position_embeddings = cos, sin
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -322,11 +325,10 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         next_decoder_cache = None
 
         # determine if we can use the decoder stack
-        bsz, q_len, _ = hidden_states.size()
-        dispatchable_dtype = (hidden_states.dtype == torch.float16) or (
-            hidden_states.dtype == torch.bfloat16
+        dispatchable_dtype = (self.mdtype == torch.float16) or (
+            self.mdtype == torch.bfloat16
         )
-        dispatchable_input = (bsz == 1) and (q_len == 1) and dispatchable_dtype
+        dispatchable_input = (batch_size == 1) and (q_len == 1) and dispatchable_dtype
         grad_checkpointing = self.gradient_checkpointing and self.training
         mui_cache = isinstance(past_key_values, MuiCache)
         no_outputs = (not output_hidden_states) and (not output_attentions)
@@ -342,15 +344,23 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
             hidden_states = _MuiParallelDecoderStack.apply(
                 self.cpp_module,
                 past_key_values.cpp_module,
-                hidden_states,
+                input_ids,
+                inputs_embeds,
                 causal_mask,
                 position_ids,
-                position_embeddings,
                 cache_position,
             )
 
             next_decoder_cache = past_key_values
         else:
+            if inputs_embeds is None:
+                inputs_embeds = self.embed_tokens(input_ids)
+            hidden_states = inputs_embeds
+
+            # create position embeddings to be shared across the decoder layers
+            cos, sin = self.rotary_emb(hidden_states, position_ids)
+            position_embeddings = cos, sin
+
             for decoder_layer in self.layers:
                 if output_hidden_states:
                     all_hidden_states += (hidden_states,)
@@ -423,7 +433,7 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
     def _update_causal_mask(
         self,
         attention_mask: torch.Tensor,
-        input_tensor: torch.Tensor,
+        inputs_shape: torch.Size,
         cache_position: torch.Tensor,
         past_key_values: Cache,
         use_cache: bool,
@@ -437,9 +447,7 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
         if self.config._attn_implementation == "flash_attention_2":
             if attention_mask is not None and use_cache:
-                is_padding_right = (
-                    attention_mask[:, -1].sum().item() != input_tensor.size()[0]
-                )
+                is_padding_right = attention_mask[:, -1].sum().item() != inputs_shape[0]
                 if is_padding_right:
                     raise ValueError(
                         "You are attempting to perform batched generation with padding_side='right'"
@@ -455,18 +463,23 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
         # to infer the attention mask.
 
         # cache_position must be valid here no matter which cache we use
-        past_seen_tokens = cache_position[0] if past_key_values is not None else 0
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
         using_static_cache = isinstance(past_key_values, StaticCache)
         using_sliding_window_cache = isinstance(past_key_values, SlidingWindowCache)
 
+        # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
+        # the eager implementation needs a 4d attention mask that we need to prepare
         if (
             self.config._attn_implementation == "sdpa"
-            and not (using_static_cache or using_sliding_window_cache)
+            # and not using_static_cache  # using static cache doesn't matter for muiLLM
+            and not using_sliding_window_cache
             and not output_attentions
         ):
             if _ignore_causal_mask_sdpa(
                 attention_mask,
-                inputs_embeds=input_tensor,
+                inputs_shape=inputs_shape,
                 past_key_values_length=past_seen_tokens,
                 sliding_window=self.config.sliding_window,
                 is_training=self.training,
@@ -474,8 +487,8 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
             ):
                 return None
 
-        dtype, device = input_tensor.dtype, input_tensor.device
-        sequence_length = input_tensor.shape[1]
+        dtype = self.mdtype
+        sequence_length = inputs_shape[1]
         # SlidingWindowCache
         if using_sliding_window_cache:
             target_length = max(sequence_length, self.config.sliding_window)
@@ -499,7 +512,7 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
             target_length=target_length,
             dtype=dtype,
             cache_position=cache_position,
-            batch_size=input_tensor.shape[0],
+            batch_size=inputs_shape[0],
             config=self.config,
             past_key_values=past_key_values,
         )
@@ -804,25 +817,39 @@ class MuiMistralForCausalLM(MistralPreTrainedModel, MuiGenerationMixin):
         position_ids=None,
         use_cache=True,
         num_logits_to_keep=None,
+        next_tokens=None,
+        prev_position_ids=None,
         **kwargs
     ):
         # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
         # Exception 1: when passing input_embeds, input_ids may be missing entries
         # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
         if past_key_values is not None:
-            if inputs_embeds is not None:  # Exception 1
+            if next_tokens is not None:
+                # previously computed next tokens are the tokens to process now
+                # next_tokens has shape [batch_size], but we need [batch_size, 1]
+                input_ids = next_tokens.unsqueeze(1)
+            elif inputs_embeds is not None:  # Exception 1
                 input_ids = input_ids[:, -cache_position.shape[0] :]
             elif (
                 input_ids.shape[1] != cache_position.shape[0]
             ):  # Default case (the "else", a no op, is Exception 2)
                 input_ids = input_ids[:, cache_position]
 
-        if attention_mask is not None and position_ids is None:
-            # create position_ids on the fly for batch generation
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
+        if (attention_mask is not None) and (position_ids is None):
+            if prev_position_ids is None:
+                # No previous position_ids, so we create them from the attention mask
+                position_ids = attention_mask.long().cumsum(-1) - 1
+                position_ids.masked_fill_(attention_mask == 0, 1)
+            else:
+                # just increment the previous position ids
+                position_ids = prev_position_ids + 1
+
             if past_key_values:
-                position_ids = position_ids[:, -input_ids.shape[1] :]
+                if position_ids.shape[1] != input_ids.shape[1]:
+                    # if we are doing the first decode, prev_position_ids
+                    # contain several tokens but need a single one
+                    position_ids = position_ids[:, -input_ids.shape[1] :]
 
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and cache_position[0] == 0:
@@ -844,10 +871,5 @@ class MuiMistralForCausalLM(MistralPreTrainedModel, MuiGenerationMixin):
                 "attention_mask": attention_mask,
             }
         )
-
-        if self.all_ones_mask is not None:
-            # was set externally, add it to the model inputs to avoid
-            # calls to torch.all in _prepare_4d_causal_attention_mask_for_sdpa
-            model_inputs["all_ones_mask"] = self.all_ones_mask
 
         return model_inputs

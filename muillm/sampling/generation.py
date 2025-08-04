@@ -27,7 +27,46 @@ from muillm.sampling.multinomial import muillm_multinomial_sample_one_no_sync
 
 
 from transformers.generation import GenerationMixin
+from transformers.generation.stopping_criteria import (
+    EosTokenCriteria,
+    MaxLengthCriteria,
+)
+
 from transformers.cache_utils import Cache
+
+
+import muillm_ext
+
+
+class _MuiAddTokensCheckFinished(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        input_ids: torch.LongTensor,  # shape [batch_size, sequence_length]
+        next_tokens: torch.LongTensor,  # shape [batch_size]
+        unfinished_sequences: torch.LongTensor,  # shape [batch_size]
+        has_eos_stopping_criteria: bool,
+        pad_token_id: int,
+        eos_token_id: int,
+        has_max_length_stopping_criteria: bool,
+        max_length: Optional[int],
+    ) -> Tuple[torch.BoolTensor, torch.LongTensor]:
+        output = muillm_ext.muillm_add_tokens_check_finished(
+            input_ids,
+            next_tokens,
+            unfinished_sequences,
+            has_eos_stopping_criteria,
+            pad_token_id,
+            eos_token_id,
+            has_max_length_stopping_criteria,
+            max_length if has_max_length_stopping_criteria else -1,
+        )
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("AddTokensCheckFinished backward is not implemented")
 
 
 class MuiGenerationMixin(MuiModule, GenerationMixin):
@@ -86,14 +125,31 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
 
         # init values
         pad_token_id = generation_config._pad_token_tensor
+        eos_token_id = generation_config._eos_token_tensor
+
+        pad_token_id_int = pad_token_id.item() if pad_token_id is not None else -1
+
         output_attentions = generation_config.output_attentions
         output_hidden_states = generation_config.output_hidden_states
         output_scores = generation_config.output_scores
         output_logits = generation_config.output_logits
         return_dict_in_generate = generation_config.return_dict_in_generate
+
+        has_unsupported_stopping_criteria = any(
+            not isinstance(criteria, (EosTokenCriteria, MaxLengthCriteria))
+            for criteria in stopping_criteria
+        )
+
         has_eos_stopping_criteria = any(
             hasattr(criteria, "eos_token_id") for criteria in stopping_criteria
         )
+
+        has_max_length_stopping_criteria = any(
+            hasattr(criteria, "max_length") for criteria in stopping_criteria
+        )
+
+        dispatchable_stopping_criteria = not has_unsupported_stopping_criteria
+
         do_sample = generation_config.do_sample
 
         # init attention / hidden states / scores tuples
@@ -175,14 +231,24 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
         # Force a CPU GPU sync
         torch.cuda.synchronize()
 
+        # we leverage it to avoid some computations when preparing inputs
+        prev_position_ids = None
+
         # we will keep around the next token tensors and move them to CPU when needed
+        # we also leverage next_tokens to avoid some computations when preparing inputs
+        next_tokens = None
         all_next_tokens = [] if streamer is not None else None
 
         # All peers are syncrhonized by broadcasting the tokens, so they all finish at the same
         # time
         while not this_peer_finished:
             # prepare model inputs
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            model_inputs = self.prepare_inputs_for_generation(
+                input_ids,
+                next_tokens=next_tokens,
+                prev_position_ids=prev_position_ids,
+                **model_kwargs,
+            )
 
             if not checked_mask_content:
                 checked_mask_content = True
@@ -192,6 +258,13 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
                     # used to avoid some checks when updating masks later on
                     # as we generate we just add more ones, so the flag won't change
                     self.all_ones_mask = torch.all(attention_mask == 1).item()
+                else:
+                    # No attention mask mean all ones as well
+                    self.all_ones_mask = True
+
+            if self.all_ones_mask is not None:
+                # Add the all_ones_mask as input
+                model_inputs["all_ones_mask"] = self.all_ones_mask
 
             # prepare variable output controls (note: some models won't accept all output controls)
             model_inputs.update(
@@ -202,6 +275,9 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
                 if output_hidden_states
                 else {}
             )
+
+            # for the next iteration
+            prev_position_ids = model_inputs.get("position_ids", None)
 
             if is_prefill:
                 outputs = self(**model_inputs, return_dict=True)
@@ -262,18 +338,35 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
             if tensor_parallelism > 1:
                 next_tokens = comms.broadcast(next_tokens, src=0)
 
-            # finished sentences should have their next token be a padding token
-            if has_eos_stopping_criteria:
-                next_tokens = next_tokens * unfinished_sequences + pad_token_id * (
-                    1 - unfinished_sequences
+            # next_tokens is a long tensor of shape [batch_size]
+            # stopping_criteria is typically [EosTokenCriteria, MaxLengthCriteria]
+            # unfinished_sequences is a long tensor of shape [batch_size]
+
+            if dispatchable_stopping_criteria:
+                # call the custom kernel for stopping criteria
+                input_ids, unfinished_sequences = _MuiAddTokensCheckFinished.apply(
+                    input_ids,
+                    next_tokens,
+                    unfinished_sequences,
+                    has_eos_stopping_criteria,
+                    pad_token_id_int,
+                    eos_token_id,
+                    has_max_length_stopping_criteria,
+                    max_length,
                 )
+            else:
+                # finished sentences should have their next token be a padding token
+                if has_eos_stopping_criteria:
+                    next_tokens = next_tokens * unfinished_sequences + pad_token_id * (
+                        1 - unfinished_sequences
+                    )
 
-            # update generated ids, model inputs, and length for next step
-            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
+                # update generated ids, model inputs, and length for next step
+                input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
 
-            unfinished_sequences = unfinished_sequences & ~stopping_criteria(
-                input_ids, scores
-            )
+                unfinished_sequences = unfinished_sequences & ~stopping_criteria(
+                    input_ids, scores
+                )
 
             if max_remaining_generate is not None:
                 max_remaining_generate = max_remaining_generate - 1

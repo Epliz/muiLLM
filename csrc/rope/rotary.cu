@@ -35,6 +35,109 @@ static inline T* __device__ addr(T* p, unsigned index) {
 }
 
 
+void muillm_compute_rotary_embed_positions_fp16(
+  hipStream_t stream,
+  unsigned B,
+  unsigned T,
+  unsigned E,
+  const uint64_t* position_ids,
+  const half* cos_cached,
+  const half* sin_cached,
+  half* embeds_cos,
+  half* embeds_sin
+);
+
+void muillm_compute_rotary_embed_positions_bf16(
+  hipStream_t stream,
+  unsigned B,
+  unsigned T,
+  unsigned E,
+  const uint64_t* position_ids,
+  const __hip_bfloat16* cos_cached,
+  const __hip_bfloat16* sin_cached,
+  __hip_bfloat16* embeds_cos,
+  __hip_bfloat16* embeds_sin
+);
+
+std::tuple<at::Tensor, at::Tensor> muillm_compute_rotary_embed_positions(
+    torch::Tensor& x,
+    torch::Tensor& position_ids, // shape [batch_size, seq_len]
+    torch::Tensor& cos_cached,
+    torch::Tensor& sin_cached
+) {
+  CHECK_INPUT(x);
+  CHECK_INPUT(position_ids);
+  CHECK_INPUT(cos_cached);
+  CHECK_INPUT(sin_cached);
+
+  auto device = x.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  // check that position_ids is 2D
+  if (position_ids.dim() != 2) {
+    TORCH_CHECK(false, "position_ids must be a 2D tensor");
+  }
+  // check that cos_cached and sin_cached are 2D tensors
+  if (cos_cached.dim() != 2 || sin_cached.dim() != 2) {
+    TORCH_CHECK(false, "cos_cached and sin_cached must be 2D tensors");
+  }
+
+  unsigned B = position_ids.size(0);
+  unsigned T = position_ids.size(1);
+  unsigned E = cos_cached.size(1);
+
+  auto dtype = x.dtype();
+
+  // check that cos_cached and sin_cached have the same dtype as x
+  if (cos_cached.dtype() != dtype || sin_cached.dtype() != dtype) {
+    TORCH_CHECK(false, "cos_cached and sin_cached must have the same dtype as x");
+  }
+
+  auto output_options = at::TensorOptions()
+                            .dtype(dtype)
+                            .layout(at::kStrided)
+                            .device(device) // same output device as inputs
+                            .requires_grad(false);
+
+  // check the dtype of position_ids
+  if (position_ids.dtype() != torch::kLong) {
+    TORCH_CHECK(false, "position_ids must be of type Long");
+  }
+
+  auto embed_cos = torch::empty({B, T, E}, output_options);
+  auto embed_sin = torch::empty({B, T, E}, output_options);
+
+  if (dtype == torch::kFloat16) {
+    muillm_compute_rotary_embed_positions_fp16(
+      stream,
+      B,
+      T,
+      E,
+      (const uint64_t*)position_ids.data_ptr(),
+      (const half*)cos_cached.data_ptr(),
+      (const half*)sin_cached.data_ptr(),
+      (half*)embed_cos.data_ptr(),
+      (half*)embed_sin.data_ptr()
+    );
+  } else if (dtype == torch::kBFloat16) {
+    muillm_compute_rotary_embed_positions_bf16(
+      stream,
+      B,
+      T,
+      E,
+      (const uint64_t*)position_ids.data_ptr(),
+      (const __hip_bfloat16*)cos_cached.data_ptr(),
+      (const __hip_bfloat16*)sin_cached.data_ptr(),
+      (__hip_bfloat16*)embed_cos.data_ptr(),
+      (__hip_bfloat16*)embed_sin.data_ptr()
+    );
+  } else {
+    TORCH_CHECK(false, "Unsupported dtype");
+  }
+
+  return std::make_tuple(cos_cached, sin_cached);
+}
+
 void muillm_apply_rope_forward_fp16_no_cache(
   hipStream_t stream,
   unsigned B,
@@ -101,6 +204,12 @@ std::tuple<at::Tensor, at::Tensor> muillm_rope_forward_no_cache(
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   auto dtype = q_in.dtype();
+
+  // check that the dtype of cos_cached and sin_cached matches q_in
+  if (cos_cached.dtype() != dtype || sin_cached.dtype() != dtype) {
+    TORCH_CHECK(false, "cos_cached and sin_cached must have the same dtype as q_in and k_in");
+  }
+
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)

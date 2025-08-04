@@ -186,7 +186,8 @@ class MuiRotaryEmbedding(MuiModule):
         self.output_complex = output_complex
         self.layer_idx = layer_idx
 
-        dtype = dtype if dtype is not None else torch.get_default_dtype()
+        # default to use use float32 for cos/sin caches
+        dtype = dtype if dtype is not None else torch.float32
 
         if config is not None:
             if isinstance(config, LlamaConfig) or isinstance(config, MistralConfig):

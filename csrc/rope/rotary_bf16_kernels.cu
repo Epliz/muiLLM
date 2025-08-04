@@ -28,6 +28,72 @@ static inline __device__ __hip_bfloat162 __muillm_make_bfloat162(
   // make a __hip_bfloat162 from two __hip_bfloat16 values
   return __hip_bfloat162(a, b);
 }
+
+void __global__ compute_rotary_position_embeddings_bf16_kernel(
+  // inputs
+  const uint64_t* position_ids, // shape [B, T]
+  const __hip_bfloat16* cos_cached, // shape [S, E]
+  const __hip_bfloat16* sin_cached, // shape [S, E]
+  //outputs
+  __hip_bfloat16* embeds_cos, // shape [B, T, E]
+  __hip_bfloat16* embeds_sin, // shape [B, T, E]
+  // tensor dimension sizes
+  unsigned B,
+  unsigned T,
+  unsigned E
+) {
+
+  unsigned batch_idx = blockIdx.y;
+  unsigned tok_idx = blockIdx.x;
+  unsigned pos_idx = batch_idx * T + tok_idx;
+
+  unsigned position_id = position_ids[pos_idx];
+
+  // realign the cos/sin caches to the position
+  cos_cached = &cos_cached[position_id * E];
+  sin_cached = &sin_cached[position_id * E];
+
+  // compute the embeddings
+  embeds_cos = &embeds_cos[pos_idx * E];
+  embeds_sin = &embeds_sin[pos_idx * E];
+
+  // copy the cos/sin cached values to the output
+  for (unsigned d = threadIdx.x; d < E; d += THREADS_PER_BLOCK) {
+    *addr(embeds_cos, d) = *addr(cos_cached, d);
+    *addr(embeds_sin, d) = *addr(sin_cached, d);
+  }
+}
+
+void muillm_compute_rotary_embed_positions_bf16(
+  hipStream_t stream,
+  unsigned B,
+  unsigned T,
+  unsigned E,
+  const uint64_t* position_ids,
+  const __hip_bfloat16* cos_cached,
+  const __hip_bfloat16* sin_cached,
+  __hip_bfloat16* embeds_cos,
+  __hip_bfloat16* embeds_sin
+) {
+
+  const unsigned threads_per_block = THREADS_PER_BLOCK;
+  // TODO: grid size cannot be bigger than 65535, so we would need to make a persistent kernel
+  // if above
+  const dim3 num_blocks = dim3(T, B);
+
+  compute_rotary_position_embeddings_bf16_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+    (const uint64_t*)position_ids,
+    (const __hip_bfloat16*)cos_cached,
+    (const __hip_bfloat16*)sin_cached,
+    (__hip_bfloat16*)embeds_cos,
+    (__hip_bfloat16*)embeds_sin,
+    // tensor dimension sizes
+    B,
+    T,
+    E
+  );
+}
+
 // TODOs:
 // 1) check layouts
 // 2) optimize array addressing in loops

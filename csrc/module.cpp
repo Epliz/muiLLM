@@ -82,6 +82,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
 
 #include "attention/causal_transformer_decoding.cuh"
 
+#include "generation/generation.cuh"
 #include "sync.h"
 
 // needed because Pybind11 can't seem to be able to deal with opaque pointers
@@ -148,6 +149,7 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "comm_torch.h"
 
 #include "modules/linear_module.h"
+#include "modules/embedding_module.h"
 
 #include "parallel_linear_kernels.cuh"
 #include "parallel_gateupmoe_kernels.cuh"
@@ -249,6 +251,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_rmsnorm_forward", &muillm_rmsnorm_forward, "muillm rmsnorm forward");
   m.def("muillm_reduce_sum_forward", &muillm_reduce_sum_forward, "muillm reduce sum forward");
   m.def("muillm_topk_sigmoid_forward", &muillm_topk_sigmoid_forward, "muillm topk sigmoid forward");
+
+  // temperature tuning
+  m.def("muillm_apply_temperature_tuning", &muillm_apply_temperature_tuning, "muillm apply temperature tuning",
+        py::arg("query_states"), py::arg("cache_position"), py::arg("attn_scale"), py::arg("floor_scale"));
+
+  // generation
+  m.def("muillm_add_tokens_check_finished", &muillm_add_tokens_check_finished, "muillm add tokens check finished",
+        py::arg("input_ids"), py::arg("next_tokens"), py::arg("unfinished_sequences"),
+        py::arg("has_eos_stopping_criteria"), py::arg("pad_token_id"), py::arg("eos_token_id"),
+        py::arg("has_max_length_stopping_criteria"), py::arg("max_length"));
+
   // rotary
   m.def("muillm_rope_forward_no_cache", &muillm_rope_forward_no_cache, "muillm rotary forward no cache");
   m.def("muillm_rope_forward_dynamic_cache", &muillm_rope_forward_dynamic_cache, "muillm rotary forward dynamic cache");
@@ -297,6 +310,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_module_init", &muillm_linear_module_init_trampoline, "muillm linear module init", py::arg("engine"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_linear_module_deinit", &muillm_linear_module_deinit_trampoline, "muillm linear module deinit", py::arg("module"));
   m.def("muillm_linear_module_forward", &muillm_linear_module_forward_trampoline, "muillm linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none());
+
+  // embedding
+  pybind11::class_<muillm_embedding_module_ptr_t> cl_embedding_module(m, "muillm_embedding_module_ptr");
+  cl_embedding_module.def(pybind11::init<>());
+
+  m.def("muillm_embedding_module_init", &muillm_embedding_module_init_trampoline, "muillm embedding module init", py::arg("engine"), py::arg("weights"));
+  m.def("muillm_embedding_module_deinit", &muillm_embedding_module_deinit_trampoline, "muillm embedding module deinit", py::arg("module"));
+  m.def("muillm_embedding_module_forward", &muillm_embedding_module_forward_trampoline, "muillm embedding module forward", py::arg("module"), py::arg("inputs"));
 
 
   // parallel linear
@@ -359,10 +380,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_rotary_embedding_module_deinit", &muillm_rotary_embedding_module_deinit_trampoline, "muillm rotary embedding module deinit", py::arg("module"));
   m.def("muillm_rotary_embedding_module_forward", &muillm_rotary_embedding_module_forward_trampoline, "muillm rotary embedding module forward", py::arg("module"), py::arg("cache"), py::arg("q_in"), py::arg("k_in"), py::arg("v_in"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
 
-  // temperature tuning
-  m.def("muillm_apply_temperature_tuning", &muillm_apply_temperature_tuning, "muillm apply temperature tuning",
-        py::arg("query_states"), py::arg("cache_position"), py::arg("attn_scale"), py::arg("floor_scale"));
-
   // parallel attention
   pybind11::class_<muillm_parallel_attention_module_ptr_t> cl_parallel_attention_module(m, "muillm_parallel_attention_module_ptr");
   cl_parallel_attention_module.def(pybind11::init<>());
@@ -401,9 +418,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<muillm_parallel_decoder_stack_ptr_t> cl_parallel_decoder_stack(m, "muillm_parallel_decoder_stack_ptr");
   cl_parallel_decoder_stack.def(pybind11::init<>());
 
-  m.def("muillm_parallel_decoder_stack_init", &muillm_parallel_decoder_stack_init_trampoline, "muillm parallel decoder stack init", py::arg("engine"), py::arg("comm"), py::arg("decoders"));
+  m.def("muillm_parallel_decoder_stack_init", &muillm_parallel_decoder_stack_init_trampoline, "muillm parallel decoder stack init", py::arg("engine"), py::arg("comm"), py::arg("embed_tokens_module"), py::arg("rotary_emb_module"), py::arg("decoders"));
   m.def("muillm_parallel_decoder_stack_deinit", &muillm_parallel_decoder_stack_deinit_trampoline, "muillm parallel decoder stack deinit", py::arg("module"));
-  m.def("muillm_parallel_decoder_stack_forward", &muillm_parallel_decoder_stack_forward_trampoline, "muillm parallel decoder stack forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("m"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+  m.def("muillm_parallel_decoder_stack_forward", &muillm_parallel_decoder_stack_forward_trampoline, "muillm parallel decoder stack forward", py::arg("module"), py::arg("cache"), py::arg("input_ids"), py::arg("input_embeds"), py::arg("m"), py::arg("position_ids"), py::arg("cache_positions"));
 
   // parallel llama4 decoder stack
   pybind11::class_<muillm_parallel_llama4_decoder_stack_ptr_t> cl_parallel_llama4_decoder_stack(m, "muillm_parallel_llama4_decoder_stack_ptr");

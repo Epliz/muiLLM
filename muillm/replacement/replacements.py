@@ -4,6 +4,7 @@ from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
 from muillm.modules.decoder.parallelllama4decoder import (
     MuiParallelLlama4TextDecoderLayer,
 )
+from muillm.modules.embedding import MuiEmbedding
 from muillm.modules.norm.l2norm import MuiL2Norm
 from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
 from muillm.modules.models.llama4.model import (
@@ -63,6 +64,8 @@ from muillm.replacement.replacementcontext import (
 
 
 _LAYER_REPLACEMENTS = {
+    # Embeddings
+    nn.Embedding: MuiEmbedding,
     # Linear
     nn.Linear: MuiLinear,
     # MLPs
@@ -96,6 +99,8 @@ _LAYER_REPLACEMENTS = {
 }
 
 _TP_LAYER_REPLACEMENTS = {
+    # Embeddings
+    nn.Embedding: MuiEmbedding,
     # Linear
     MuiMultiLinear: MuiParallelMultiLinear,
     nn.Linear: MuiParallelLinear,

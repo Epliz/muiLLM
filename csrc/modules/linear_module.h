@@ -2,7 +2,6 @@
 #define __MUILLM_LINEAR_MODULE_H__
 
 #include "../engine.h"
-#include "../comm_torch.h"
 
 #include <optional>
 

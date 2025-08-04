@@ -6,6 +6,8 @@
 
 #include "parallel_decoder_module.h"
 #include "kvcache.h"
+#include "embedding_module.h"
+#include "rotary_module.h"
 
 #include <vector>
 #include <optional>
@@ -15,12 +17,16 @@ struct MuiLLMParallelDecoderStack: torch::nn::Module {
   muillm_engine_t* engine;
   muillm_comm_t* comm;
 
+  MuiLLMEmbedding* embed_tokens;
+  MuillmRotaryEmbedding* rotary_embedding;
   std::vector<MuiLLMParallelDecoder*> decoders;
 
   // methods
   MuiLLMParallelDecoderStack(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
+    MuiLLMEmbedding* embed_tokens,
+    MuillmRotaryEmbedding* rotary_embedding,
     std::vector<MuiLLMParallelDecoder*>& decoders
   );
 
@@ -28,10 +34,10 @@ struct MuiLLMParallelDecoderStack: torch::nn::Module {
 
   torch::Tensor forward(
     MuillmKVCache* cache,
-    torch::Tensor& h,
+    torch::Tensor& input_ids,
+    torch::Tensor& input_embeds,
     torch::Tensor& m,
     torch::Tensor& position_ids,
-    std::optional<std::tuple<torch::Tensor, torch::Tensor>>& cos_sin,
     torch::Tensor& cache_positions
   );
 };
@@ -44,6 +50,8 @@ typedef struct muillm_parallel_decoder_stack_ptr {
 muillm_parallel_decoder_stack_ptr_t muillm_parallel_decoder_stack_init_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
+  muillm_embedding_module_ptr_t& embed_tokens,
+  muillm_rotary_embedding_module_ptr_t& rotary_embedding_module,
   std::vector<muillm_parallel_decoder_module_ptr_t>& decoders
 );
 
@@ -54,10 +62,10 @@ void muillm_parallel_decoder_stack_deinit_trampoline(
 torch::Tensor muillm_parallel_decoder_stack_forward_trampoline(
   muillm_parallel_decoder_stack_ptr_t module_ptr,
   muillm_kvcache_module_ptr_t cache_ptr,
-  torch::Tensor& h,
+  torch::Tensor& input_ids,
+  std::optional<torch::Tensor>& input_embeds,
   std::optional<torch::Tensor>& m,
   torch::Tensor& position_ids,
-  std::optional<std::tuple<torch::Tensor, torch::Tensor>>& cos_sin,
   torch::Tensor& cache_positions
 );
 
