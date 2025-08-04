@@ -54,7 +54,7 @@ The numbers are changing at every commit, try it out by yourself!
 
 But if you can't, here are approximate performance numbers on a small prompt, generating 256 tokens:
 * Llama 3 8B, fp16 on 1x MI300x: 210 tokens/s/user
-* Llama 3 8B, fp16 on 4x MI300x: 350 tokens/s/user
+* Llama 3 8B, fp16 on 4x MI300x: 410 tokens/s/user
 * Llama 4 Scout, bf16 on 4x MI300x: 190 tokens/s/user
 
 TODO: MI100 results, comparison to Nvidia TensorRT, HuggingFace stock + compiled stock performance
