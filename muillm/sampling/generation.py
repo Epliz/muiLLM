@@ -35,7 +35,11 @@ from transformers.generation.stopping_criteria import (
 from transformers.cache_utils import Cache
 
 
+from transformers.generation.logits_process import TopKLogitsWarper
+
 import muillm_ext
+
+from torch.autograd.profiler import record_function
 
 
 class _MuiAddTokensCheckFinished(torch.autograd.Function):
@@ -239,6 +243,11 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
         next_tokens = None
         all_next_tokens = [] if streamer is not None else None
 
+        print(f"logits_processor: {logits_processor}")
+        for processor in logits_processor:
+            if isinstance(processor, TopKLogitsWarper):
+                print(f"TopKLogitsWarper top_k: {processor.top_k}")
+
         # All peers are syncrhonized by broadcasting the tokens, so they all finish at the same
         # time
         while not this_peer_finished:
@@ -301,38 +310,41 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
                 copy=True, dtype=torch.float32, device=input_ids.device
             )
 
-            # pre-process distribution
-            next_token_scores = logits_processor(input_ids, next_token_logits)
+            with record_function("sample"):
+                # pre-process distribution
+                next_token_scores = logits_processor(input_ids, next_token_logits)
 
-            # Store scores, attentions and hidden_states when required
-            if return_dict_in_generate:
-                if output_scores:
-                    scores += (next_token_scores,)
-                if output_logits:
-                    raw_logits += (next_token_logits,)
-                if output_attentions:
-                    decoder_attentions += (
-                        (outputs.decoder_attentions,)
-                        if self.config.is_encoder_decoder
-                        else (outputs.attentions,)
+                # Store scores, attentions and hidden_states when required
+                if return_dict_in_generate:
+                    if output_scores:
+                        scores += (next_token_scores,)
+                    if output_logits:
+                        raw_logits += (next_token_logits,)
+                    if output_attentions:
+                        decoder_attentions += (
+                            (outputs.decoder_attentions,)
+                            if self.config.is_encoder_decoder
+                            else (outputs.attentions,)
+                        )
+                        if self.config.is_encoder_decoder:
+                            cross_attentions += (outputs.cross_attentions,)
+
+                    if output_hidden_states:
+                        decoder_hidden_states += (
+                            (outputs.decoder_hidden_states,)
+                            if self.config.is_encoder_decoder
+                            else (outputs.hidden_states,)
+                        )
+
+                # token selection
+                if do_sample:
+                    probs = nn.functional.softmax(next_token_scores, dim=-1)
+                    # avoid GPU sync
+                    next_tokens = muillm_multinomial_sample_one_no_sync(probs).squeeze(
+                        1
                     )
-                    if self.config.is_encoder_decoder:
-                        cross_attentions += (outputs.cross_attentions,)
-
-                if output_hidden_states:
-                    decoder_hidden_states += (
-                        (outputs.decoder_hidden_states,)
-                        if self.config.is_encoder_decoder
-                        else (outputs.hidden_states,)
-                    )
-
-            # token selection
-            if do_sample:
-                probs = nn.functional.softmax(next_token_scores, dim=-1)
-                # avoid GPU sync
-                next_tokens = muillm_multinomial_sample_one_no_sync(probs).squeeze(1)
-            else:
-                next_tokens = torch.argmax(next_token_scores, dim=-1)
+                else:
+                    next_tokens = torch.argmax(next_token_scores, dim=-1)
 
             # broadcast the next_tokens from the rank 0 if we are using tensor parallelism
             if tensor_parallelism > 1:
