@@ -146,7 +146,7 @@ at::Tensor muillm_to_cpu_trampoline(
   return muillm_to_cpu(sync.sync_ptr, tensor);
 }
 
-#include "comm_torch.h"
+#include "comms/comm_torch.h"
 
 #include "modules/linear_module.h"
 #include "modules/embedding_module.h"

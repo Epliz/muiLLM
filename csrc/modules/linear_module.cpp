@@ -2,7 +2,7 @@
 
 #include "../linear/linear.cuh"
 #include "../norm/rmsnorm.cuh"
-#include "../comm_torch.h"
+#include "../comms/comm_torch.h"
 
 //
 // actual module

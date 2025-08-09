@@ -4,7 +4,7 @@
 #include "parallel_gateup_module_interface.h"
 
 #include "../engine.h"
-#include "../comm_torch.h"
+#include "../comms/comm_torch.h"
 
 #include "linear_module.h"
 
