@@ -21,18 +21,18 @@ import muillm_ext
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
-class _MuiGateUpSiLUMethod(Enum):
+class _MuiGateUpMLPMethod(Enum):
     # Basic method where Gate/Up projections + mul are done distinctly
-    GATEUPSILU_UNFUSED = 0
+    GATEUPMLP_UNFUSED = 0
     # Method where the Gate/Up projections + mul are all fused
-    GATEUPSILU_FUSED = 1
+    GATEUPMLP_FUSED = 1
     # Method where the Gate/Up projections are done in the same kernel
     # but split between blocks to have more blocks.
     # A final reduction is done in an epilogue kernel
-    GATEUPSILU_SPLIT = 2
+    GATEUPMLP_SPLIT = 2
 
 
-class _MuiGateUpSiLU(torch.autograd.Function):
+class _MuiGateUpMLP(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -45,7 +45,7 @@ class _MuiGateUpSiLU(torch.autograd.Function):
         down_weights,
         residual,
     ):
-        output = muillm_ext.muillm_gateupsilu_forward(
+        output = muillm_ext.muillm_gateupmlp_forward(
             engine,
             norm_weights,
             variance_epsilon,
@@ -69,10 +69,10 @@ class _MuiGateUpSiLU(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        raise NotImplementedError("GateUpSiLU backward is not implemented")
+        raise NotImplementedError("GateUpMLP backward is not implemented")
 
 
-class _MuiGateUpSiLUSplit(torch.autograd.Function):
+class _MuiGateUpMLPSplit(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -85,7 +85,7 @@ class _MuiGateUpSiLUSplit(torch.autograd.Function):
         down_weights,
         residual,
     ):
-        output = muillm_ext.muillm_gateupsilu_split_forward(
+        output = muillm_ext.muillm_gateupmlp_split_forward(
             engine,
             norm_weights,
             variance_epsilon,
@@ -109,7 +109,7 @@ class _MuiGateUpSiLUSplit(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        raise NotImplementedError("GateUpSiLU split K backward is not implemented")
+        raise NotImplementedError("GateUpMLP split K backward is not implemented")
 
 
 class MuiGateUpDownMLP(MuiModule):
@@ -168,7 +168,7 @@ class MuiGateUpDownMLP(MuiModule):
         self._check_dispatchable()
 
         # TODO: improve method selection
-        self.method = _MuiGateUpSiLUMethod.GATEUPSILU_FUSED
+        self.method = _MuiGateUpMLPMethod.GATEUPMLP_FUSED
 
     def _check_dispatchable(self):
         wdtype = self.gate_proj.weight.dtype
@@ -368,7 +368,7 @@ class MuiGateUpDownMLP(MuiModule):
             if isinstance(self.gate_proj, MuiLinear) and isinstance(
                 self.up_proj, MuiLinear
             ):
-                return _MuiGateUpSiLU.apply(
+                return _MuiGateUpMLP.apply(
                     self.cpp_engine,
                     input,
                     self.norm_weights,
@@ -397,7 +397,7 @@ class MuiGateUpDownMLP(MuiModule):
 
                 # as we shard gate/up by rows, we don't need to shard the input and we
                 # still can use the fused RMSNorm
-                return _MuiGateUpSiLUSplit.apply(
+                return _MuiGateUpMLPSplit.apply(
                     self.cpp_engine,
                     input,
                     self.norm_weights,
@@ -412,11 +412,11 @@ class MuiGateUpDownMLP(MuiModule):
         return self._forward_unfused(input=input, residual=residual)
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
-        if self.method == _MuiGateUpSiLUMethod.GATEUPSILU_FUSED:
+        if self.method == _MuiGateUpMLPMethod.GATEUPMLP_FUSED:
             return self._forward_fused(input=input, residual=residual)
-        elif self.method == _MuiGateUpSiLUMethod.GATEUPSILU_UNFUSED:
+        elif self.method == _MuiGateUpMLPMethod.GATEUPMLP_UNFUSED:
             return self._forward_unfused(input=input, residual=residual)
-        elif self.method == _MuiGateUpSiLUMethod.GATEUPSILU_SPLIT:
+        elif self.method == _MuiGateUpMLPMethod.GATEUPMLP_SPLIT:
             return self._forward_split(input=input, residual=residual)
         else:
             raise ValueError("Unsupported Gate/Up Silu method")

@@ -9,7 +9,7 @@
 
 // Python trampolines
 
-at::Tensor muillm_gateupsilumoe_forward_trampoline(
+at::Tensor muillm_gateupmlpmoe_forward_trampoline(
   muillm_engine_ptr engine,
   int num_shared_experts,
   int num_dynamic_experts,
@@ -25,7 +25,7 @@ at::Tensor muillm_gateupsilumoe_forward_trampoline(
 ) {
   torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
-  return muillm_gateupsilumoe_forward(
+  return muillm_gateupmlpmoe_forward(
       engine.engine_ptr,
       num_shared_experts,
       num_dynamic_experts,
@@ -41,7 +41,7 @@ at::Tensor muillm_gateupsilumoe_forward_trampoline(
   );
 }
 
-at::Tensor muillm_gateupsilumoe_split_forward_trampoline(
+at::Tensor muillm_gateupmlpmoe_split_forward_trampoline(
   muillm_engine_ptr engine,
   int num_shared_experts,
   int num_dynamic_experts,
@@ -57,7 +57,7 @@ at::Tensor muillm_gateupsilumoe_split_forward_trampoline(
 ) {
   torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
-  return muillm_gateupsilumoe_split_forward(
+  return muillm_gateupmlpmoe_split_forward(
       engine.engine_ptr,
       num_shared_experts,
       num_dynamic_experts,
@@ -78,7 +78,7 @@ at::Tensor muillm_gateupsilumoe_split_forward_trampoline(
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-void muillm_gateupsilumoe_forward_fp16(
+void muillm_gateupmlpmoe_forward_fp16(
   hipStream_t stream,
   unsigned N,
   unsigned K,
@@ -95,7 +95,7 @@ void muillm_gateupsilumoe_forward_fp16(
   int simd_lanes
 );
 
-void muillm_gateupsilumoe_forward_bf16(
+void muillm_gateupmlpmoe_forward_bf16(
   hipStream_t stream,
   unsigned N,
   unsigned K,
@@ -112,7 +112,7 @@ void muillm_gateupsilumoe_forward_bf16(
   int simd_lanes
 );
 
-void muillm_gateupsilumoe_forward_placed_output(
+void muillm_gateupmlpmoe_forward_placed_output(
     muillm_engine_t* engine,
     int num_shared_experts,
     int num_dynamic_experts,
@@ -160,7 +160,7 @@ void muillm_gateupsilumoe_forward_placed_output(
   int simd_lanes = engine->gpu_infos[0]->simd_lanes;
 
   if (dtype == torch::kFloat16) {
-    muillm_gateupsilumoe_forward_fp16(
+    muillm_gateupmlpmoe_forward_fp16(
         stream,
         N,
         K,
@@ -177,7 +177,7 @@ void muillm_gateupsilumoe_forward_placed_output(
         simd_lanes
     );
   } else if (dtype == torch::kBFloat16) {
-    muillm_gateupsilumoe_forward_bf16(
+    muillm_gateupmlpmoe_forward_bf16(
         stream,
         N,
         K,
@@ -194,7 +194,7 @@ void muillm_gateupsilumoe_forward_placed_output(
         simd_lanes
     );
   } else {
-    TORCH_CHECK(false, "unsupported dtype for muillm_gateupsilumoe_forward_placed_output");
+    TORCH_CHECK(false, "unsupported dtype for muillm_gateupmlpmoe_forward_placed_output");
   }
 
   // down proj
@@ -218,7 +218,7 @@ void muillm_gateupsilumoe_forward_placed_output(
   );
 }
 
-at::Tensor muillm_gateupsilumoe_forward(
+at::Tensor muillm_gateupmlpmoe_forward(
     muillm_engine_t* engine,
     int num_shared_experts,
     int num_dynamic_experts,
@@ -253,7 +253,7 @@ at::Tensor muillm_gateupsilumoe_forward(
 
   void* output_ptr = output.data_ptr();
 
-  muillm_gateupsilumoe_forward_placed_output(
+  muillm_gateupmlpmoe_forward_placed_output(
     engine,
     num_shared_experts,
     num_dynamic_experts,
@@ -271,7 +271,7 @@ at::Tensor muillm_gateupsilumoe_forward(
   return output;
 }
 
-void muillm_gateupsilumoe_split_forward_fp16(
+void muillm_gateupmlpmoe_split_forward_fp16(
   hipStream_t stream,
   unsigned N,
   unsigned K,
@@ -290,7 +290,7 @@ void muillm_gateupsilumoe_split_forward_fp16(
   int simd_lanes
 );
 
-void muillm_gateupsilumoe_split_forward_bf16(
+void muillm_gateupmlpmoe_split_forward_bf16(
   hipStream_t stream,
   unsigned N,
   unsigned K,
@@ -309,7 +309,7 @@ void muillm_gateupsilumoe_split_forward_bf16(
   int simd_lanes
 );
 
-void muillm_gateupsilumoe_split_forward_placed_output(
+void muillm_gateupmlpmoe_split_forward_placed_output(
     muillm_engine_t* engine,
     int num_shared_experts,
     int num_dynamic_experts,
@@ -362,7 +362,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
   int simd_lanes = engine->gpu_infos[0]->simd_lanes;
 
   if (dtype == torch::kFloat16) {
-    muillm_gateupsilumoe_split_forward_fp16(
+    muillm_gateupmlpmoe_split_forward_fp16(
         stream,
         N,
         K,
@@ -381,7 +381,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
         simd_lanes
     );
   } else if (dtype == torch::kBFloat16) {
-    muillm_gateupsilumoe_split_forward_bf16(
+    muillm_gateupmlpmoe_split_forward_bf16(
         stream,
         N,
         K,
@@ -400,7 +400,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
         simd_lanes
     );
   } else {
-    TORCH_CHECK(false, "unsupported dtype for muillm_gateupsilumoe_split_forward_placed_output");
+    TORCH_CHECK(false, "unsupported dtype for muillm_gateupmlpmoe_split_forward_placed_output");
   }
 
   // down proj
@@ -423,7 +423,7 @@ void muillm_gateupsilumoe_split_forward_placed_output(
   );
 }
 
-at::Tensor muillm_gateupsilumoe_split_forward(
+at::Tensor muillm_gateupmlpmoe_split_forward(
     muillm_engine_t* engine,
     int num_shared_experts,
     int num_dynamic_experts,
@@ -459,7 +459,7 @@ at::Tensor muillm_gateupsilumoe_split_forward(
 
   void* output_ptr = output.data_ptr();
   
-  muillm_gateupsilumoe_split_forward_placed_output(
+  muillm_gateupmlpmoe_split_forward_placed_output(
     engine,
     num_shared_experts,
     num_dynamic_experts,

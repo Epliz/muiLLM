@@ -14,7 +14,7 @@ MuiLLMParallelGateUpDownMLP::MuiLLMParallelGateUpDownMLP(
 ) {
   this->engine = engine;
   this->comm = comm;
-  this->method = static_cast<MuiLLMGateUpSiluMethod>(method);
+  this->method = static_cast<MuiLLMgateupmlpMethod>(method);
 
   this->norm_weights = norm_weights;
   this->gate_weights = gate_weights;
@@ -42,8 +42,8 @@ torch::Tensor MuiLLMParallelGateUpDownMLP::forward(
     TORCH_CHECK(false, "MuiLLMParallelGateUpDownMLP not dispatchable");
   }
 
-  if (this->method == GATEUPSILU_FUSED) {
-    return muillm_parallel_gateupsilu_forward(
+  if (this->method == gateupmlp_FUSED) {
+    return muillm_parallel_gateupmlp_forward(
       this->engine,
       this->comm,
       this->norm_weights,
@@ -55,8 +55,8 @@ torch::Tensor MuiLLMParallelGateUpDownMLP::forward(
       inputs,
       reduce
     );
-  } else if (this->method == GATEUPSILU_SPLIT) {
-    return muillm_parallel_gateupsilu_split_forward(
+  } else if (this->method == gateupmlp_SPLIT) {
+    return muillm_parallel_gateupmlp_split_forward(
       this->engine,
       this->comm,
       this->norm_weights,

@@ -91,7 +91,7 @@ static inline khalf8 __device__ qint8x8tohalf8(const kuint8x8& qs, half2 scale_m
 
 static_assert(sizeof(karray<half2, 2>) == 8);
 
-__global__ void muillm_int8_gateupsilu_dequantize_kernel(
+__global__ void muillm_int8_gateupmlp_dequantize_kernel(
     const uint8_t* __restrict__ GUW, // weight matrix - size N x K x 2
     const half* __restrict__ GUQSMV, // quantization scales and minimum values matrix - size N x G x 2 x 2
     half* __restrict__ DEQUANT_GW, // output - size N x K
@@ -191,7 +191,7 @@ __global__ void muillm_int8_gateupsilu_dequantize_kernel(
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-std::tuple<at::Tensor, at::Tensor> muillm_int8_gateupsilu_dequantize_forward(
+std::tuple<at::Tensor, at::Tensor> muillm_int8_gateupmlp_dequantize_forward(
     torch::Tensor gate_up_weights,
     torch::Tensor gate_up_scales_min_vals,
     int group_size_shift) {
@@ -218,7 +218,7 @@ std::tuple<at::Tensor, at::Tensor> muillm_int8_gateupsilu_dequantize_forward(
   const int threads_per_blocks = THREADS_PER_BLOCK;
   const int num_blocks = N;
 
-  muillm_int8_gateupsilu_dequantize_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+  muillm_int8_gateupmlp_dequantize_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
     (const uint8_t*)gate_up_weights.data_ptr(),
     (const half*)gate_up_scales_min_vals.data_ptr(),
     (half*)dequantized_gate_weights.data_ptr(),
