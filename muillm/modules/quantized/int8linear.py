@@ -177,7 +177,6 @@ class MuiInt8Linear(MuiModule):
         # (ok as we are replacing the module entirely so we can change its device)
         if device is not None:
             prev_module = prev_module.to(device)
-            norm_weights = norm_weights.to(device) if norm_weights is not None else None
 
         has_bias = prev_module.bias is not None
         in_features = prev_module.in_features

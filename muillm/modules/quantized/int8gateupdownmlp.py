@@ -200,12 +200,15 @@ class MuiInt8GateUpDownMLP(MuiModule):
         return new_module
 
     def _qint8_linear(
-        self, new_qlinear: MuiInt8Linear, prev_linear: Union[nn.Linear, MuiInt8Linear]
+        self,
+        new_qlinear: MuiInt8Linear,
+        prev_linear: Union[nn.Linear, MuiInt8Linear],
+        device=None,
     ) -> MuiInt8Linear:
         if isinstance(prev_linear, MuiInt8Linear):
             return prev_linear
         else:
-            new_qlinear.copy_module(prev_linear)
+            new_qlinear.copy_module(prev_linear, device=device)
             return new_qlinear
 
     def _pack_gateup_weights(
@@ -299,14 +302,16 @@ class MuiInt8GateUpDownMLP(MuiModule):
             device=device,
             dtype=self.weight_dtype,
         )
-        gate_proj = self._qint8_linear(gate_proj, prev_module.gate_proj)
-        up_proj = self._qint8_linear(up_proj, prev_module.up_proj)
+        gate_proj = self._qint8_linear(gate_proj, prev_module.gate_proj, device=device)
+        up_proj = self._qint8_linear(up_proj, prev_module.up_proj, device=device)
 
         self.gate_up_weights, self.gate_up_scales_min_vals = self._pack_gateup_linears(
             gate_proj, up_proj
         )
 
-        self.down_proj = self._qint8_linear(self.down_proj, prev_module.down_proj)
+        self.down_proj = self._qint8_linear(
+            self.down_proj, prev_module.down_proj, device=device
+        )
 
         # put ourselves on the correct device
         self.to(device=device)

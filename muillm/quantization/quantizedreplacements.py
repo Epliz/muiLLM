@@ -9,10 +9,10 @@ from muillm.modules.quantized.int8gateupdownmlp import MuiInt8GateUpDownMLP
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
 from muillm.quantization.quantizationmethod import (
     Int8WeightOnlyQuantizationMethod,
-    QuantizationMethod,
 )
 
 from muillm.modules.linear import MuiLinear
+from muillm.replacement.replacementcontext import MuiReplacementContext
 
 _INT8_LAYER_REPLACEMENTS = {
     nn.Linear: MuiInt8Linear,
@@ -48,6 +48,12 @@ def quantize_layers(
             f"The quantization method {quantization_method} is not supported"
         )
 
+    replacement_context = MuiReplacementContext(
+        engine_config=engine_config,
+        model=model,
+        device=device,
+    )
+
     replacements = _INT8_LAYER_REPLACEMENTS
 
     for module_name, module in model.named_modules():
@@ -64,9 +70,7 @@ def quantize_layers(
 
             new_module_type = replacements[module_type]
 
-            new_module = new_module_type.replace(
-                module, engine_config=engine_config, device=device
-            )
+            new_module = new_module_type.replace(replacement_context, module)
 
             _recursive_setattr(model, module_name, new_module)
 
