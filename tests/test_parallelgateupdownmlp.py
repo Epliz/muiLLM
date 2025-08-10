@@ -19,13 +19,13 @@ from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
-from .test_utils import tensors_equal
+from .test_utils import execute_distributed, tensors_equal
 
 
 def random_mistral_mlp(
     hidden_size: int,
     intermediate_size: int,
-    device: str = "cpu",
+    device: str = "cuda",
     dtype: torch.dtype = torch.float32,
 ) -> MistralMLP:
     config = MistralConfig(
@@ -60,7 +60,9 @@ def copy_mistral_mlp(mlp: MistralMLP) -> MistralMLP:
     return new_mlp
 
 
-def _test_basic_mistral_mlp(device: str = "cpu", dtype: torch.dtype = torch.float32):
+def _test_basic_mistral_mlp_inner(
+    device: str = "cuda", dtype: torch.dtype = torch.float32
+):
     hidden_size = 256
     mlp = random_mistral_mlp(
         hidden_size=hidden_size, intermediate_size=1024, device=device, dtype=dtype
@@ -69,7 +71,7 @@ def _test_basic_mistral_mlp(device: str = "cpu", dtype: torch.dtype = torch.floa
     # replace destroys the passed linear module so we need to copy it
     mlp_copy = copy_mistral_mlp(mlp)
 
-    engine_config = MuiEngineConfig(tensor_parallelism=1)
+    engine_config = MuiEngineConfig(tensor_parallelism=None)
     replacement_context = MuiReplacementContext(
         engine_config=engine_config,
         model=None,  # No model context needed for this test
@@ -90,8 +92,8 @@ def _test_basic_mistral_mlp(device: str = "cpu", dtype: torch.dtype = torch.floa
     tensors_equal(y, y_m)
 
 
-def test_basic_mistral_mlp_fp32_cpu():
-    _test_basic_mistral_mlp(device="cpu", dtype=torch.float32)
+def _test_basic_mistral_mlp(device: str = "cuda", dtype: torch.dtype = torch.float32):
+    execute_distributed(_test_basic_mistral_mlp_inner, device=device, dtype=dtype)
 
 
 def test_basic_mistral_mlp_fp32_gpu():
@@ -106,7 +108,12 @@ def test_basic_mistral_mlp_bf16_gpu():
     _test_basic_mistral_mlp(device="cuda", dtype=torch.bfloat16)
 
 
-def random_llama3_mlp(hidden_size: int, intermediate_size: int) -> LlamaMLP:
+def random_llama3_mlp(
+    hidden_size: int,
+    intermediate_size: int,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> LlamaMLP:
     config = LlamaConfig(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
@@ -118,6 +125,8 @@ def random_llama3_mlp(hidden_size: int, intermediate_size: int) -> LlamaMLP:
     )
 
     mlp = LlamaMLP(config)
+
+    mlp = mlp.to(device=device, dtype=dtype)
 
     # initialize weights
     torch.nn.init.xavier_uniform_(mlp.gate_proj.weight)
@@ -137,18 +146,22 @@ def copy_llama3_mlp(mlp: LlamaMLP) -> LlamaMLP:
     return new_mlp
 
 
-def test_basic_llama3_mlp():
+def _test_basic_llama3_mlp_inner(
+    device: str = "cuda", dtype: torch.dtype = torch.float32
+):
     hidden_size = 256
-    mlp = random_llama3_mlp(hidden_size=hidden_size, intermediate_size=1024)
+    mlp = random_llama3_mlp(
+        hidden_size=hidden_size, intermediate_size=1024, device=device, dtype=dtype
+    )
 
     # replace destroys the passed linear module so we need to copy it
     mlp_copy = copy_llama3_mlp(mlp)
 
-    engine_config = MuiEngineConfig(tensor_parallelism=1)
+    engine_config = MuiEngineConfig(tensor_parallelism=None)
     replacement_context = MuiReplacementContext(
         engine_config=engine_config,
         model=None,  # No model context needed for this test
-        device="cpu",
+        device=device,
     )
     muimlp = MuiGateUpDownMLP.replace(
         replacement_context=replacement_context,
@@ -156,7 +169,7 @@ def test_basic_llama3_mlp():
     )
     muimlp.finalize_init()
 
-    input_tensor = torch.rand(size=(4, hidden_size))
+    input_tensor = torch.rand(size=(4, hidden_size), device=device, dtype=dtype)
 
     y = mlp(input_tensor)
 
@@ -165,7 +178,28 @@ def test_basic_llama3_mlp():
     tensors_equal(y, y_m)
 
 
-def random_llama4_mlp(hidden_size: int, intermediate_size: int) -> Llama4TextMLP:
+def _test_basic_llama3_mlp(device: str = "cuda", dtype: torch.dtype = torch.float32):
+    execute_distributed(_test_basic_llama3_mlp_inner, device=device, dtype=dtype)
+
+
+def test_basic_llama3_mlp_gpu_fp32():
+    _test_basic_llama3_mlp(device="cuda", dtype=torch.float32)
+
+
+def test_basic_llama3_mlp_gpu_fp16():
+    _test_basic_llama3_mlp(device="cuda", dtype=torch.float16)
+
+
+def test_basic_llama3_mlp_gpu_bf16():
+    _test_basic_llama3_mlp(device="cuda", dtype=torch.bfloat16)
+
+
+def random_llama4_mlp(
+    hidden_size: int,
+    intermediate_size: int,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float32,
+) -> Llama4TextMLP:
     config = Llama4TextConfig(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
@@ -177,6 +211,8 @@ def random_llama4_mlp(hidden_size: int, intermediate_size: int) -> Llama4TextMLP
     )
 
     mlp = Llama4TextMLP(config)
+
+    mlp = mlp.to(device=device, dtype=dtype)
 
     # initialize weights
     torch.nn.init.xavier_uniform_(mlp.gate_proj.weight)
@@ -196,18 +232,22 @@ def copy_llama4_mlp(mlp: Llama4TextMLP) -> Llama4TextMLP:
     return new_mlp
 
 
-def test_basic_llama4_mlp():
+def _test_basic_llama4_mlp_inner(
+    device: str = "cuda", dtype: torch.dtype = torch.float32
+):
     hidden_size = 256
-    mlp = random_llama4_mlp(hidden_size=hidden_size, intermediate_size=1024)
+    mlp = random_llama4_mlp(
+        hidden_size=hidden_size, intermediate_size=1024, device=device, dtype=dtype
+    )
 
     # replace destroys the passed linear module so we need to copy it
     mlp_copy = copy_llama4_mlp(mlp)
 
-    engine_config = MuiEngineConfig(tensor_parallelism=1)
+    engine_config = MuiEngineConfig(tensor_parallelism=None)
     replacement_context = MuiReplacementContext(
         engine_config=engine_config,
         model=None,  # No model context needed for this test
-        device="cpu",
+        device=device,
     )
     muimlp = MuiGateUpDownMLP.replace(
         replacement_context=replacement_context,
@@ -215,13 +255,29 @@ def test_basic_llama4_mlp():
     )
     muimlp.finalize_init()
 
-    input_tensor = torch.rand(size=(4, hidden_size))
+    input_tensor = torch.rand(size=(4, hidden_size), device=device, dtype=dtype)
 
     y = mlp(input_tensor)
 
     y_m = muimlp(input_tensor)
 
     tensors_equal(y, y_m)
+
+
+def test_basic_llama4_mlp(device: str = "cuda", dtype: torch.dtype = torch.float32):
+    execute_distributed(_test_basic_llama4_mlp_inner, device=device, dtype=dtype)
+
+
+def test_basic_llama4_mlp_fp32_gpu():
+    test_basic_llama4_mlp(device="cuda", dtype=torch.float32)
+
+
+def test_basic_llama4_mlp_fp16_gpu():
+    test_basic_llama4_mlp(device="cuda", dtype=torch.float16)
+
+
+def test_basic_llama4_mlp_bf16_gpu():
+    test_basic_llama4_mlp(device="cuda", dtype=torch.bfloat16)
 
 
 def random_gemma3_mlp(
@@ -258,7 +314,9 @@ def copy_gemma3_mlp(mlp: Gemma3MLP) -> Gemma3MLP:
     return new_mlp
 
 
-def _test_basic_gemma3_mlp(device: str = "cpu", dtype: torch.dtype = torch.float32):
+def _test_basic_gemma3_mlp_inner(
+    device: str = "cuda", dtype: torch.dtype = torch.float32
+):
     hidden_size = 256
     mlp = random_gemma3_mlp(
         hidden_size=hidden_size, intermediate_size=1024, device=device, dtype=dtype
@@ -267,7 +325,7 @@ def _test_basic_gemma3_mlp(device: str = "cpu", dtype: torch.dtype = torch.float
     # replace destroys the passed linear module so we need to copy it
     mlp_copy = copy_gemma3_mlp(mlp)
 
-    engine_config = MuiEngineConfig(tensor_parallelism=1)
+    engine_config = MuiEngineConfig(tensor_parallelism=None)
     replacement_context = MuiReplacementContext(
         engine_config=engine_config,
         model=None,  # No model context needed for this test
@@ -288,8 +346,8 @@ def _test_basic_gemma3_mlp(device: str = "cpu", dtype: torch.dtype = torch.float
     tensors_equal(y, y_m)
 
 
-def test_basic_gemma3_mlp_fp32_cpu():
-    _test_basic_gemma3_mlp(device="cpu", dtype=torch.float32)
+def _test_basic_gemma3_mlp(device: str = "cuda", dtype: torch.dtype = torch.float32):
+    execute_distributed(_test_basic_gemma3_mlp_inner, device=device, dtype=dtype)
 
 
 def test_basic_gemma3_mlp_fp32_gpu():

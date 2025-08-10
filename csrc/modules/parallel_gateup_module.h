@@ -6,6 +6,8 @@
 #include "../engine.h"
 #include "../comms/comm_torch.h"
 
+#include "../ffn/gateupmlpactivation.h"
+
 enum MuiLLMgateupmlpMethod {
     // Basic method where Gate/Up projections + mul are done distinctly
     gateupmlp_UNFUSED = 0,
@@ -22,6 +24,7 @@ struct MuiLLMParallelGateUpDownMLP: MuiLLMParallelGateUpDownMLPInterface {
   muillm_engine_t* engine;
   muillm_comm_t* comm;
 
+  MuiGateUpMLPActivation activation;
   MuiLLMgateupmlpMethod method;
   
   torch::Tensor norm_weights{nullptr};
@@ -37,6 +40,7 @@ struct MuiLLMParallelGateUpDownMLP: MuiLLMParallelGateUpDownMLPInterface {
   MuiLLMParallelGateUpDownMLP(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
+    MuiGateUpMLPActivation activation,
     int method,
     torch::Tensor& norm_weights,
     torch::Tensor& gate_weights,
@@ -59,6 +63,7 @@ struct MuiLLMParallelGateUpDownMLP: MuiLLMParallelGateUpDownMLPInterface {
 muillm_parallel_igateupdownmlp_module_ptr_t muillm_parallel_gateupdownmlp_module_init_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
+  int activation,
   int method,
   std::optional<torch::Tensor>& norm_weights,
   torch::Tensor& gate_weights,

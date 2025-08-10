@@ -12,6 +12,7 @@ import muillm_ext
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.llama4.modeling_llama4 import Llama4TextRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
+from transformers.models.gemma3.modeling_gemma3 import Gemma3RMSNorm
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.torch.dtensor import to_local_tensor
@@ -61,15 +62,26 @@ class MuiRMSNorm(MuiModule):
     @staticmethod
     def _extract_eps(
         prev_module: Union[
-            "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
+            "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Gemma3RMSNorm, Llama4TextRMSNorm
         ],
     ) -> float:
-        if isinstance(prev_module, Llama4TextRMSNorm):
-            # Llama4 RMSNorm has a different interface
+        if isinstance(prev_module, Llama4TextRMSNorm) or isinstance(
+            prev_module, Gemma3RMSNorm
+        ):
+            # Llama4 RMSNorm and Gemma3RMSNorm have a different interface
             return prev_module.eps
         else:
             # Mistral and Llama RMSNorm have the same interface
             return prev_module.variance_epsilon
+
+    @staticmethod
+    def _extract_weights(
+        prev_module: Union[
+            "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Gemma3RMSNorm, Llama4TextRMSNorm
+        ],
+    ) -> float:
+        # TODO: for Gemma, need to add 1
+        return prev_module.weight
 
     @staticmethod
     def replace(
