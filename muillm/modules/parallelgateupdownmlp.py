@@ -3,7 +3,7 @@ import math
 from typing import List, Optional, Union
 from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.memorymanagement.gc import trigger_gc
-from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
+from muillm.modules.gateupdownmlp import MuiGateUpDownMLP, MuiGateUpDownMLPActivation
 from muillm.modules.module import MuiModule
 from muillm.modules.parallellinear import MuiParallelLinear
 import torch
@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from muillm.engineconfig import MuiEngineConfig
 from transformers.models.mistral.modeling_mistral import MistralMLP, MistralRMSNorm
 from transformers.models.llama.modeling_llama import LlamaMLP, LlamaRMSNorm
+from transformers.models.gemma3.modeling_gemma3 import Gemma3MLP, Gemma3RMSNorm
 from transformers.models.llama4.modeling_llama4 import (
     Llama4TextMLP,
     Llama4TextRMSNorm,
@@ -115,6 +116,9 @@ class MuiParallelGateUpDownMLP(MuiModule):
             dtype=dtype,
         )
         self.activation_function = activation_function
+        self.mui_activation = MuiGateUpDownMLPActivation._get_activation_enum(
+            activation_function
+        )
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
@@ -131,6 +135,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
         self.cpp_module = muillm_ext.muillm_parallel_gateupdownmlp_module_init(
             self.cpp_engine,
             self.comms.comms,
+            int(self.mui_activation),
             int(self.method),
             norm_weights,
             self.gate_proj.weights[0],
@@ -144,7 +149,9 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
     def _check_dispatchable(self):
         wdtype = self.gate_proj.dtype
-        dispatchable_activation = isinstance(self.activation_function, nn.SiLU)
+        dispatchable_activation = (
+            self.mui_activation != MuiGateUpDownMLPActivation.UNSUPPORTED
+        )
         dispatchable_type = (wdtype == torch.float16) or (wdtype == torch.bfloat16)
         dispatchable_device = self.gate_proj.is_cuda
         self.dispatchable = (
@@ -164,10 +171,11 @@ class MuiParallelGateUpDownMLP(MuiModule):
             MuiGateUpDownMLP,
             LlamaMLP,
             MistralMLP,
+            Gemma3MLP,
             Llama4TextMLP,
         ],
         prev_layernorm_module: Union[
-            LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
+            LlamaRMSNorm, MistralRMSNorm, Gemma3RMSNorm, Llama4TextRMSNorm
         ] = None,
     ) -> "MuiGateUpDownMLP":
         engine_config = replacement_context.engine_config
@@ -237,7 +245,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
             elif prev_layernorm_module is not None:
                 normalize = True
                 variance_epsilon = MuiRMSNorm._extract_eps(prev_layernorm_module)
-                norm_weights = prev_layernorm_module.weight
+                norm_weights = MuiRMSNorm._extract_weights(prev_layernorm_module)
             else:
                 normalize = False
                 variance_epsilon = 0.0
@@ -246,6 +254,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
         elif (
             isinstance(prev_module, MistralMLP)
             or isinstance(prev_module, LlamaMLP)
+            or isinstance(prev_module, Gemma3MLP)
             or isinstance(prev_module, Llama4TextMLP)
         ):
             if isinstance(prev_module, Llama4TextMLP):
@@ -258,7 +267,11 @@ class MuiParallelGateUpDownMLP(MuiModule):
             variance_epsilon = (
                 MuiRMSNorm._extract_eps(prev_layernorm_module) if normalize else 0.0
             )
-            norm_weights = prev_layernorm_module.weight if normalize else None
+            norm_weights = (
+                MuiRMSNorm._extract_weights(prev_layernorm_module)
+                if normalize
+                else None
+            )
         else:
             raise ValueError(
                 f"Unsupported replacement: {prev_module.__class__.__name__}"
@@ -295,6 +308,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
             "MuiParallelGateUpDownMLP",
             LlamaMLP,
             MistralMLP,
+            Gemma3MLP,
             Llama4TextRMSNorm,
             MuiGateUpDownMLP,
         ],
@@ -318,7 +332,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
 
             if prev_module.norm_weights is not None:
                 norm_weights = prev_module.norm_weights
-        elif isinstance(prev_module, (MistralMLP, LlamaMLP, Llama4TextMLP)):
+        elif isinstance(prev_module, (MistralMLP, LlamaMLP, Gemma3MLP, Llama4TextMLP)):
             # norm_weights need to be set in calling args if needed
             pass
         else:

@@ -6,6 +6,7 @@
 at::Tensor muillm_parallel_gateupmlp_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -71,6 +72,7 @@ at::Tensor muillm_parallel_gateupmlp_forward(
 
     muillm_gateupmlp_forward_placed_output(
       engine,
+      activation,
       norm_weights,
       epsilon,
       gate_weights,
@@ -96,6 +98,7 @@ at::Tensor muillm_parallel_gateupmlp_forward(
   } else {
     muillm_gateupmlp_forward_placed_output(
       engine,
+      activation,
       norm_weights,
       epsilon,
       gate_weights,
@@ -114,6 +117,7 @@ at::Tensor muillm_parallel_gateupmlp_forward(
 at::Tensor muillm_parallel_gateupmlp_split_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -179,6 +183,7 @@ at::Tensor muillm_parallel_gateupmlp_split_forward(
 
     muillm_gateupmlp_split_forward_placed_output(
       engine,
+      activation,
       norm_weights,
       epsilon,
       gate_weights,
@@ -204,6 +209,7 @@ at::Tensor muillm_parallel_gateupmlp_split_forward(
   } else {
     muillm_gateupmlp_split_forward_placed_output(
       engine,
+      activation,
       norm_weights,
       epsilon,
       gate_weights,
@@ -222,6 +228,7 @@ at::Tensor muillm_parallel_gateupmlp_split_forward(
 at::Tensor muillm_parallel_gateupmlp_forward_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
+  int activation,
   torch::Tensor norm_weights,
   float epsilon,
   torch::Tensor gate_weights,
@@ -234,6 +241,7 @@ at::Tensor muillm_parallel_gateupmlp_forward_trampoline(
   return muillm_parallel_gateupmlp_forward(
     engine.engine_ptr,
     comm.comm_ptr,
+    static_cast<MuiGateUpMLPActivation>(activation),
     norm_weights,
     epsilon,
     gate_weights,
@@ -248,6 +256,7 @@ at::Tensor muillm_parallel_gateupmlp_forward_trampoline(
 at::Tensor muillm_parallel_gateupmlp_split_forward_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
+  int activation,
   torch::Tensor norm_weights,
   float epsilon,
   torch::Tensor gate_weights,
@@ -260,6 +269,7 @@ at::Tensor muillm_parallel_gateupmlp_split_forward_trampoline(
   return muillm_parallel_gateupmlp_split_forward(
     engine.engine_ptr,
     comm.comm_ptr,
+    static_cast<MuiGateUpMLPActivation>(activation),
     norm_weights,
     epsilon,
     gate_weights,

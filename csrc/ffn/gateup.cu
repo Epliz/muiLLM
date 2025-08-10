@@ -11,6 +11,7 @@
 
 at::Tensor muillm_gateupmlp_forward_trampoline(
   muillm_engine_ptr engine,
+  int activation,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
   torch::Tensor gate_weights,
@@ -22,6 +23,7 @@ at::Tensor muillm_gateupmlp_forward_trampoline(
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
   return muillm_gateupmlp_forward(
       engine.engine_ptr,
+      static_cast<MuiGateUpMLPActivation>(activation),
       norm_weights,
       epsilon,
       gate_weights,
@@ -34,6 +36,7 @@ at::Tensor muillm_gateupmlp_forward_trampoline(
 
 at::Tensor muillm_gateupmlp_split_forward_trampoline(
   muillm_engine_ptr engine,
+  int activation,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
   torch::Tensor gate_weights,
@@ -45,6 +48,7 @@ at::Tensor muillm_gateupmlp_split_forward_trampoline(
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
   return muillm_gateupmlp_split_forward(
       engine.engine_ptr,
+      static_cast<MuiGateUpMLPActivation>(activation),
       norm_weights,
       epsilon,
       gate_weights,
@@ -61,6 +65,7 @@ at::Tensor muillm_gateupmlp_split_forward_trampoline(
 
 void muillm_gateupmlp_forward_fp16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const half* norm_weights,
@@ -74,6 +79,7 @@ void muillm_gateupmlp_forward_fp16(
 
 void muillm_gateupmlp_forward_bf16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const __hip_bfloat16* norm_weights,
@@ -87,6 +93,7 @@ void muillm_gateupmlp_forward_bf16(
 
 void muillm_gateupmlp_forward_placed_output(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -128,6 +135,7 @@ void muillm_gateupmlp_forward_placed_output(
   if (dtype == torch::kFloat16) {
     muillm_gateupmlp_forward_fp16(
         stream,
+        activation,
         N,
         K,
         normalize ? (const half*)norm_weights.data_ptr() : nullptr,
@@ -141,6 +149,7 @@ void muillm_gateupmlp_forward_placed_output(
   } else if (dtype == torch::kBFloat16) {
     muillm_gateupmlp_forward_bf16(
         stream,
+        activation,
         N,
         K,
         normalize ? (const __hip_bfloat16*)norm_weights.data_ptr() : nullptr,
@@ -175,6 +184,7 @@ void muillm_gateupmlp_forward_placed_output(
 
 at::Tensor muillm_gateupmlp_forward(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -205,6 +215,7 @@ at::Tensor muillm_gateupmlp_forward(
 
   muillm_gateupmlp_forward_placed_output(
     engine,
+    activation,
     norm_weights,
     epsilon,
     gate_weights,
@@ -220,6 +231,7 @@ at::Tensor muillm_gateupmlp_forward(
 
 void muillm_gateupmlp_split_forward_fp16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const half* norm_weights,
@@ -235,6 +247,7 @@ void muillm_gateupmlp_split_forward_fp16(
 
 void muillm_gateupmlp_split_forward_bf16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const __hip_bfloat16* norm_weights,
@@ -250,6 +263,7 @@ void muillm_gateupmlp_split_forward_bf16(
 
 void muillm_gateupmlp_split_forward_placed_output(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -296,6 +310,7 @@ void muillm_gateupmlp_split_forward_placed_output(
   if (dtype == torch::kFloat16) {
     muillm_gateupmlp_split_forward_fp16(
         stream,
+        activation,
         N,
         K,
         normalize ? (const half*)norm_weights.data_ptr() : nullptr,
@@ -311,6 +326,7 @@ void muillm_gateupmlp_split_forward_placed_output(
   } else if (dtype == torch::kBFloat16) {
     muillm_gateupmlp_split_forward_bf16(
         stream,
+        activation,
         N,
         K,
         normalize ? (const __hip_bfloat16*)norm_weights.data_ptr() : nullptr,
@@ -346,6 +362,7 @@ void muillm_gateupmlp_split_forward_placed_output(
 
 at::Tensor muillm_gateupmlp_split_forward(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -377,6 +394,7 @@ at::Tensor muillm_gateupmlp_split_forward(
   
   muillm_gateupmlp_split_forward_placed_output(
     engine,
+    activation,
     norm_weights,
     epsilon,
     gate_weights,

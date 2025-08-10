@@ -1,4 +1,4 @@
-from enum import Enum
+from enum import Enum, IntEnum
 import math
 from typing import Optional, Union
 from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 from muillm.engineconfig import MuiEngineConfig
 from transformers.models.llama.modeling_llama import LlamaMLP, LlamaRMSNorm
+from transformers.models.gemma3.modeling_gemma3 import Gemma3MLP, Gemma3RMSNorm
 from transformers.models.llama4.modeling_llama4 import Llama4TextMLP, Llama4TextRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralMLP, MistralRMSNorm
 
@@ -19,6 +20,31 @@ from muillm.modules.linear import MuiLinear
 from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 import muillm_ext
 from muillm.replacement.replacementcontext import MuiReplacementContext
+
+from transformers.activations import (
+    PytorchGELUTanh,
+)
+
+
+# Enumberation for the different activations we support in the Gate/Up MLP
+class MuiGateUpDownMLPActivation(IntEnum):
+    UNSUPPORTED = -1
+    # SiLU activation
+    SILU = 0
+    # GELU activation (tanh approximation similar to Pytorch's approximated GELU)
+    GELU_TANH = 1
+
+    @staticmethod
+    def _get_activation_enum(
+        activation_function: nn.Module,
+    ) -> "MuiGateUpDownMLPActivation":
+        if isinstance(activation_function, nn.SiLU):
+            return MuiGateUpDownMLPActivation.SILU
+        elif isinstance(activation_function, PytorchGELUTanh):
+            # Pytorch's GELU is not supported as it is not a tanh approximation
+            return MuiGateUpDownMLPActivation.GELU_TANH
+        else:
+            return MuiGateUpDownMLPActivation.UNSUPPORTED
 
 
 class _MuiGateUpMLPMethod(Enum):
@@ -37,6 +63,7 @@ class _MuiGateUpMLP(torch.autograd.Function):
     def forward(
         ctx,
         engine,
+        activation,
         inputs,
         norm_weights,
         variance_epsilon,
@@ -47,6 +74,7 @@ class _MuiGateUpMLP(torch.autograd.Function):
     ):
         output = muillm_ext.muillm_gateupmlp_forward(
             engine,
+            activation,
             norm_weights,
             variance_epsilon,
             gate_weights,
@@ -77,6 +105,7 @@ class _MuiGateUpMLPSplit(torch.autograd.Function):
     def forward(
         ctx,
         engine,
+        activation,
         inputs,
         norm_weights,
         variance_epsilon,
@@ -87,6 +116,7 @@ class _MuiGateUpMLPSplit(torch.autograd.Function):
     ):
         output = muillm_ext.muillm_gateupmlp_split_forward(
             engine,
+            activation,
             norm_weights,
             variance_epsilon,
             gate_weights,
@@ -164,6 +194,10 @@ class MuiGateUpDownMLP(MuiModule):
         )
         self.activation_function = activation_function
 
+        self.mui_activation = MuiGateUpDownMLPActivation._get_activation_enum(
+            activation_function
+        )
+
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
@@ -172,7 +206,9 @@ class MuiGateUpDownMLP(MuiModule):
 
     def _check_dispatchable(self):
         wdtype = self.gate_proj.weight.dtype
-        dispatchable_activation = isinstance(self.activation_function, nn.SiLU)
+        dispatchable_activation = (
+            self.mui_activation != MuiGateUpDownMLPActivation.UNSUPPORTED
+        )
         dispatchable_type = (wdtype == torch.float16) or (wdtype == torch.bfloat16)
         dispatchable_device = self.gate_proj.weight.is_cuda
         self.dispatchable = (
@@ -190,9 +226,11 @@ class MuiGateUpDownMLP(MuiModule):
     @staticmethod
     def replace(
         replacement_context: MuiReplacementContext,
-        prev_module: Union["MuiGateUpDownMLP", LlamaMLP, MistralMLP, Llama4TextMLP],
+        prev_module: Union[
+            "MuiGateUpDownMLP", LlamaMLP, MistralMLP, Gemma3MLP, Llama4TextMLP
+        ],
         prev_layernorm_module: Union[
-            MuiRMSNorm, LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
+            MuiRMSNorm, LlamaRMSNorm, MistralRMSNorm, Gemma3RMSNorm, Llama4TextRMSNorm
         ] = None,
     ) -> "MuiGateUpDownMLP":
         engine_config = replacement_context.engine_config
@@ -242,7 +280,7 @@ class MuiGateUpDownMLP(MuiModule):
         if isinstance(prev_module, Llama4TextMLP):
             # Llama4TextMLP has a different activation function
             activation_function = prev_module.activation_fn
-        elif isinstance(prev_module, (LlamaMLP, MistralMLP)):
+        elif isinstance(prev_module, (LlamaMLP, MistralMLP, Gemma3MLP)):
             activation_function = prev_module.act_fn
         else:
             raise ValueError(
@@ -265,7 +303,7 @@ class MuiGateUpDownMLP(MuiModule):
             elif prev_layernorm_module is not None:
                 normalize = True
                 variance_epsilon = MuiRMSNorm._extract_eps(prev_layernorm_module)
-                norm_weights = prev_layernorm_module.weight
+                norm_weights = MuiRMSNorm._extract_weights(prev_layernorm_module)
             else:
                 normalize = False
                 variance_epsilon = 0.0
@@ -275,7 +313,11 @@ class MuiGateUpDownMLP(MuiModule):
             variance_epsilon = (
                 MuiRMSNorm._extract_eps(prev_layernorm_module) if normalize else 0.0
             )
-            norm_weights = prev_layernorm_module.weight if normalize else None
+            norm_weights = (
+                MuiRMSNorm._extract_weights(prev_layernorm_module)
+                if normalize
+                else None
+            )
 
         new_module = MuiGateUpDownMLP(
             engine_config=engine_config,
@@ -304,7 +346,9 @@ class MuiGateUpDownMLP(MuiModule):
 
     def copy_module(
         self,
-        prev_module: Union["MuiGateUpDownMLP", LlamaMLP, MistralMLP, Llama4TextMLP],
+        prev_module: Union[
+            "MuiGateUpDownMLP", LlamaMLP, MistralMLP, Gemma3MLP, Llama4TextMLP
+        ],
         norm_weights: torch.Tensor = None,
         variance_epsilon: float = 0.0,
         device=None,
@@ -370,6 +414,7 @@ class MuiGateUpDownMLP(MuiModule):
             ):
                 return _MuiGateUpMLP.apply(
                     self.cpp_engine,
+                    self.mui_activation,
                     input,
                     self.norm_weights,
                     self.variance_epsilon,
@@ -399,6 +444,7 @@ class MuiGateUpDownMLP(MuiModule):
                 # still can use the fused RMSNorm
                 return _MuiGateUpMLPSplit.apply(
                     self.cpp_engine,
+                    self.mui_activation,
                     input,
                     self.norm_weights,
                     self.variance_epsilon,

@@ -46,6 +46,15 @@ from transformers.models.llama.modeling_llama import (
     LlamaForCausalLM,
 )
 
+from transformers.models.gemma3.modeling_gemma3 import (
+    Gemma3RotaryEmbedding,
+    Gemma3MLP,
+    Gemma3DecoderLayer,
+    Gemma3RMSNorm,
+    Gemma3Model,
+    Gemma3ForCausalLM,
+)
+
 from transformers.models.llama4.modeling_llama4 import (
     Llama4TextRMSNorm,
     Llama4TextL2Norm,
@@ -71,6 +80,7 @@ _LAYER_REPLACEMENTS = {
     # MLPs
     MistralMLP: MuiGateUpDownMLP,
     LlamaMLP: MuiGateUpDownMLP,
+    Gemma3MLP: MuiGateUpDownMLP,
     Llama4TextMLP: MuiGateUpDownMLP,
     # MoE MLPS
     Llama4TextMoe: MuiGateUpDownMLPMoe,
@@ -108,6 +118,7 @@ _TP_LAYER_REPLACEMENTS = {
     # MLPs
     MistralMLP: MuiParallelGateUpDownMLP,
     LlamaMLP: MuiParallelGateUpDownMLP,
+    Gemma3MLP: MuiParallelGateUpDownMLP,
     Llama4TextMLP: MuiParallelGateUpDownMLP,
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
     # MoE MLPS

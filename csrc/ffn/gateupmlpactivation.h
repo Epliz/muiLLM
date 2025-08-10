@@ -1,0 +1,10 @@
+#ifndef __MUILLM_GATEUPDOWNMLPACTIVATION_H__
+#define __MUILLM_GATEUPDOWNMLPACTIVATION_H__
+
+typedef enum MuiGateUpMLPActivation {
+  UNKNOWN = -1,
+  SILU = 0,
+  GELU_TANH = 1
+} MuiGateUpMLPActivation;
+
+#endif /* __MUILLM_GATEUPDOWNMLPACTIVATION_H__ */
