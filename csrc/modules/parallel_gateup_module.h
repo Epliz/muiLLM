@@ -6,15 +6,15 @@
 #include "../engine.h"
 #include "../comms/comm_torch.h"
 
-enum MuiLLMGateUpSiluMethod {
+enum MuiLLMgateupmlpMethod {
     // Basic method where Gate/Up projections + mul are done distinctly
-    GATEUPSILU_UNFUSED = 0,
+    gateupmlp_UNFUSED = 0,
     // Method where the Gate/Up projections + mul are all fused
-    GATEUPSILU_FUSED = 1,
+    gateupmlp_FUSED = 1,
     // Method where the Gate/Up projections are done in the same kernel
     // but split between blocks to have more blocks.
     // A final reduction is done in an epilogue kernel
-    GATEUPSILU_SPLIT = 2
+    gateupmlp_SPLIT = 2
 };
 
 struct MuiLLMParallelGateUpDownMLP: MuiLLMParallelGateUpDownMLPInterface {
@@ -22,7 +22,7 @@ struct MuiLLMParallelGateUpDownMLP: MuiLLMParallelGateUpDownMLPInterface {
   muillm_engine_t* engine;
   muillm_comm_t* comm;
 
-  MuiLLMGateUpSiluMethod method;
+  MuiLLMgateupmlpMethod method;
   
   torch::Tensor norm_weights{nullptr};
   torch::Tensor gate_weights{nullptr};

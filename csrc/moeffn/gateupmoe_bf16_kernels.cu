@@ -158,7 +158,7 @@ static inline float __device__ silu(float x) {
 #define FUSED_ROWS_PER_BLOCK 2
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilumoe_gemv_bf16_kernel(
+__global__ void muillm_gateupmlpmoe_gemv_bf16_kernel(
     const __hip_bfloat16* __restrict__ GW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
     const __hip_bfloat16* __restrict__ UW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
     const __hip_bfloat16* __restrict__ X, // input = size K
@@ -366,7 +366,7 @@ __global__ void muillm_gateupsilumoe_gemv_bf16_kernel(
 }
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilumoe_gemv_norm_inputs_bf16_kernel(
+__global__ void muillm_gateupmlpmoe_gemv_norm_inputs_bf16_kernel(
     const __hip_bfloat16* __restrict__ NW, // input normalization weights matrix - size K
     const __hip_bfloat16* __restrict__ GW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
     const __hip_bfloat16* __restrict__ UW, // weight matrix - size (num_shared_experts + num_dynamic_experts) x N x K
@@ -651,7 +651,7 @@ __global__ void muillm_gateupsilumoe_gemv_norm_inputs_bf16_kernel(
   }
 }
 
-void muillm_gateupsilumoe_forward_bf16(
+void muillm_gateupmlpmoe_forward_bf16(
   hipStream_t stream,
   unsigned N,
   unsigned K,
@@ -686,7 +686,7 @@ void muillm_gateupsilumoe_forward_bf16(
     float scale = 1.f / K;
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilumoe_gemv_norm_inputs_bf16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_norm_inputs_bf16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)norm_weights,
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
@@ -701,7 +701,7 @@ void muillm_gateupsilumoe_forward_bf16(
         scale
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilumoe_gemv_norm_inputs_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_norm_inputs_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)norm_weights,
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
@@ -716,7 +716,7 @@ void muillm_gateupsilumoe_forward_bf16(
         scale
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilumoe_gemv_norm_inputs_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_norm_inputs_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)norm_weights,
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
@@ -734,7 +734,7 @@ void muillm_gateupsilumoe_forward_bf16(
   } else {
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilumoe_gemv_bf16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_bf16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
         (const __hip_bfloat16*)x,
@@ -746,7 +746,7 @@ void muillm_gateupsilumoe_forward_bf16(
         K
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilumoe_gemv_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
         (const __hip_bfloat16*)x,
@@ -758,7 +758,7 @@ void muillm_gateupsilumoe_forward_bf16(
         K
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilumoe_gemv_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
         (const __hip_bfloat16*)x,
@@ -776,7 +776,7 @@ void muillm_gateupsilumoe_forward_bf16(
 #define SPLIT_ROWS_PER_BLOCK 4
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilumoe_gemv_norm_inputs_split_bf16_kernel(
+__global__ void muillm_gateupmlpmoe_gemv_norm_inputs_split_bf16_kernel(
     const __hip_bfloat16* __restrict__ NW, // input normalization weights matrix - size K
     const __hip_bfloat16* __restrict__ GW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
     const __hip_bfloat16* __restrict__ UW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
@@ -1048,7 +1048,7 @@ __global__ void muillm_gateupsilumoe_gemv_norm_inputs_split_bf16_kernel(
 }
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilumoe_gemv_split_bf16_kernel(
+__global__ void muillm_gateupmlpmoe_gemv_split_bf16_kernel(
     const __hip_bfloat16* __restrict__ GW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
     const __hip_bfloat16* __restrict__ UW, // weight matrix - size ((num_shared_experts + num_dynamic_experts)*N) x K
     const __hip_bfloat16* __restrict__ X, // input = size K
@@ -1240,7 +1240,7 @@ __global__ void muillm_gateupsilumoe_gemv_split_bf16_kernel(
 }
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilumoe_combine_bf16_kernel(
+__global__ void muillm_gateupmlpmoe_combine_bf16_kernel(
     const __hip_bfloat16* __restrict__ GY, // input - size (num_shared_experts + num_routed_experts) * N
     const __hip_bfloat16* __restrict__ UY, // input - size (num_shared_experts + num_routed_experts) * N
     __hip_bfloat16* __restrict__ Y, // output - size (num_shared_experts + num_routed_experts) * N
@@ -1262,7 +1262,7 @@ __global__ void muillm_gateupsilumoe_combine_bf16_kernel(
   }
 }
 
-void muillm_gateupsilumoe_split_forward_bf16(
+void muillm_gateupmlpmoe_split_forward_bf16(
   hipStream_t stream,
   unsigned N,
   unsigned K,
@@ -1301,7 +1301,7 @@ void muillm_gateupsilumoe_split_forward_bf16(
     float scale = 1.f / K;
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilumoe_gemv_norm_inputs_split_bf16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_norm_inputs_split_bf16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)norm_weights,
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
@@ -1317,7 +1317,7 @@ void muillm_gateupsilumoe_split_forward_bf16(
         scale
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilumoe_gemv_norm_inputs_split_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_norm_inputs_split_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)norm_weights,
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
@@ -1333,7 +1333,7 @@ void muillm_gateupsilumoe_split_forward_bf16(
         scale
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilumoe_gemv_norm_inputs_split_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_norm_inputs_split_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)norm_weights,
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
@@ -1352,7 +1352,7 @@ void muillm_gateupsilumoe_split_forward_bf16(
   } else {
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilumoe_gemv_split_bf16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_split_bf16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
         (const __hip_bfloat16*)x,
@@ -1365,7 +1365,7 @@ void muillm_gateupsilumoe_split_forward_bf16(
         K
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilumoe_gemv_split_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_split_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
         (const __hip_bfloat16*)x,
@@ -1378,7 +1378,7 @@ void muillm_gateupsilumoe_split_forward_bf16(
         K
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilumoe_gemv_split_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlpmoe_gemv_split_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
         (const __hip_bfloat16*)gate_weights,
         (const __hip_bfloat16*)up_weights,
         (const __hip_bfloat16*)x,
@@ -1397,21 +1397,21 @@ void muillm_gateupsilumoe_split_forward_bf16(
   const int S = num_computed_experts * N;
   const int num_blocks_combine = DIV_ROUND_UP(S, threads_per_blocks);
   if (threads_per_blocks == 64) {
-    muillm_gateupsilumoe_combine_bf16_kernel<64><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+    muillm_gateupmlpmoe_combine_bf16_kernel<64><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
       (const __hip_bfloat16*)gy,
       (const __hip_bfloat16*)uy,
       (__hip_bfloat16*)y,
       S
     );
   } else if (threads_per_blocks == 128) {
-    muillm_gateupsilumoe_combine_bf16_kernel<128><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+    muillm_gateupmlpmoe_combine_bf16_kernel<128><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
       (const __hip_bfloat16*)gy,
       (const __hip_bfloat16*)uy,
       (__hip_bfloat16*)y,
       S
     );
   } else if (threads_per_blocks == 256) {
-    muillm_gateupsilumoe_combine_bf16_kernel<256><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+    muillm_gateupmlpmoe_combine_bf16_kernel<256><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
       (const __hip_bfloat16*)gy,
       (const __hip_bfloat16*)uy,
       (__hip_bfloat16*)y,

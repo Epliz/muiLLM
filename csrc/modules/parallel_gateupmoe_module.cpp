@@ -58,7 +58,7 @@ torch::Tensor MuiLLMParallelGateUpDownMLPMoE::forward(
     this->num_routed_experts
   );
 
-  return muillm_parallel_gateupsilumoe_forward(
+  return muillm_parallel_gateupmlpmoe_forward(
     this->engine,
     this->comm,
     this->num_shared_experts,

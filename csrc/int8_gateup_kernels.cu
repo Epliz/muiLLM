@@ -252,7 +252,7 @@ static inline void __device__ qdot8(float& acc, const kuint8x8& qw, half2 scale_
 
 static_assert(sizeof(karray<half2, 2>) == 8);
 
-__global__ void muillm_int8_gateupsilu_gemv_kernel(
+__global__ void muillm_int8_gateupmlp_gemv_kernel(
     const uint8_t* __restrict__ GUW, // weight matrix - size N x K x 2
     const half* __restrict__ GUQSMV, // quantization scales and minimum values matrix - size N x G x 2 x 2
     const half* __restrict__ X, // input = size K
@@ -519,7 +519,7 @@ __global__ void muillm_int8_gateupsilu_gemv_kernel(
   }
 }
 
-__global__ void __launch_bounds__(THREADS_PER_BLOCK, 8) muillm_int8_gateupsilu_gemv_norm_inputs_kernel(
+__global__ void __launch_bounds__(THREADS_PER_BLOCK, 8) muillm_int8_gateupmlp_gemv_norm_inputs_kernel(
     const half* __restrict__ NW, // input normalization weights matrix - size K
     const uint8_t* __restrict__ GUW, // weight matrix - size N x K x 2
     const half* __restrict__ GUQSMV, // quantization scales matrix - size N x G x 2 x 2
@@ -868,7 +868,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK, 8) muillm_int8_gateupsilu_g
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-at::Tensor muillm_int8_gateupsilu_forward(
+at::Tensor muillm_int8_gateupmlp_forward(
     torch::Tensor norm_weights,
     float epsilon,
     torch::Tensor gate_up_weights,
@@ -910,7 +910,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
   if (normalize) {
     float scale = 1.f / K;
 
-    muillm_int8_gateupsilu_gemv_norm_inputs_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    muillm_int8_gateupmlp_gemv_norm_inputs_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       norm_weights.defined() ? (const half*)norm_weights.data_ptr() : nullptr,
       (const uint8_t*)gate_up_weights.data_ptr(),
       (const half*)gate_up_scales_min_vals.data_ptr(),
@@ -925,7 +925,7 @@ at::Tensor muillm_int8_gateupsilu_forward(
     );
   } else {
 
-    muillm_int8_gateupsilu_gemv_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    muillm_int8_gateupmlp_gemv_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       (const uint8_t*)gate_up_weights.data_ptr(),
       (const half*)gate_up_scales_min_vals.data_ptr(),
       (const half*)x.data_ptr(),
