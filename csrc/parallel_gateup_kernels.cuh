@@ -8,7 +8,7 @@
 #include <torch/extension.h>
 
 // parallel Gate/Up Silu (FFN)
-at::Tensor muillm_parallel_gateupsilu_forward(
+at::Tensor muillm_parallel_gateupmlp_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
     torch::Tensor& norm_weights,
@@ -21,7 +21,7 @@ at::Tensor muillm_parallel_gateupsilu_forward(
     bool reduce
 );
 
-at::Tensor muillm_parallel_gateupsilu_split_forward(
+at::Tensor muillm_parallel_gateupmlp_split_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
     torch::Tensor& norm_weights,
@@ -34,7 +34,7 @@ at::Tensor muillm_parallel_gateupsilu_split_forward(
     bool reduce
 );
 
-at::Tensor muillm_parallel_gateupsilu_forward_trampoline(
+at::Tensor muillm_parallel_gateupmlp_forward_trampoline(
     muillm_engine_ptr engine,
     muillm_comm_ptr comm,
     torch::Tensor norm_weights,
@@ -47,7 +47,7 @@ at::Tensor muillm_parallel_gateupsilu_forward_trampoline(
     bool reduce
 );
 
-at::Tensor muillm_parallel_gateupsilu_split_forward_trampoline(
+at::Tensor muillm_parallel_gateupmlp_split_forward_trampoline(
     muillm_engine_ptr engine,
     muillm_comm_ptr comm,
     torch::Tensor norm_weights,

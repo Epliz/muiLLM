@@ -8,7 +8,7 @@
 #include <torch/extension.h>
 
 // parallel Gate/Up Silu (FFN)
-at::Tensor muillm_parallel_gateupsilumoe_forward(
+at::Tensor muillm_parallel_gateupmlpmoe_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
     int num_shared_experts,
@@ -25,7 +25,7 @@ at::Tensor muillm_parallel_gateupsilumoe_forward(
     bool reduce
 );
 
-at::Tensor muillm_parallel_gateupsilumoe_split_forward(
+at::Tensor muillm_parallel_gateupmlpmoe_split_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
     int num_shared_experts,
@@ -42,7 +42,7 @@ at::Tensor muillm_parallel_gateupsilumoe_split_forward(
     bool reduce
 );
 
-at::Tensor muillm_parallel_gateupsilumoe_forward_trampoline(
+at::Tensor muillm_parallel_gateupmlpmoe_forward_trampoline(
     muillm_engine_ptr engine,
     muillm_comm_ptr comm,
     int num_shared_experts,
@@ -59,7 +59,7 @@ at::Tensor muillm_parallel_gateupsilumoe_forward_trampoline(
     bool reduce
 );
 
-at::Tensor muillm_parallel_gateupsilumoe_split_forward_trampoline(
+at::Tensor muillm_parallel_gateupmlpmoe_split_forward_trampoline(
     muillm_engine_ptr engine,
     muillm_comm_ptr comm,
     int num_shared_experts,

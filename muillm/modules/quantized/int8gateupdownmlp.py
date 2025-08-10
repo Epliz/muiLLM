@@ -22,7 +22,7 @@ from muillm.replacement.replacementcontext import MuiReplacementContext
 class _MuiInt8GateDequantize(torch.autograd.Function):
     @staticmethod
     def forward(ctx, gate_up_weights, gate_up_scales_min_vals, group_size_shift):
-        gate_weights, up_weights = muillm_ext.muillm_int8_gateupsilu_dequantize_forward(
+        gate_weights, up_weights = muillm_ext.muillm_int8_gateupmlp_dequantize_forward(
             gate_up_weights,
             gate_up_scales_min_vals,
             group_size_shift,
@@ -37,7 +37,7 @@ class _MuiInt8GateDequantize(torch.autograd.Function):
         raise NotImplementedError("Int8GateUpDequantize backward is not implemented")
 
 
-class _MuiInt8GateUpSiLU(torch.autograd.Function):
+class _MuiInt8GateUpMLP(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -48,7 +48,7 @@ class _MuiInt8GateUpSiLU(torch.autograd.Function):
         gate_up_scales_min_vals,
         group_size_shift,
     ):
-        output = muillm_ext.muillm_int8_gateupsilu_forward(
+        output = muillm_ext.muillm_int8_gateupmlp_forward(
             norm_weights,
             variance_epsilon,
             gate_up_weights,
@@ -63,7 +63,7 @@ class _MuiInt8GateUpSiLU(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        raise NotImplementedError("Int8GateUpSiLU backward is not implemented")
+        raise NotImplementedError("Int8GateUpMLP backward is not implemented")
 
 
 class MuiInt8GateUpDownMLP(MuiModule):
@@ -322,7 +322,7 @@ class MuiInt8GateUpDownMLP(MuiModule):
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
-            gateup = _MuiInt8GateUpSiLU.apply(
+            gateup = _MuiInt8GateUpMLP.apply(
                 input,
                 self.norm_weights,
                 self.variance_epsilon,

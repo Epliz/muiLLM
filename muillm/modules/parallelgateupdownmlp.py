@@ -24,18 +24,18 @@ import muillm_ext
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
-class _MuiParallelGateUpSiLUMethod(IntEnum):
+class _MuiParallelGateUpMLPMethod(IntEnum):
     # Basic method where Gate/Up projections + mul are done distinctly
-    GATEUPSILU_UNFUSED = 0
+    GATEUPMLP_UNFUSED = 0
     # Method where the Gate/Up projections + mul are all fused
-    GATEUPSILU_FUSED = 1
+    GATEUPMLP_FUSED = 1
     # Method where the Gate/Up projections are done in the same kernel
     # but split between blocks to have more blocks.
     # A final reduction is done in an epilogue kernel
-    GATEUPSILU_SPLIT = 2
+    GATEUPMLP_SPLIT = 2
 
 
-class _MuiParallelGateUpSiLU(torch.autograd.Function):
+class _MuiParallelGateUpMLP(torch.autograd.Function):
     @staticmethod
     def forward(ctx, module, inputs, residual, collect_outputs):
         output = muillm_ext.muillm_parallel_gateupdownmlp_module_forward(
@@ -48,7 +48,7 @@ class _MuiParallelGateUpSiLU(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        raise NotImplementedError("GateUpSiLU backward is not implemented")
+        raise NotImplementedError("GateUpMLP backward is not implemented")
 
 
 class MuiParallelGateUpDownMLP(MuiModule):
@@ -120,7 +120,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
         self._check_dispatchable()
 
         # TODO: improve method selection
-        self.method = _MuiParallelGateUpSiLUMethod.GATEUPSILU_FUSED
+        self.method = _MuiParallelGateUpMLPMethod.GATEUPMLP_FUSED
 
     def finalize_init(self):
         if self.cpp_module is not None:
@@ -388,7 +388,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
             raise ValueError("not implemented")
 
         if self.dispatchable and (inputs.numel() == inputs.shape[-1]):
-            output = _MuiParallelGateUpSiLU.apply(
+            output = _MuiParallelGateUpMLP.apply(
                 self.cpp_module, inputs, residual, collect_outputs
             )
             return [output]

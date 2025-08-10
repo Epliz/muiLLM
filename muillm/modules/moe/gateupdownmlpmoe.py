@@ -38,7 +38,7 @@ class _MuiGateUpDownMoe(torch.autograd.Function):
         epsilon,
     ):
 
-        output = muillm_ext.muillm_gateupsilumoe_forward(
+        output = muillm_ext.muillm_gateupmlpmoe_forward(
             engine.cpp_engine,
             num_shared_experts,
             num_dynamic_experts,
