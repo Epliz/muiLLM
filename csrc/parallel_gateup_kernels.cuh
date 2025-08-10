@@ -7,10 +7,13 @@
 
 #include <torch/extension.h>
 
+#include "ffn/gateupmlpactivation.h"
+
 // parallel Gate/Up Silu (FFN)
 at::Tensor muillm_parallel_gateupmlp_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -24,6 +27,7 @@ at::Tensor muillm_parallel_gateupmlp_forward(
 at::Tensor muillm_parallel_gateupmlp_split_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -37,6 +41,7 @@ at::Tensor muillm_parallel_gateupmlp_split_forward(
 at::Tensor muillm_parallel_gateupmlp_forward_trampoline(
     muillm_engine_ptr engine,
     muillm_comm_ptr comm,
+    int activation,
     torch::Tensor norm_weights,
     float epsilon,
     torch::Tensor gate_weights,
@@ -50,6 +55,7 @@ at::Tensor muillm_parallel_gateupmlp_forward_trampoline(
 at::Tensor muillm_parallel_gateupmlp_split_forward_trampoline(
     muillm_engine_ptr engine,
     muillm_comm_ptr comm,
+    int activation,
     torch::Tensor norm_weights,
     float epsilon,
     torch::Tensor gate_weights,

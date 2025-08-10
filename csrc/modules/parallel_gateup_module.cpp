@@ -5,6 +5,7 @@
 MuiLLMParallelGateUpDownMLP::MuiLLMParallelGateUpDownMLP(
   muillm_engine_t* engine,
   muillm_comm_t* comm,
+  MuiGateUpMLPActivation activation,
   int method,
   torch::Tensor& norm_weights,
   torch::Tensor& gate_weights,
@@ -15,6 +16,7 @@ MuiLLMParallelGateUpDownMLP::MuiLLMParallelGateUpDownMLP(
   this->engine = engine;
   this->comm = comm;
   this->method = static_cast<MuiLLMgateupmlpMethod>(method);
+  this->activation = activation;
 
   this->norm_weights = norm_weights;
   this->gate_weights = gate_weights;
@@ -46,6 +48,7 @@ torch::Tensor MuiLLMParallelGateUpDownMLP::forward(
     return muillm_parallel_gateupmlp_forward(
       this->engine,
       this->comm,
+      this->activation,
       this->norm_weights,
       this->variance_epsilon,
       this->gate_weights,
@@ -59,6 +62,7 @@ torch::Tensor MuiLLMParallelGateUpDownMLP::forward(
     return muillm_parallel_gateupmlp_split_forward(
       this->engine,
       this->comm,
+      this->activation,
       this->norm_weights,
       this->variance_epsilon,
       this->gate_weights,
@@ -76,6 +80,7 @@ torch::Tensor MuiLLMParallelGateUpDownMLP::forward(
 muillm_parallel_igateupdownmlp_module_ptr_t muillm_parallel_gateupdownmlp_module_init_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
+  int activation,
   int method,
   std::optional<torch::Tensor>& norm_weights_,
   torch::Tensor& gate_weights,
@@ -91,6 +96,7 @@ muillm_parallel_igateupdownmlp_module_ptr_t muillm_parallel_gateupdownmlp_module
   MuiLLMParallelGateUpDownMLP* mlp_module = new MuiLLMParallelGateUpDownMLP(
     engine.engine_ptr,
     comm.comm_ptr,
+    static_cast<MuiGateUpMLPActivation>(activation),
     method,
     norm_weights,
     gate_weights,

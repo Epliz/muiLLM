@@ -5,8 +5,11 @@
 
 #include <torch/extension.h>
 
+#include "gateupmlpactivation.h"
+
 void muillm_gateupmlp_forward_placed_output(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -18,6 +21,7 @@ void muillm_gateupmlp_forward_placed_output(
 
 void muillm_gateupmlp_split_forward_placed_output(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -29,6 +33,7 @@ void muillm_gateupmlp_split_forward_placed_output(
 
 at::Tensor muillm_gateupmlp_forward(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -39,6 +44,7 @@ at::Tensor muillm_gateupmlp_forward(
 
 at::Tensor muillm_gateupmlp_split_forward(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
     torch::Tensor& gate_weights,
@@ -50,6 +56,7 @@ at::Tensor muillm_gateupmlp_split_forward(
 // python trampoline
 at::Tensor muillm_gateupmlp_forward_trampoline(
     muillm_engine_ptr engine,
+    int activation,
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
     torch::Tensor gate_weights,
@@ -61,6 +68,7 @@ at::Tensor muillm_gateupmlp_forward_trampoline(
 
 at::Tensor muillm_gateupmlp_split_forward_trampoline(
     muillm_engine_ptr engine,
+    int activation,
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
     torch::Tensor gate_weights,

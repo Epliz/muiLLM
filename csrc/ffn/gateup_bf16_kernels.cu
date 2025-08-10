@@ -1,3 +1,4 @@
+#include "gateupmlpactivation.h"
 #include <hip/hip_bf16.h>
 
 #define GEMV_THREADS_PER_BLOCK 256
@@ -154,6 +155,12 @@ static inline float __device__ silu(float x) {
   return x / (1.0f + expf(-x));
 }
 
+static inline float __device__ gelu_tanh(float x) {
+  // in python:
+  // 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))));
+
+  return 0.5f * x * (1.0f + tanhf(sqrtf(2.0f / M_PI) * (x * (1.0f + 0.044715f * x * x))));
+}
 
 #define FUSED_ROWS_PER_BLOCK 2
 
@@ -164,7 +171,8 @@ __global__ void muillm_gateupmlp_gemv_bf16_kernel(
     const __hip_bfloat16* __restrict__ X, // input = size K
     __hip_bfloat16* __restrict__ Y, // output - size N
     unsigned N,
-    unsigned K
+    unsigned K,
+    MuiGateUpMLPActivation activation
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
   int warpId = threadIdx.x / warpSize;
@@ -333,7 +341,16 @@ __global__ void muillm_gateupmlp_gemv_bf16_kernel(
     if (current_row < N) {
       float gacc = shared_gaccs[threadIdx.x]; // read the fully reduced value
       float uacc = shared_uaccs[threadIdx.x]; // read the fully reduced value
-      float acc= silu(gacc) * uacc;
+      float acc;
+      
+      if (activation == MuiGateUpMLPActivation::SILU) {
+        acc = silu(gacc) * uacc;
+      } else if (activation == MuiGateUpMLPActivation::GELU_TANH) {
+        acc = gelu_tanh(gacc) * uacc;
+      } else {
+        // unsupported activation
+        acc = 0.f;
+      }
 
       // write the output value
       Y[current_row] = __float2bfloat16(acc);
@@ -351,7 +368,8 @@ __global__ void muillm_gateupmlp_gemv_norm_inputs_bf16_kernel(
     unsigned N,
     unsigned K,
     float epsilon,
-    float scale
+    float scale,
+    MuiGateUpMLPActivation activation
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
   int warpId = threadIdx.x / warpSize;
@@ -595,7 +613,16 @@ __global__ void muillm_gateupmlp_gemv_norm_inputs_bf16_kernel(
     if (current_row < N) {
       float gacc = shared_gaccs[threadIdx.x] * rsqrt_var; // read the fully reduced value and scale
       float uacc = shared_uaccs[threadIdx.x] * rsqrt_var; // read the fully reduced value and scale
-      float acc= silu(gacc) * uacc;
+      float acc;
+
+      if (activation == MuiGateUpMLPActivation::SILU) {
+        acc = silu(gacc) * uacc;
+      } else if (activation == MuiGateUpMLPActivation::GELU_TANH) {
+        acc = gelu_tanh(gacc) * uacc;
+      } else {
+        // unsupported activation
+        acc = 0.f;
+      }
 
       // write the output value
       Y[current_row] = __float2bfloat16(acc);
@@ -858,6 +885,7 @@ __global__ void muillm_gateupmlp_gemv_norm_inputs_split_bf16_kernel(
 
 void muillm_gateupmlp_forward_bf16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const __hip_bfloat16* norm_weights,
@@ -895,7 +923,8 @@ void muillm_gateupmlp_forward_bf16(
         N,
         K,
         epsilon,
-        scale
+        scale,
+        activation
       );
     } else if (threads_per_blocks == 128) {
       muillm_gateupmlp_gemv_norm_inputs_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
@@ -907,7 +936,8 @@ void muillm_gateupmlp_forward_bf16(
         N,
         K,
         epsilon,
-        scale
+        scale,
+        activation
       );
     } else if (threads_per_blocks == 256) {
       muillm_gateupmlp_gemv_norm_inputs_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
@@ -919,7 +949,8 @@ void muillm_gateupmlp_forward_bf16(
         N,
         K,
         epsilon,
-        scale
+        scale,
+        activation
       );
     }
   } else {
@@ -931,7 +962,8 @@ void muillm_gateupmlp_forward_bf16(
         x,
         y,
         N,
-        K
+        K,
+        activation
       );
     } else if (threads_per_blocks == 128) {
       muillm_gateupmlp_gemv_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
@@ -940,7 +972,8 @@ void muillm_gateupmlp_forward_bf16(
         x,
         y,
         N,
-        K
+        K,
+        activation
       );
     } else if (threads_per_blocks == 256) {
       muillm_gateupmlp_gemv_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
@@ -949,7 +982,8 @@ void muillm_gateupmlp_forward_bf16(
         x,
         y,
         N,
-        K
+        K,
+        activation
       );
     }
   }
@@ -1130,7 +1164,8 @@ __global__ void muillm_gateupmlp_combine_bf16_kernel(
     const __hip_bfloat16* __restrict__ GY, // input - size N
     const __hip_bfloat16* __restrict__ UY, // input - size N
     __hip_bfloat16* __restrict__ Y, // output - size N
-    unsigned N
+    unsigned N,
+    MuiGateUpMLPActivation activation
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
   int warpId = threadIdx.x / warpSize;
@@ -1141,7 +1176,16 @@ __global__ void muillm_gateupmlp_combine_bf16_kernel(
   if (current_row < N) {
     float g = __bfloat162float(GY[current_row]);
     float u = __bfloat162float(UY[current_row]);
-    float y = silu(g) * u;
+    float y;
+
+    if (activation == MuiGateUpMLPActivation::SILU) {
+      y = silu(g) * u;
+    } else if (activation == MuiGateUpMLPActivation::GELU_TANH) {
+      y = gelu_tanh(g) * u;
+    } else {
+      // unsupported activation
+      y = 0.f;
+    }
 
     // write the output value
     Y[current_row] = __float2bfloat16(y);
@@ -1150,6 +1194,7 @@ __global__ void muillm_gateupmlp_combine_bf16_kernel(
 
 void muillm_gateupmlp_split_forward_bf16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const __hip_bfloat16* norm_weights,
@@ -1261,21 +1306,24 @@ void muillm_gateupmlp_split_forward_bf16(
       gy,
       uy,
       y,
-      N
+      N,
+      activation
     );
   } else if (threads_per_blocks == 128) {
     muillm_gateupmlp_combine_bf16_kernel<128><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
       gy,
       uy,
       y,
-      N
+      N,
+      activation
     );
   } else if (threads_per_blocks == 256) {
     muillm_gateupmlp_combine_bf16_kernel<256><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
       gy,
       uy,
       y,
-      N
+      N,
+      activation
     );
   }
 }
