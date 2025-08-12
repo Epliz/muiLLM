@@ -6,6 +6,8 @@
 at::Tensor muillm_rmsnorm_forward(
     torch::Tensor weights,
     torch::Tensor inputs,
-    float epsilon);
+    float epsilon,
+    float weight_offset
+);
 
 #endif /* __MUILLM_RMSNORM_KERNELS_H__ */

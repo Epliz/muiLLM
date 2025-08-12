@@ -131,6 +131,39 @@ static inline half __device__ hsum8(const khalf8& x) {
   return __hadd(r0, r1);
 }
 
+template <unsigned N>
+static inline float __device__ sumN(const karray<float, N>& x) {
+  float r = 0.f;
+  // TODO: specialize to have less long dependency chain?
+  for (unsigned i = 0; i < N; i++) {
+    r += x.data[i];
+  }
+  return r;
+}
+
+
+static inline float __device__ sum4(const kfloat4& x) {
+  float r0 = 0.f;
+  float r1 = 0.f;
+  // TODO: specialize to have less long dependency chain?
+  for (unsigned i = 0; i < 4; i+=2) {
+    r0 += x.data[i + 0];
+    r1 += x.data[i + 1];
+  }
+  return r0 + r1;
+}
+
+static inline float __device__ sum8(const kfloat8& x) {
+  float r0 = 0.f;
+  float r1 = 0.f;
+  // TODO: specialize to have less long dependency chain?
+  for (unsigned i = 0; i < 8; i+=2) {
+    r0 += x.data[i + 0];
+    r1 += x.data[i + 1];
+  }
+  return r0 + r1;
+}
+
 template <typename T>
 static inline const T* __device__ addr(const T* p, unsigned index) {
   // helps the AMDGPU compiler understand it can use the sgrp pair + single vgpr addressing mode
@@ -224,15 +257,15 @@ static inline void __device__ qdotN(float& acc, const karray<uint8_t, N>& qw, ha
   acc += __half2float(scale_min_val.y) * __half2float(hsumN(x));
 }
 
-static inline void __device__ qdot4(float& acc, const kuint8x4& qw, half2 scale_min_val, const khalf4& x) {
-  ifdotN_scale<4>(acc, qw, scale_min_val.x, __halfNtofloatN<4>(x));
-  acc += __half2float(scale_min_val.y) * __half2float(hsum4(x));
+static inline void __device__ qdot4(float& acc, const kuint8x4& qw, half2 scale_min_val, const kfloat4& x) {
+  ifdotN_scale<4>(acc, qw, scale_min_val.x, x);
+  acc += __half2float(scale_min_val.y) * sum4(x);
 }
 
 // TODO: lots of cvt_f32_f16 in the assembly, need to figure it out
-static inline void __device__ qdot8(float& acc, const kuint8x8& qw, half2 scale_min_val, const khalf8& x) {
-  ifdotN_scale<8>(acc, qw, scale_min_val.x, __halfNtofloatN<8>(x));
-  acc += __half2float(scale_min_val.y) * __half2float(hsum8(x));
+static inline void __device__ qdot8(float& acc, const kuint8x8& qw, half2 scale_min_val, const kfloat8& x) {
+  ifdotN_scale<8>(acc, qw, scale_min_val.x, x);
+  acc += __half2float(scale_min_val.y) * sum8(x);
 }
 
 __global__ void muillm_int8_gemv_kernel(
@@ -291,7 +324,7 @@ __global__ void muillm_int8_gemv_kernel(
         //*
         for (k = threadIdx.x * 8; k + 7 < K; k += (THREADS_PER_BLOCK * 8)) {
           // vectorized
-          khalf8 x = khalf8::load(addr(X, k));
+          kfloat8 x = __half82float8(khalf8::load(addr(X, k)));
 
           // the quantized group index is the same for all rows
           // TODO: remove division and replace with shift
@@ -304,7 +337,7 @@ __global__ void muillm_int8_gemv_kernel(
         }
         if (k + 3 < K) {
           // vectorized
-          khalf4 x = khalf4::load(addr(X, k));
+          kfloat4 x = __half42float4(khalf4::load(addr(X, k)));
 
           // the quantized group index is the same for all rows
           // TODO: remove division and replace with shift
@@ -444,6 +477,7 @@ __global__ void muillm_int8_gemv_norm_inputs_kernel(
     unsigned K,
     unsigned G,
     float epsilon,
+    float weights_offset,
     float scale,
     unsigned group_size_shift
 ) {
@@ -498,15 +532,15 @@ __global__ void muillm_int8_gemv_norm_inputs_kernel(
         //*
         for (k = threadIdx.x * 8; k + 7 < K; k += (THREADS_PER_BLOCK * 8)) {
           // vectorized
-          khalf8 x = khalf8::load(addr(X, k));
-          khalf8 nw = khalf8::load(addr(NW, k));
+          kfloat8 x = __half82float8(khalf8::load(addr(X, k)));
+          kfloat8 nw = __half82float8(khalf8::load(addr(NW, k))) + weights_offset;
 
           // the quantized group index is the same for all rows
           // TODO: remove division and replace with shift
           unsigned qgidx = k >> group_size_shift;
 
           // accumulate for the variance
-          dot8(var_x, __half82float8(x), __half82float8(x));
+          dot8(var_x, x, x);
 
           // multiply with normalization weights
           x *= nw;
@@ -519,15 +553,15 @@ __global__ void muillm_int8_gemv_norm_inputs_kernel(
         if (k + 3 < K) {
 
           // vectorized
-          khalf4 x = khalf4::load(addr(X, k));
-          khalf4 nw = khalf4::load(addr(NW, k));
+          kfloat4 x = __half42float4(khalf4::load(addr(X, k)));
+          kfloat4 nw = __half42float4(khalf4::load(addr(NW, k))) + weights_offset;
 
           // the quantized group index is the same for all rows
           // TODO: remove division and replace with shift
           unsigned qgidx = k >> group_size_shift;
 
           // accumulate for the variance
-          dot4(var_x, __half42float4(x), __half42float4(x));
+          dot4(var_x, x, x);
 
           // multiply with normalization weights
           x *= nw;
@@ -542,7 +576,7 @@ __global__ void muillm_int8_gemv_norm_inputs_kernel(
         if (k + 1 < K) {
           // vectorized
           kfloat2 x = __half22float2(khalf2::load(addr(X, k)));
-          kfloat2 nw = __half22float2(khalf2::load(addr(NW, k)));
+          kfloat2 nw = __half22float2(khalf2::load(addr(NW, k))) + weights_offset;
 
           // the quantized group index is the same for all rows
           // TODO: remove division and replace with shift
@@ -565,7 +599,7 @@ __global__ void muillm_int8_gemv_norm_inputs_kernel(
         if (k < K) {
           // remainder
           float x = __half2float(*addr(X,k));
-          float nw = __half2float(*addr(NW,k));
+          float nw = __half2float(*addr(NW,k)) + weights_offset;
 
           // the quantized group index is the same for all rows
           // TODO: remove division and replace with shift
@@ -620,7 +654,7 @@ __global__ void muillm_int8_gemv_norm_inputs_kernel(
             float w = qint8tofloat(*addr(W_,k), *(const half2*)addr(QSMV_, 2 * qgidx));
 
             float x = __half2float(X[k]);
-            float nw = __half2float(NW[k]);
+            float nw = __half2float(NW[k]) + weights_offset;
 
             // accumuate the variance
             var_x += x * x;
@@ -636,7 +670,7 @@ __global__ void muillm_int8_gemv_norm_inputs_kernel(
             float w = qint8tofloat(*addr(W_,k), *(const half2*)addr(QSMV_, 2 * qgidx));
 
             float x = __half2float(X[k]);
-            float nw = __half2float(NW[k]);
+            float nw = __half2float(NW[k]) + weights_offset;
 
             // don't accumulate the variance (we already have done it with i == 0)
 
@@ -703,6 +737,7 @@ __global__ void muillm_int8_gemv_norm_inputs_kernel(
 at::Tensor muillm_int8_linear_activ_forward(
     torch::Tensor norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor weights,
     torch::Tensor scales_min_vals,
     int group_size_shift,
@@ -762,6 +797,7 @@ at::Tensor muillm_int8_linear_activ_forward(
       K,
       G,
       epsilon,
+      norm_weights_offset,
       scale,
       group_size_shift
     );

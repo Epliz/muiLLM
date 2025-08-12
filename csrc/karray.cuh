@@ -17,6 +17,14 @@ struct __attribute__((packed)) karray {
     }
   }
 
+  inline karray<T, N> __device__ operator+(T s) const {
+    karray<T, N> result;
+    for (unsigned i = 0; i < N; i++) {
+      result.data[i] = data[i] + s;
+    }
+    return result;
+  }
+
   inline karray<T, N>& __device__ operator*=(const karray<T, N>& s) {
     for (unsigned i = 0; i < N; i++) {
       data[i] *= s.data[i];
@@ -45,6 +53,14 @@ struct __attribute__((packed)) karray<half, N> {
     for (unsigned i = 0; i < N; i++) {
       ((karray<half, N>*)ptr)->data[i] = v.data[i];
     }
+  }
+
+  inline karray<half, N> __device__ operator+(half s) const {
+    karray<half, N> result;
+    for (unsigned i = 0; i < N; i++) {
+      result.data[i] = __hadd(data[i], s);
+    }
+    return result;
   }
 
   inline karray<half, N>& __device__ operator*=(const karray<half, N>& s) {

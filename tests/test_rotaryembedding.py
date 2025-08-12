@@ -68,6 +68,7 @@ def _test_basic_mistral_rotary(device: str, dtype: torch.dtype):
         replacement_context=replacement_context,
         prev_module=rotary_emb_copy,
     )
+    mui_rotary.finalize_init()
 
     input_position_ids = torch.arange(
         start=0, end=max_position_embeddings, device=device
@@ -147,6 +148,7 @@ def _test_basic_llama3_rotary(device: str, dtype: torch.dtype):
         replacement_context=replacement_context,
         prev_module=rotary_emb_copy,
     )
+    mui_rotary.finalize_init()
 
     input_position_ids = torch.arange(
         start=0, end=max_position_embeddings, device=device
@@ -226,6 +228,7 @@ def _test_basic_llama4_rotary(device: str, dtype: torch.dtype):
         replacement_context=replacement_context,
         prev_module=rotary_emb_copy,
     )
+    mui_rotary.finalize_init()
 
     input_position_ids = torch.arange(
         start=0, end=max_position_embeddings, device=device

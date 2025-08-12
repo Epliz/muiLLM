@@ -57,6 +57,18 @@ struct __align__(8) float8 {
   float d;
 };
 
+__device__ inline float8 operator+(const float8& a, const float b) {
+  float8 r;
+  r.x = a.x + b;
+  r.y = a.y + b;
+  r.z = a.z + b;
+  r.w = a.w + b;
+  r.a = a.a + b;
+  r.b = a.b + b;
+  r.c = a.c + b;
+  r.d = a.d + b;
+  return r;
+}
 
 static inline void __device__ dot2(float& acc, const float2& a, const float2& b) {
   acc += a.x * b.x;
@@ -378,6 +390,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_fp16_kernel(
     unsigned N,
     unsigned K,
     float epsilon,
+    float weights_offset,
     float scale
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
@@ -443,7 +456,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_fp16_kernel(
         for (k = threadIdx.x * 8; k + 7 < K; k += (THREADS_PER_BLOCK * 8)) {
           // vectorized
           float8 x = __half82float8(*(const half8*)(addr(X, k)));
-          float8 nw = __half82float8(*(const half8*)(addr(NW, k)));
+          float8 nw = __half82float8(*(const half8*)(addr(NW, k))) + weights_offset;
 
           float8 gw0 = __half82float8(load_nontemporal_half8(addr(GW0, k)));
           float8 gw1 = __half82float8(load_nontemporal_half8(addr(GW1, k)));
@@ -471,7 +484,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_fp16_kernel(
         if (k + 3 < K) {
           // vectorized
           float4 x = __half42float4(*(const half4*)(addr(X, k)));
-          float4 nw = __half42float4(*(const half4*)(addr(NW, k)));
+          float4 nw = __half42float4(*(const half4*)(addr(NW, k))) + weights_offset;
 
           float4 gw0 = __half42float4(load_nontemporal_half4(addr(GW0, k)));
           float4 gw1 = __half42float4(load_nontemporal_half4(addr(GW1, k)));
@@ -497,7 +510,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_fp16_kernel(
         if (k + 1 < K) {
           // vectorized
           float2 x = __half22float2(*(const half2*)(addr(X, k)));
-          float2 nw = __half22float2(*(const half2*)(addr(NW, k)));
+          float2 nw = __half22float2(*(const half2*)(addr(NW, k))) + weights_offset;
 
           float2 gw0 = __half22float2(load_nontemporal_half2(addr(GW0, k)));
           float2 gw1 = __half22float2(load_nontemporal_half2(addr(GW1, k)));
@@ -522,7 +535,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_fp16_kernel(
         if (k < K) {
           // remainder
           float x = __half2float(*addr(X,k));
-          float nw = __half2float(*addr(NW,k));
+          float nw = __half2float(*addr(NW,k)) + weights_offset;
 
           float gw0 = __half2float(*addr(GW0,k));
           float gw1 = __half2float(*addr(GW1,k));
@@ -576,7 +589,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_fp16_kernel(
         if (i == 0) {
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
             float x =  __half2float(X[k]);
-            float nw = __half2float(NW[k]);
+            float nw = __half2float(NW[k]) + weights_offset;
 
             // accumuate the variance
             var_x += x * x;
@@ -592,7 +605,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_fp16_kernel(
         } else {
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
             float x =  __half2float(X[k]);
-            float nw = __half2float(NW[k]);
+            float nw = __half2float(NW[k]) + weights_offset;
 
             // don't accumulate the variance (we already have done it with i == 0)
 
@@ -659,6 +672,7 @@ void muillm_gateupmlpmoe_forward_fp16(
   unsigned num_computed_experts,
   const half* norm_weights,
   float epsilon,
+  float norm_weights_offset,
   const half* gate_weights,
   const half* up_weights,
   const half* x,
@@ -698,6 +712,7 @@ void muillm_gateupmlpmoe_forward_fp16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     } else if (threads_per_blocks == 128) {
@@ -713,6 +728,7 @@ void muillm_gateupmlpmoe_forward_fp16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     } else if (threads_per_blocks == 256) {
@@ -728,6 +744,7 @@ void muillm_gateupmlpmoe_forward_fp16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     }
@@ -789,6 +806,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_split_fp16_kernel(
     unsigned N,
     unsigned K,
     float epsilon,
+    float weights_offset,
     float scale
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
@@ -853,7 +871,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_split_fp16_kernel(
         for (k = threadIdx.x * 8; k + 7 < K; k += (THREADS_PER_BLOCK * 8)) {
           // vectorized
           float8 x = __half82float8(*(const half8*)(addr(X, k)));
-          float8 nw = __half82float8(*(const half8*)(addr(NW, k)));
+          float8 nw = __half82float8(*(const half8*)(addr(NW, k))) + weights_offset;
 
           float8 w0 = __half82float8(load_nontemporal_half8(addr(W0, k)));
           float8 w1 = __half82float8(load_nontemporal_half8(addr(W1, k)));
@@ -881,7 +899,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_split_fp16_kernel(
         if (k + 3 < K) {
           // vectorized
           float4 x = __half42float4(*(const half4*)(addr(X, k)));
-          float4 nw = __half42float4(*(const half4*)(addr(NW, k)));
+          float4 nw = __half42float4(*(const half4*)(addr(NW, k))) + weights_offset;
 
           float4 w0 = __half42float4(load_nontemporal_half4(addr(W0, k)));
           float4 w1 = __half42float4(load_nontemporal_half4(addr(W1, k)));
@@ -907,7 +925,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_split_fp16_kernel(
         if (k + 1 < K) {
           // vectorized
           float2 x = __half22float2(*(const half2*)(addr(X, k)));
-          float2 nw = __half22float2(*(const half2*)(addr(NW, k)));
+          float2 nw = __half22float2(*(const half2*)(addr(NW, k))) + weights_offset;
 
           float2 w0 = __half22float2(load_nontemporal_half2(addr(W0, k)));
           float2 w1 = __half22float2(load_nontemporal_half2(addr(W1, k)));
@@ -932,7 +950,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_split_fp16_kernel(
         if (k < K) {
           // remainder
           float x = __half2float(*addr(X,k));
-          float nw = __half2float(*addr(NW,k));
+          float nw = __half2float(*addr(NW,k)) + weights_offset;
 
           float w0 = __half2float(*addr(W0,k));
           float w1 = __half2float(*addr(W1,k));
@@ -983,7 +1001,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_split_fp16_kernel(
         if (i == 0) {
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
             float x =  __half2float(X[k]);
-            float nw = __half2float(NW[k]);
+            float nw = __half2float(NW[k]) + weights_offset;
 
             // accumuate the variance
             var_x += x * x;
@@ -997,7 +1015,7 @@ __global__ void muillm_gateupmlpmoe_gemv_norm_inputs_split_fp16_kernel(
         } else {
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
             float x =  __half2float(X[k]);
-            float nw = __half2float(NW[k]);
+            float nw = __half2float(NW[k]) + weights_offset;
 
             // don't accumulate the variance (we already have done it with i == 0)
 
@@ -1270,6 +1288,7 @@ void muillm_gateupmlpmoe_split_forward_fp16(
   unsigned num_computed_experts,
   const half* norm_weights,
   float epsilon,
+  float norm_weights_offset,
   const half* gate_weights,
   const half* up_weights,
   const half* x,
@@ -1314,6 +1333,7 @@ void muillm_gateupmlpmoe_split_forward_fp16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     } else if (threads_per_blocks == 128) {
@@ -1330,6 +1350,7 @@ void muillm_gateupmlpmoe_split_forward_fp16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     } else if (threads_per_blocks == 256) {
@@ -1346,6 +1367,7 @@ void muillm_gateupmlpmoe_split_forward_fp16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     }

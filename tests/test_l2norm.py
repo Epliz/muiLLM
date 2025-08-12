@@ -43,6 +43,7 @@ def _test_basic_llama4_l2norm(dtype: torch.dtype, device: str):
         replacement_context=replacement_context,
         prev_module=norm_copy,
     )
+    muinorm.finalize_init()
 
     input_tensor = torch.rand(size=(4, hidden_size), dtype=dtype, device=device)
 

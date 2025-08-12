@@ -37,6 +37,7 @@ __global__ void muillm_rmsnorm_fp16_kernel(
     const half* __restrict__ X, // input = size BxK
     half* __restrict__ Y, // output = size BxK
     float epsilon,
+    float weight_offset,
     unsigned K,
     float scale // 1/K
 ) {
@@ -106,7 +107,7 @@ __global__ void muillm_rmsnorm_fp16_kernel(
       unsigned k = blockIdx.x * ELEMENTS_PER_BLOCK + threadIdx.x * 2;
       if (k + 1 < K) {
         float2 x = __half22float2(*((const half2*)&X[k]));
-        float2 w = __half22float2(*((const half2*)&W[k]));
+        float2 w = __half22float2(*((const half2*)&W[k])) + weight_offset;
 
         float yx = w.x * (x.x * rsqrt_var);
         float yy = w.y * (x.y * rsqrt_var);
@@ -116,7 +117,7 @@ __global__ void muillm_rmsnorm_fp16_kernel(
       }
       if (k < K) {
         float x = __half2float(X[k]);
-        float w = __half2float(W[k]);
+        float w = __half2float(W[k]) + weight_offset;
 
         float y = w * (x * rsqrt_var);
         
@@ -132,7 +133,8 @@ void muillm_rmsnorm_fp16(
   const half* __restrict__ W, // weight matrix - size K
   const half* __restrict__ X, // input = size BxK
   half* __restrict__ Y, // output = size BxK
-  float epsilon
+  float epsilon,
+  float weight_offset
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
@@ -145,6 +147,7 @@ void muillm_rmsnorm_fp16(
     X,
     Y,
     epsilon,
+    weight_offset,
     K,
     scale
   );

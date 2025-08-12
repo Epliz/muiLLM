@@ -67,6 +67,7 @@ class _MuiGateUpMLP(torch.autograd.Function):
         inputs,
         norm_weights,
         variance_epsilon,
+        weight_offset,
         gate_weights,
         up_weights,
         down_weights,
@@ -77,6 +78,7 @@ class _MuiGateUpMLP(torch.autograd.Function):
             activation,
             norm_weights,
             variance_epsilon,
+            weight_offset,
             gate_weights,
             up_weights,
             down_weights,
@@ -109,6 +111,7 @@ class _MuiGateUpMLPSplit(torch.autograd.Function):
         inputs,
         norm_weights,
         variance_epsilon,
+        weight_offset,
         gate_weights,
         up_weights,
         down_weights,
@@ -119,6 +122,7 @@ class _MuiGateUpMLPSplit(torch.autograd.Function):
             activation,
             norm_weights,
             variance_epsilon,
+            weight_offset,
             gate_weights,
             up_weights,
             down_weights,
@@ -149,8 +153,7 @@ class MuiGateUpDownMLP(MuiModule):
         hidden_size: int,
         intermediate_size: int,
         activation_function: nn.Module,
-        variance_epsilon: float = 0.0,
-        normalize: bool = False,
+        norm: Optional[MuiRMSNorm] = None,
         device=None,
         dtype=None,
     ) -> None:
@@ -160,13 +163,7 @@ class MuiGateUpDownMLP(MuiModule):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
-        self.normalize = normalize
-        self.variance_epsilon = variance_epsilon
-        self.norm_weights = (
-            nn.Parameter(torch.ones(hidden_size, dtype=dtype, device=device))
-            if normalize
-            else None
-        )
+        self.norm = norm
 
         self.gate_proj = MuiLinear(
             engine_config,
@@ -291,31 +288,19 @@ class MuiGateUpDownMLP(MuiModule):
             # due to replacement order, we might get the normalization weights already in
             # or in prev_layernorm_module
             # but not both
-            if (prev_module.normalize) and (prev_layernorm_module is not None):
+            if (prev_module.norm is not None) and (prev_layernorm_module is not None):
                 raise ValueError(
                     "both norm weights in MuiGateUpDownMLP and layernorm module provided"
                 )
 
-            if prev_module.normalize:
-                normalize = True
-                variance_epsilon = prev_module.variance_epsilon
-                norm_weights = None  # needs to be None for copy_module
-            elif prev_layernorm_module is not None:
-                normalize = True
-                variance_epsilon = MuiRMSNorm._extract_eps(prev_layernorm_module)
-                norm_weights = MuiRMSNorm._extract_weights(prev_layernorm_module)
-            else:
-                normalize = False
-                variance_epsilon = 0.0
-                norm_weights = None
+            norm = prev_module.norm
         else:
-            normalize = prev_layernorm_module is not None
-            variance_epsilon = (
-                MuiRMSNorm._extract_eps(prev_layernorm_module) if normalize else 0.0
-            )
-            norm_weights = (
-                MuiRMSNorm._extract_weights(prev_layernorm_module)
-                if normalize
+            norm = (
+                MuiRMSNorm.replace(
+                    replacement_context,
+                    prev_layernorm_module,
+                )
+                if prev_layernorm_module is not None
                 else None
             )
 
@@ -324,14 +309,12 @@ class MuiGateUpDownMLP(MuiModule):
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             activation_function=activation_function,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             dtype=dtype,
             device=device,
         )
-        new_module.copy_module(
-            prev_module=prev_module, norm_weights=norm_weights, device=device
-        )
+
+        new_module.copy_module(prev_module=prev_module, device=device)
 
         # delete the previous modules to free memory
         if not isinstance(prev_module, MuiGateUpDownMLP):
@@ -349,8 +332,6 @@ class MuiGateUpDownMLP(MuiModule):
         prev_module: Union[
             "MuiGateUpDownMLP", LlamaMLP, MistralMLP, Gemma3MLP, Llama4TextMLP
         ],
-        norm_weights: torch.Tensor = None,
-        variance_epsilon: float = 0.0,
         device=None,
     ):
         if device is None:
@@ -360,21 +341,8 @@ class MuiGateUpDownMLP(MuiModule):
         self.up_proj.copy_module(prev_module.up_proj, device=device)
 
         if isinstance(prev_module, MuiGateUpDownMLP):
-            if (prev_module.norm_weights is not None) and (norm_weights is not None):
-                raise ValueError(
-                    "both norm weights in MuiGateUpDownMLP and norm_weight provided"
-                )
-
-            if prev_module.norm_weights is not None:
-                norm_weights = prev_module.norm_weights
-
-        if norm_weights is not None:
-            # the rescaling weights are not fused in the matrices due to instabilities
-            norm_weights_requires_grad = norm_weights.requires_grad
-            self.norm_weights = nn.Parameter(norm_weights.clone().detach())
-            self.norm_weights.requires_grad = norm_weights_requires_grad
-
-            self.norm_weights = norm_weights
+            if prev_module.norm is not None:
+                self.norm.copy_module(prev_module.norm, device=device)
 
         self.down_proj.copy_module(prev_module.down_proj, device=device)
 
@@ -388,8 +356,8 @@ class MuiGateUpDownMLP(MuiModule):
         self, input: Tensor, residual: Optional[Tensor] = None
     ) -> Tensor:
         # else: # not dispatchable or not MuiLinear
-        if self.normalize:
-            input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
+        if self.norm is not None:
+            input = self.norm(input)
 
         # we shard gate/up by rows so that the all_reduce from the gate/up linears can be avoided
         g = self.gate_proj(input)
@@ -412,12 +380,14 @@ class MuiGateUpDownMLP(MuiModule):
             if isinstance(self.gate_proj, MuiLinear) and isinstance(
                 self.up_proj, MuiLinear
             ):
+                normalize = self.norm is not None
                 return _MuiGateUpMLP.apply(
                     self.cpp_engine,
                     self.mui_activation,
                     input,
-                    self.norm_weights,
-                    self.variance_epsilon,
+                    self.norm.weight if normalize else None,
+                    self.norm.variance_epsilon if normalize else 0.0,
+                    self.norm.weight_offset if normalize else 0.0,
                     self.gate_proj.weight,
                     self.up_proj.weight,
                     self.down_proj.weight,
@@ -442,12 +412,14 @@ class MuiGateUpDownMLP(MuiModule):
 
                 # as we shard gate/up by rows, we don't need to shard the input and we
                 # still can use the fused RMSNorm
+                normalize = self.norm is not None
                 return _MuiGateUpMLPSplit.apply(
                     self.cpp_engine,
                     self.mui_activation,
                     input,
-                    self.norm_weights,
-                    self.variance_epsilon,
+                    self.norm.weight if normalize else None,
+                    self.norm.variance_epsilon if normalize else 0.0,
+                    self.norm.weight_offset if normalize else 0.0,
                     self.gate_proj.weight,
                     self.up_proj.weight,
                     self.down_proj.weight,

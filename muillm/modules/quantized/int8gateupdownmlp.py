@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.quantized.int8linear import MuiInt8Linear
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
-from muillm.modules.norm.rmsnorm import _MuiRMSNorm
+from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 from muillm.quantization.rtnquantizer import RTNQuantizer
 from muillm.quantization.quantizationmethod import Int8WeightOnlyQuantizationMethod
 
@@ -44,6 +44,7 @@ class _MuiInt8GateUpMLP(torch.autograd.Function):
         inputs,
         norm_weights,
         variance_epsilon,
+        norm_weights_offset,
         gate_up_weights,
         gate_up_scales_min_vals,
         group_size_shift,
@@ -51,6 +52,7 @@ class _MuiInt8GateUpMLP(torch.autograd.Function):
         output = muillm_ext.muillm_int8_gateupmlp_forward(
             norm_weights,
             variance_epsilon,
+            norm_weights_offset,
             gate_up_weights,
             gate_up_scales_min_vals,
             group_size_shift,
@@ -74,8 +76,7 @@ class MuiInt8GateUpDownMLP(MuiModule):
         hidden_size: int,
         intermediate_size: int,
         activation_function: nn.Module,
-        variance_epsilon: float = 0.0,
-        normalize: bool = False,
+        norm: Optional[MuiRMSNorm] = None,
         device=None,
         dtype=None,
     ) -> None:
@@ -89,13 +90,7 @@ class MuiInt8GateUpDownMLP(MuiModule):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
-        self.normalize = normalize
-        self.variance_epsilon = variance_epsilon
-        self.norm_weights = (
-            nn.Parameter(torch.ones(hidden_size, dtype=dtype, device=device))
-            if normalize
-            else None
-        )
+        self.norm = norm
 
         gate_proj = MuiInt8Linear(
             engine_config,
@@ -165,6 +160,11 @@ class MuiInt8GateUpDownMLP(MuiModule):
             return prev_module
 
         if not isinstance(prev_module, MuiGateUpDownMLP):
+            raise ValueError(
+                f"Expected prev_module to be MuiGateUpDownMLP, got {type(prev_module)}"
+            )
+
+        if not isinstance(prev_module, MuiGateUpDownMLP):
             # Make sure we convert the previous module to a local module
             # so that we can safely copy its parameters
             prev_module = replacement_context.to_local_module(prev_module)
@@ -181,8 +181,7 @@ class MuiInt8GateUpDownMLP(MuiModule):
         intermediate_size = prev_module.intermediate_size
         activation_function = prev_module.activation_function
 
-        normalize = prev_module.normalize is not None
-        variance_epsilon = prev_module.variance_epsilon
+        norm = prev_module.norm
 
         new_module = MuiInt8GateUpDownMLP(
             engine_config=engine_config,
@@ -190,8 +189,7 @@ class MuiInt8GateUpDownMLP(MuiModule):
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             activation_function=activation_function,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             dtype=dtype,
             device=device,
         )
@@ -275,15 +273,6 @@ class MuiInt8GateUpDownMLP(MuiModule):
         if device is None:
             raise ValueError("device was None")
 
-        if prev_module.norm_weights is not None:
-            # the rescaling weights are not fused in the matrices due to instabilities
-
-            norm_weights_requires_grad = prev_module.norm_weights.requires_grad
-            self.norm_weights = nn.Parameter(prev_module.norm_weights.clone().detach())
-            self.norm_weights.requires_grad = norm_weights_requires_grad
-
-            self.norm_weights = prev_module.norm_weights
-
         gate_proj = MuiInt8Linear(
             self.engine_config,
             self.quantization_method,
@@ -320,12 +309,14 @@ class MuiInt8GateUpDownMLP(MuiModule):
         self._check_dispatchable()
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
+        normalize = self.norm is not None
         if self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
             gateup = _MuiInt8GateUpMLP.apply(
                 input,
-                self.norm_weights,
-                self.variance_epsilon,
+                self.norm.weight if normalize else None,
+                self.norm.variance_epsilon if normalize else 0.0,
+                self.norm.weight_offset if normalize else 0.0,
                 self.gate_up_weights,
                 self.gate_up_scales_min_vals,
                 self.group_size_shift,
@@ -333,8 +324,8 @@ class MuiInt8GateUpDownMLP(MuiModule):
             return self.down_proj(gateup, residual=residual)
 
         # else: # not dispatchable or not MuiInt8Linear
-        if self.normalize:
-            input = _MuiRMSNorm.apply(input, self.norm_weights, self.variance_epsilon)
+        if normalize:
+            input = self.norm(input)
 
         gate_weights, up_weights = self._dequantize_gateup_weights(
             self.gate_up_weights, self.gate_up_scales_min_vals

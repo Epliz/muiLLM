@@ -6,6 +6,7 @@
 at::Tensor muillm_int8_linear_activ_forward(
     torch::Tensor norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor weights,
     torch::Tensor scales_min_vals,
     int group_size_shift,

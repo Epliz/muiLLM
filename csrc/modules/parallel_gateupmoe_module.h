@@ -22,6 +22,7 @@ struct MuiLLMParallelGateUpDownMLPMoE: MuiLLMParallelGateUpDownMLPInterface {
   torch::Tensor down_weights{nullptr};
 
   float variance_epsilon;
+  float norm_weights_offset;
   
   int num_shared_experts;
   int num_dynamic_experts;
@@ -41,7 +42,8 @@ struct MuiLLMParallelGateUpDownMLPMoE: MuiLLMParallelGateUpDownMLPInterface {
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
-    float variance_epsilon
+    float variance_epsilon,
+    float norm_weights_offset
   );
 
   virtual ~MuiLLMParallelGateUpDownMLPMoE();
@@ -66,7 +68,8 @@ muillm_parallel_igateupdownmlp_module_ptr_t muillm_parallel_gateupdownmlpmoe_mod
   torch::Tensor& gate_weights,
   torch::Tensor& up_weights,
   torch::Tensor& down_weights,
-  float variance_epsilon
+  float variance_epsilon,
+  float norm_weights_offset
 );
 
 // deinit
