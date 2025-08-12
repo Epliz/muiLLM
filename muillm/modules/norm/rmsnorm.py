@@ -22,6 +22,7 @@ from muillm.replacement.replacementcontext import MuiReplacementContext
 class _MuiRMSNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs, weights, epsilon):
+        inputs = inputs.contiguous()
         output = muillm_ext.muillm_rmsnorm_forward(weights, inputs, epsilon)
 
         ctx.save_for_backward(inputs, weights)
@@ -80,7 +81,14 @@ class MuiRMSNorm(MuiModule):
             "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Gemma3RMSNorm, Llama4TextRMSNorm
         ],
     ) -> float:
-        # TODO: for Gemma, need to add 1
+        if isinstance(prev_module, Gemma3RMSNorm):
+            # Gemma adds 1.f in the forward pass and its weights are zero-centered
+            requires_grad = prev_module.weight.requires_grad
+            weights = nn.Parameter(
+                (prev_module.weight + 1.0).clone().detach(), requires_grad=requires_grad
+            )
+            return weights
+
         return prev_module.weight
 
     @staticmethod
@@ -122,7 +130,9 @@ class MuiRMSNorm(MuiModule):
             dtype=prev_module.weight.dtype,
             device=device,
         )
-        new_module.copy_module(prev_module.weight, device=device)
+
+        prev_weights = MuiRMSNorm._extract_weights(prev_module)
+        new_module.copy_module(prev_weights, device=device)
 
         return new_module
 
