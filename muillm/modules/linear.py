@@ -44,8 +44,7 @@ class MuiLinear(MuiModule, nn.Linear):
         in_features: int,
         out_features: int,
         bias: bool = True,
-        variance_epsilon: float = 0.0,
-        normalize: bool = False,
+        norm: Optional[MuiRMSNorm] = None,
         device=None,
         dtype=None,
     ) -> None:
@@ -64,13 +63,7 @@ class MuiLinear(MuiModule, nn.Linear):
         self.device = self.weight.device
         self.dtype = self.weight.dtype
 
-        self.normalize = normalize
-        self.variance_epsilon = variance_epsilon
-        self.norm_weights = (
-            nn.Parameter(torch.ones(in_features, dtype=dtype, device=device))
-            if normalize
-            else None
-        )
+        self.norm = norm
 
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
@@ -88,14 +81,15 @@ class MuiLinear(MuiModule, nn.Linear):
         if self.cpp_module is not None:
             muillm_ext.muillm_linear_module_deinit(self.cpp_module)
 
-        norm_weights = self.norm_weights if self.norm_weights is not None else None
+        normalize = self.norm is not None
         bias = self.bias if self.bias is not None else None
 
         self.cpp_module = muillm_ext.muillm_linear_module_init(
             self.cpp_engine,
             self.weight,
-            norm_weights,
-            self.variance_epsilon,
+            self.norm.weight if normalize else None,
+            self.norm.variance_epsilon if normalize else 0.0,
+            self.norm.weight_offset if normalize else 0.0,
             None,  # mul_bias
             bias,
         )
@@ -114,10 +108,8 @@ class MuiLinear(MuiModule, nn.Linear):
             self.bias = None
             del bias
 
-        if self.norm_weights is not None:
-            norm_weights = self.norm_weights
-            self.norm_weights = None
-            del norm_weights
+        if self.norm is not None:
+            del self.norm
 
         # destroy the C++ module as well to severe the ties to tensors
         if self.cpp_module is not None:
@@ -184,30 +176,29 @@ class MuiLinear(MuiModule, nn.Linear):
             # due to replacement order, we might get the normalization weights already in
             # or in prev_layernorm_module
             # but not both
-            if (prev_module.normalize) and (prev_layernorm_module is not None):
+            if (prev_module.norm is not None) and (prev_layernorm_module is not None):
                 raise ValueError(
                     "both norm weights in MuiLinear and layernorm module provided"
                 )
 
-            if prev_module.normalize:
-                normalize = True
-                variance_epsilon = prev_module.variance_epsilon
-                norm_weights = None  # needs to be None for copy_module
-            elif prev_layernorm_module is not None:
-                normalize = True
-                variance_epsilon = MuiRMSNorm._extract_eps(prev_layernorm_module)
-                norm_weights = prev_layernorm_module.weight
-            else:
-                normalize = False
-                variance_epsilon = 0.0
-                norm_weights = None
+            norm = (
+                MuiRMSNorm.replace(
+                    replacement_context,
+                    prev_layernorm_module,
+                )
+                if prev_layernorm_module is not None
+                else prev_module.norm
+            )
 
         elif isinstance(prev_module, nn.Linear):
-            normalize = prev_layernorm_module is not None
-            variance_epsilon = (
-                MuiRMSNorm._extract_eps(prev_layernorm_module) if normalize else 0.0
+            norm = (
+                MuiRMSNorm.replace(
+                    replacement_context,
+                    prev_layernorm_module,
+                )
+                if prev_layernorm_module is not None
+                else None
             )
-            norm_weights = prev_layernorm_module.weight if normalize else None
         else:
             raise ValueError(
                 f"Unsupported replacement to MuiLinear: {prev_module.__class__.__name__}"
@@ -218,14 +209,11 @@ class MuiLinear(MuiModule, nn.Linear):
             in_features=in_features,
             out_features=out_features,
             bias=has_bias,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             dtype=dtype,
             device=device,
         )
-        new_module.copy_module(
-            prev_module=prev_module, norm_weights=norm_weights, device=device
-        )
+        new_module.copy_module(prev_module=prev_module, device=device)
 
         return new_module
 
@@ -259,9 +247,9 @@ class MuiLinear(MuiModule, nn.Linear):
     ) -> None:
         norm_weights_requires_grad = norm_weights.requires_grad
 
-        self.norm_weights.data.copy_(norm_weights.data)
+        self.norm.weight.data.copy_(norm_weights.data)
         MuiLinear._set_requires_grads(
-            self.norm_weights,
+            self.norm.weight,
             (
                 requires_grads
                 if requires_grads is not None
@@ -272,8 +260,6 @@ class MuiLinear(MuiModule, nn.Linear):
     def copy_module(
         self,
         prev_module: Union["MuiLinear", nn.Linear],
-        norm_weights: torch.Tensor = None,
-        variance_epsilon: float = 0.0,
         device=None,
     ):
         if device is None:
@@ -285,28 +271,6 @@ class MuiLinear(MuiModule, nn.Linear):
 
         if has_bias:
             self._set_bias(prev_module.bias)
-
-        if isinstance(prev_module, MuiLinear):
-            # MuiLinear inherits nn.Linear, so need to check first
-            if (prev_module.norm_weights is not None) and (norm_weights is not None):
-                raise ValueError(
-                    "both norm weights in MuiLinear and norm_weight provided"
-                )
-
-            if prev_module.normalize:
-                norm_weights = prev_module.norm_weights
-        elif isinstance(prev_module, nn.Linear):
-            # norm_weights need to be set in calling args if needed
-            pass
-        else:
-            raise ValueError(
-                f"Unsupported replacement: {prev_module.__class__.__name__}"
-            )
-
-        if norm_weights is not None:
-            # the rescaling weights are not fused in the matrices due to instabilities
-            self._set_norm_weights(norm_weights)
-            self.variance_epsilon = variance_epsilon
 
         # put ourselves on the right device
         self.to(device=device)
@@ -322,10 +286,8 @@ class MuiLinear(MuiModule, nn.Linear):
                 residual,
             )
         else:
-            if self.normalize:
-                input = _MuiRMSNorm.apply(
-                    input, self.norm_weights, self.variance_epsilon
-                )
+            if self.norm is not None:
+                input = self.norm(input)
 
             output = F.linear(input, self.weight, self.bias)
             if residual is not None:

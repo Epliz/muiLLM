@@ -53,8 +53,7 @@ class MuiParallelMultiLinear(MuiModule):
         in_features: int,
         out_features: List[int],
         bias: bool = True,
-        variance_epsilon: float = 0.0,
-        normalize: bool = False,
+        norm: Optional[MuiRMSNorm] = None,
         sharding_dim: int = 0,
         device=None,
         dtype=None,
@@ -76,8 +75,7 @@ class MuiParallelMultiLinear(MuiModule):
             in_features=in_features,
             out_features=sum(out_features),
             bias=bias,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             sharding_dim=sharding_dim,
             device=device,
             dtype=dtype,
@@ -208,16 +206,21 @@ class MuiParallelMultiLinear(MuiModule):
         dtype = prev_module.linear.weight.dtype
         device = prev_module.linear.weight.device
 
-        normalize = prev_module.linear.normalize
-        variance_epsilon = prev_module.linear.variance_epsilon
+        norm = (
+            MuiRMSNorm.replace(
+                replacement_context,
+                prev_layernorm_module,
+            )
+            if prev_layernorm_module is not None
+            else None
+        )
 
         new_module = MuiParallelMultiLinear(
             engine_config=engine_config,
             in_features=in_features,
             out_features=out_features,
             bias=has_bias,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             sharding_dim=sharding_dim,
             dtype=dtype,
             device=device,
@@ -282,26 +285,26 @@ class MuiParallelMultiLinear(MuiModule):
                 else None
             )
 
-        normalize = prev_layernorm_module is not None
-        variance_epsilon = (
-            MuiRMSNorm._extract_eps(prev_layernorm_module) if normalize else 0.0
+        norm = (
+            MuiRMSNorm.replace(
+                replacement_context,
+                prev_layernorm_module,
+            )
+            if prev_layernorm_module is not None
+            else None
         )
-        norm_weights = prev_layernorm_module.weight if normalize else None
 
         new_module = MuiParallelMultiLinear(
             engine_config=engine_config,
             in_features=in_features,
             out_features=out_features,
             bias=has_bias,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             sharding_dim=sharding_dim,
             dtype=dtype,
             device=device,
         )
-        new_module.copy_modules(
-            prev_modules=prev_modules, norm_weights=norm_weights, device=device
-        )
+        new_module.copy_modules(prev_modules=prev_modules, device=device)
 
         return new_module
 
@@ -323,8 +326,6 @@ class MuiParallelMultiLinear(MuiModule):
     def copy_modules(
         self,
         prev_modules: List[nn.Linear],
-        norm_weights: torch.Tensor = None,
-        variance_epsilon: float = 0.0,
         device=None,
     ):
         if device is None:
@@ -371,11 +372,6 @@ class MuiParallelMultiLinear(MuiModule):
             )
 
             self.linear._set_bias(concat_biases, concat_biases_requires_grad)
-
-        # norm_weights are not sharded
-        if norm_weights is not None:
-            # the rescaling weights are not fused in the matrices due to instabilities
-            self.linear._set_norm_weights(norm_weights)
 
         # put ourselves on the right device
         self.to(device=device)

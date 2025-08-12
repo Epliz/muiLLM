@@ -11,7 +11,8 @@ MuiLLMParallelGateUpDownMLP::MuiLLMParallelGateUpDownMLP(
   torch::Tensor& gate_weights,
   torch::Tensor& up_weights,
   torch::Tensor& down_weights,
-  float variance_epsilon
+  float variance_epsilon,
+  float norm_weights_offset
 ) {
   this->engine = engine;
   this->comm = comm;
@@ -24,6 +25,7 @@ MuiLLMParallelGateUpDownMLP::MuiLLMParallelGateUpDownMLP(
   this->down_weights = down_weights;
 
   this->variance_epsilon = variance_epsilon;
+  this->norm_weights_offset = norm_weights_offset;
 
   auto wdtype = gate_weights.dtype();
   bool dispatchable_type = (wdtype == torch::kFloat16) || (wdtype == torch::kBFloat16);
@@ -51,6 +53,7 @@ torch::Tensor MuiLLMParallelGateUpDownMLP::forward(
       this->activation,
       this->norm_weights,
       this->variance_epsilon,
+      this->norm_weights_offset,
       this->gate_weights,
       this->up_weights,
       this->down_weights,
@@ -65,6 +68,7 @@ torch::Tensor MuiLLMParallelGateUpDownMLP::forward(
       this->activation,
       this->norm_weights,
       this->variance_epsilon,
+      this->norm_weights_offset,
       this->gate_weights,
       this->up_weights,
       this->down_weights,
@@ -86,7 +90,8 @@ muillm_parallel_igateupdownmlp_module_ptr_t muillm_parallel_gateupdownmlp_module
   torch::Tensor& gate_weights,
   torch::Tensor& up_weights,
   torch::Tensor& down_weights,
-  float variance_epsilon
+  float variance_epsilon,
+  float norm_weights_offset
 ) {
   
   auto undef_tensor = torch::Tensor();
@@ -102,7 +107,8 @@ muillm_parallel_igateupdownmlp_module_ptr_t muillm_parallel_gateupdownmlp_module
     gate_weights,
     up_weights,
     down_weights,
-    variance_epsilon
+    variance_epsilon,
+    norm_weights_offset
   );
 
   muillm_parallel_igateupdownmlp_module_ptr_t module_ptr;

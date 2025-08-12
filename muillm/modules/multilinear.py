@@ -1,4 +1,4 @@
-from typing import Iterable, List, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.engineconfig import (
     MuiEngineConfig,
@@ -32,8 +32,7 @@ class MuiMultiLinear(MuiModule):
         in_features: int,
         out_features: List[int],
         bias: bool = True,
-        variance_epsilon: float = 0.0,
-        normalize: bool = False,
+        norm: Optional[MuiRMSNorm] = None,
         device=None,
         dtype=None,
     ) -> None:
@@ -44,8 +43,7 @@ class MuiMultiLinear(MuiModule):
             in_features=in_features,
             out_features=sum(out_features),
             bias=bias,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             device=device,
             dtype=dtype,
         )
@@ -126,24 +124,25 @@ class MuiMultiLinear(MuiModule):
             )
 
         normalize = prev_layernorm_module is not None
-        variance_epsilon = (
-            MuiRMSNorm._extract_eps(prev_layernorm_module) if normalize else 0.0
+        norm = (
+            MuiRMSNorm.replace(
+                replacement_context,
+                prev_layernorm_module,
+            )
+            if normalize
+            else None
         )
-        norm_weights = prev_layernorm_module.weight if normalize else None
 
         new_module = MuiMultiLinear(
             engine_config=engine_config,
             in_features=in_features,
             out_features=out_features,
             bias=has_bias,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             dtype=dtype,
             device=device,
         )
-        new_module.copy_modules(
-            prev_modules=prev_modules, norm_weights=norm_weights, device=device
-        )
+        new_module.copy_modules(prev_modules=prev_modules, device=device)
 
         return new_module
 
@@ -175,7 +174,8 @@ class MuiMultiLinear(MuiModule):
 
     def replace_back(self) -> Tuple[List[nn.Linear], torch.Tensor]:
         # split back in different modules
-        norm_weights = self.linear.norm_weights
+        normalize = self.linear.norm is not None
+        norm_weights = self.linear.norm.weight if normalize else None
 
         linears = [
             self._get_linear_back(slice_start, slice_end)
@@ -187,8 +187,6 @@ class MuiMultiLinear(MuiModule):
     def copy_modules(
         self,
         prev_modules: List[Union[MuiLinear, nn.Linear]],
-        norm_weights: torch.Tensor = None,
-        variance_epsilon: float = 0.0,
         device=None,
     ):
         if device is None:
@@ -218,10 +216,6 @@ class MuiMultiLinear(MuiModule):
                 "all or none biases must required grads but got a mix",
             )
             self.linear._set_bias(concat_biases, concat_biases_requires_grad)
-
-        if norm_weights is not None:
-            # the rescaling weights are not fused in the matrices due to instabilities
-            self.linear._set_norm_weights(norm_weights)
 
         # put ourselves on the right device
         self.to(device=device)

@@ -87,6 +87,7 @@ _LAYER_REPLACEMENTS = {
     # Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
+    Gemma3RMSNorm: MuiRMSNorm,
     Llama4TextRMSNorm: MuiRMSNorm,
     Llama4TextL2Norm: MuiL2Norm,
     # Rotary embeddings
@@ -126,6 +127,7 @@ _TP_LAYER_REPLACEMENTS = {
     # Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
+    Gemma3RMSNorm: MuiRMSNorm,
     Llama4TextRMSNorm: MuiRMSNorm,
     Llama4TextL2Norm: MuiL2Norm,
     # Rotrary embeddings

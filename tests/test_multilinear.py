@@ -73,6 +73,7 @@ def test_replace_back():
         replacement_context=replacement_context,
         prev_modules=linears,
     )
+    multilinear.finalize_init()
 
     replaced_back_linears, _ = multilinear.replace_back()
 

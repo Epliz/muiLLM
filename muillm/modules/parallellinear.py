@@ -44,8 +44,7 @@ class MuiParallelLinear(MuiModule):
         in_features: int,
         out_features: int,
         bias: bool = True,
-        variance_epsilon: float = 0.0,
-        normalize: bool = False,
+        norm: Optional[MuiRMSNorm] = None,
         sharding_dim: int = 1,
         device=None,
         dtype=None,
@@ -79,13 +78,7 @@ class MuiParallelLinear(MuiModule):
         self.device = linear.weight.device
         self.dtype = linear.weight.dtype
 
-        self.normalize = normalize
-        self.variance_epsilon = variance_epsilon
-        self.norm_weights = (
-            nn.ParameterList([torch.ones(in_features, dtype=dtype, device=device)])
-            if normalize
-            else None
-        )
+        self.norm = norm
 
         self._set_weights(self.__shard_weigths(linear.weight))
 
@@ -105,15 +98,16 @@ class MuiParallelLinear(MuiModule):
         if self.cpp_module is not None:
             muillm_ext.muillm_parallel_linear_module_deinit(self.cpp_module)
 
-        norm_weights = self.norm_weights[0] if self.norm_weights is not None else None
+        normalize = self.norm is not None
         bias = self.biases[0] if self.biases is not None else None
 
         self.cpp_module = muillm_ext.muillm_parallel_linear_module_init(
             self.cpp_engine,
             self.comms.comms,
             self.weights[0],
-            norm_weights,
-            self.variance_epsilon,
+            self.norm.weight if normalize else None,
+            self.norm.variance_epsilon if normalize else 0.0,
+            self.norm.weight_offset if normalize else 0.0,
             None,  # mul_bias
             bias,
             self.sharding_dim,
@@ -133,10 +127,8 @@ class MuiParallelLinear(MuiModule):
             self.biases = None
             del biases
 
-        if self.norm_weights is not None:
-            norm_weights = self.norm_weights[0]
-            self.norm_weights = None
-            del norm_weights
+        if self.norm is not None:
+            del self.norm
 
         # destroy the C++ module as well to severe the ties to tensors
         if self.cpp_module is not None:
@@ -225,29 +217,29 @@ class MuiParallelLinear(MuiModule):
             # due to replacement order, we might get the normalization weights already in
             # or in prev_layernorm_module
             # but not both
-            if (prev_module.normalize) and (prev_layernorm_module is not None):
+            if (prev_module.norm is not None) and (prev_layernorm_module is not None):
                 raise ValueError(
                     "both norm weights in MuiLinear and layernorm module provided"
                 )
-            if prev_module.normalize:
-                normalize = True
-                variance_epsilon = prev_module.variance_epsilon
-                norm_weights = None  # needs to be None for copy_module
-            elif prev_layernorm_module is not None:
-                normalize = True
-                variance_epsilon = prev_layernorm_module.variance_epsilon
-                norm_weights = prev_layernorm_module.weight
-            else:
-                normalize = False
-                variance_epsilon = 0.0
-                norm_weights = None
+
+            norm = (
+                MuiRMSNorm.replace(
+                    replacement_context,
+                    prev_layernorm_module,
+                )
+                if prev_layernorm_module is not None
+                else prev_module.norm
+            )
 
         elif isinstance(prev_module, nn.Linear):
-            normalize = prev_layernorm_module is not None
-            variance_epsilon = (
-                prev_layernorm_module.variance_epsilon if normalize else 0.0
+            norm = (
+                MuiRMSNorm.replace(
+                    replacement_context,
+                    prev_layernorm_module,
+                )
+                if prev_layernorm_module is not None
+                else None
             )
-            norm_weights = prev_layernorm_module.weight if normalize else None
         else:
             raise ValueError(
                 f"Unsupported replacement to MuiParallelLinear: {prev_module.__class__.__name__}"
@@ -258,14 +250,11 @@ class MuiParallelLinear(MuiModule):
             in_features=in_features,
             out_features=out_features,
             bias=has_bias,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             dtype=dtype,
             device=device,
         )
-        new_module.copy_module(
-            prev_module=prev_module, norm_weights=norm_weights, device=device
-        )
+        new_module.copy_module(prev_module=prev_module, device=device)
 
         return new_module
 
@@ -273,21 +262,15 @@ class MuiParallelLinear(MuiModule):
         self, norm_weights: torch.Tensor, requires_grads: Optional[bool] = None
     ) -> None:
         if norm_weights is None:
-            self.norm_weights = nn.ParameterList([None])
+            self.norm = None
             return
 
         # we don't preserve requires_grad with to_local_tensor so save it first
         norm_weights_requires_grad = norm_weights.requires_grad
-
-        if not hasattr(self, "norm_weights") or self.norm_weights is None:
-            self.norm_weights = nn.ParameterList(
-                [norm_weights.contiguous().clone().detach()]
-            )
-        else:
-            self.norm_weights[0].data.copy_(norm_weights.data)
+        self.norm.weight.data.copy_(norm_weights.data)
 
         MuiParallelLinear._set_requires_grads(
-            self.norm_weights,
+            self.norm.weight,
             (
                 requires_grads
                 if requires_grads is not None
@@ -338,8 +321,6 @@ class MuiParallelLinear(MuiModule):
     def copy_module(
         self,
         prev_module: Union["MuiParallelLinear", nn.Linear, MuiLinear],
-        norm_weights: torch.Tensor = None,
-        variance_epsilon: float = 0.0,
         device=None,
     ):
         if device is None:
@@ -355,23 +336,6 @@ class MuiParallelLinear(MuiModule):
 
         if has_bias:
             self._set_bias(self.__shard_bias(prev_module.bias))
-
-        if isinstance(prev_module, MuiLinear):
-            # MuiLinear inherits nn.Linear, so need to check first
-            if norm_weights is not None:
-                raise ValueError("norm_weights should be None")
-            norm_weights = prev_module.norm_weights
-        elif isinstance(prev_module, nn.Linear):
-            # norm_weights need to be set in calling args if needed
-            pass
-        else:
-            raise ValueError(
-                f"Unsupported replacement: {prev_module.__class__.__name__}"
-            )
-
-        if norm_weights is not None:
-            # the rescaling weights are not fused in the matrices due to instabilities
-            self._set_norm_weights(norm_weights)
 
         # put ourselves on the right device
         self.to(device=device)
@@ -391,15 +355,13 @@ class MuiParallelLinear(MuiModule):
 
     def to_linear(self) -> MuiLinear:
         has_bias = self.biases is not None
-        normalize = self.normalize
 
         linear = MuiLinear(
             engine_config=self.engine_config,
             in_features=self.in_features,
             out_features=self.out_features,
             bias=has_bias,
-            variance_epsilon=self.variance_epsilon,
-            normalize=normalize,
+            norm=self.norm,
             device=self.device,
             dtype=self.dtype,
         )
@@ -407,7 +369,6 @@ class MuiParallelLinear(MuiModule):
         linear._set_weights(self._unshard_weigths(self.weights[0]))
         if has_bias:
             linear._set_bias(self._unshard_biases(self.biases[0]))
-        linear._set_norm_weights(self.norm_weights[0]) if self.normalize else None
 
         linear.finalize_init()
 

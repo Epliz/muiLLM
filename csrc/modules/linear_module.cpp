@@ -14,7 +14,8 @@ MuiLLMLinear::MuiLLMLinear(
   torch::Tensor& weights,
   torch::Tensor& mul_bias,
   torch::Tensor& add_bias,
-  float variance_epsilon
+  float variance_epsilon,
+  float norm_weights_offset
 ) {
   this->engine = engine;
 
@@ -25,6 +26,7 @@ MuiLLMLinear::MuiLLMLinear(
   this->add_bias = add_bias;
 
   this->variance_epsilon = variance_epsilon;
+  this->norm_weights_offset = norm_weights_offset;
 
   auto wdtype = weights.dtype();
   bool dispatchable_type = (wdtype == torch::kFloat16) || (wdtype == torch::kBFloat16);
@@ -47,6 +49,7 @@ torch::Tensor MuiLLMLinear::forward(
       this->engine,
       this->norm_weights,
       this->variance_epsilon,
+      this->norm_weights_offset,
       this->weights,
       /* activ */ mui_activation::Identity,
       this->mul_bias,
@@ -61,7 +64,8 @@ torch::Tensor MuiLLMLinear::forward(
       normalized_inputs = muillm_rmsnorm_forward(
         this->norm_weights,
         inputs,
-        this->variance_epsilon
+        this->variance_epsilon,
+        this->norm_weights_offset
       );
     } else {
       normalized_inputs = inputs;
@@ -89,6 +93,7 @@ muillm_linear_module_ptr_t muillm_linear_module_init_trampoline(
   torch::Tensor weights,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
+  float norm_weights_offset,
   std::optional<torch::Tensor> mul_bias_,
   std::optional<torch::Tensor> add_bias_) {
 
@@ -104,7 +109,8 @@ muillm_linear_module_ptr_t muillm_linear_module_init_trampoline(
     weights,
     mul_bias,
     add_bias,
-    epsilon
+    epsilon,
+    norm_weights_offset
   );
 
   muillm_linear_module_ptr_t ret;

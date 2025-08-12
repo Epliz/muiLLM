@@ -20,6 +20,7 @@ from muillm.modules.topk import topk_sigmoid
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
+# TODO
 class _MuiGateUpDownMoe(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -36,6 +37,7 @@ class _MuiGateUpDownMoe(torch.autograd.Function):
         down_weights,
         residual,
         epsilon,
+        norm_weights_offset,
     ):
 
         output = muillm_ext.muillm_gateupmlpmoe_forward(
@@ -44,6 +46,7 @@ class _MuiGateUpDownMoe(torch.autograd.Function):
             num_dynamic_experts,
             norm_weights,
             epsilon,
+            norm_weights_offset,
             gate_weights,
             up_weights,
             down_weights,
@@ -71,7 +74,7 @@ class MuiGateUpDownMLPMoe(MuiModule):
         hidden_size: int,
         intermediate_size: int,
         activation_function: nn.Module,
-        normalize: bool = False,
+        norm: Optional[MuiRMSNorm] = None,
         device=None,
         dtype=None,
     ):
@@ -86,13 +89,15 @@ class MuiGateUpDownMLPMoe(MuiModule):
         self.num_dynamic_experts = num_dynamic_experts
         self.num_experts = self.num_shared_experts + self.num_dynamic_experts
 
+        self.norm = norm
+
         # we fuse the layernorm into the router
         self.router = MuiLinear(
             engine_config=engine_config,
             in_features=hidden_size,
             out_features=self.num_dynamic_experts,
             bias=False,
-            normalize=normalize,
+            norm=norm,
             device=device,
             dtype=dtype,
         )
@@ -173,6 +178,15 @@ class MuiGateUpDownMLPMoe(MuiModule):
         intermediate_size = prev_module.shared_expert.gate_proj.out_features
         activation_function = prev_module.experts.act_fn
 
+        norm = (
+            MuiRMSNorm.replace(
+                replacement_context,
+                prev_layernorm_module,
+            )
+            if prev_layernorm_module is not None
+            else None
+        )
+
         new_module = MuiGateUpDownMLPMoe(
             engine_config=engine_config,
             num_dynamic_experts=num_dynamic_experts,
@@ -180,14 +194,13 @@ class MuiGateUpDownMLPMoe(MuiModule):
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             activation_function=activation_function,
-            normalize=prev_layernorm_module is not None,
+            norm=norm,
             device=device,
             dtype=dtype,
         )
 
         new_module.copy_module(
             prev_module=prev_module,
-            prev_layernorm_module=prev_layernorm_module,
             device=device,
         )
 
@@ -204,22 +217,13 @@ class MuiGateUpDownMLPMoe(MuiModule):
     def copy_module(
         self,
         prev_module: Llama4TextMoe,
-        prev_layernorm_module: Union[MuiRMSNorm, Llama4TextRMSNorm] = None,
         device=None,
     ):
         if device is None:
             raise ValueError("device was None")
 
-        variance_epsilon = 0.0
-        norm_weights = None
-        if prev_layernorm_module is not None:
-            variance_epsilon = MuiRMSNorm._extract_eps(prev_layernorm_module)
-            norm_weights = prev_layernorm_module.weight
-
         self.router.copy_module(
             prev_module=prev_module.router,
-            norm_weights=norm_weights,
-            variance_epsilon=variance_epsilon,
             device=device,
         )
 
@@ -278,6 +282,8 @@ class MuiGateUpDownMLPMoe(MuiModule):
         batch, seq_len, hidden_dim = hidden_states.shape
         tokens_per_expert = batch * seq_len
 
+        normalize = self.norm is not None
+
         if self.dispatchable and (batch * seq_len) == 1:
             moe_out = _MuiGateUpDownMoe.apply(
                 self.engine_config,
@@ -286,23 +292,20 @@ class MuiGateUpDownMLPMoe(MuiModule):
                 hidden_states,
                 router_top_values,
                 router_indices,
-                self.router.norm_weights,  # norm_weights
+                self.norm.weight if normalize else None,  # norm_weights
                 self.gate_projs.weight,
                 self.up_projs.weight,
                 self.down_projs.weight,
                 residual,  # residual
-                self.router.variance_epsilon,  # epsilon
+                self.norm.variance_epsilon if normalize else 0,  # epsilon
+                self.norm.weight_offset if normalize else 0,  # norm_weights_offset
             )
 
             return moe_out, router_top_values
         else:
             # normalize the hidden states if needed
-            if self.router.normalize:
-                hidden_states = _MuiRMSNorm.apply(
-                    hidden_states,
-                    self.router.norm_weights,
-                    self.router.variance_epsilon,
-                )
+            if self.norm is not None:
+                hidden_states = self.norm(hidden_states)
 
             out_shape = hidden_states.shape
 

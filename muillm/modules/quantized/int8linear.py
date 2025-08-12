@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.linear import MuiLinear
-from muillm.modules.norm.rmsnorm import _MuiRMSNorm
+from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
 from muillm.quantization.quantizationmethod import Int8WeightOnlyQuantizationMethod
 from muillm.quantization.rtnquantizer import RTNQuantizer
 import muillm_ext
@@ -47,6 +47,7 @@ class _MuiInt8Linear(torch.autograd.Function):
         group_size_shift,
         norm_weights,
         variance_epsilon,
+        norm_weights_offset,
         add_bias,
         residual,
     ):
@@ -63,6 +64,7 @@ class _MuiInt8Linear(torch.autograd.Function):
             group_size_shift,
             norm_weights,
             variance_epsilon,
+            norm_weights_offset,
             mul_bias=None,
             add_bias=add_bias,
         )
@@ -84,8 +86,7 @@ class MuiInt8Linear(MuiModule):
         in_features: int,
         out_features: int,
         bias: bool = True,
-        variance_epsilon: float = 0.0,
-        normalize: bool = False,
+        norm: Optional[MuiRMSNorm] = None,
         device=None,
         dtype=None,
         prev_weights_uint8: torch.Tensor = None,
@@ -101,13 +102,7 @@ class MuiInt8Linear(MuiModule):
         self.out_features = out_features
         self.weight_dtype = dtype
 
-        self.normalize = normalize
-        self.variance_epsilon = variance_epsilon
-        self.norm_weights = (
-            nn.Parameter(torch.ones(in_features, dtype=dtype, device=device))
-            if normalize
-            else None
-        )
+        self.norm = norm
 
         num_groups = int(in_features / quantization_method.group_size)
         # cannot set requires grad on uint8 tensors
@@ -182,14 +177,9 @@ class MuiInt8Linear(MuiModule):
         in_features = prev_module.in_features
         out_features = prev_module.out_features
 
-        normalize = False
-        variance_epsilon = 0
-        norm_weights = None
-
+        norm = None
         if isinstance(prev_module, MuiLinear):
-            normalize = prev_module.normalize
-            variance_epsilon = prev_module.variance_epsilon if normalize else 0.0
-            norm_weights = prev_module.norm_weights if normalize else None
+            norm = prev_module.norm
 
         new_module = MuiInt8Linear(
             engine_config=engine_config,
@@ -197,20 +187,15 @@ class MuiInt8Linear(MuiModule):
             in_features=in_features,
             out_features=out_features,
             bias=has_bias,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             dtype=dtype,
             device=device,
         )
-        new_module.copy_module(
-            prev_module=prev_module, norm_weights=norm_weights, device=device
-        )
+        new_module.copy_module(prev_module=prev_module, device=device)
 
         return new_module
 
-    def copy_module(
-        self, prev_module: nn.Linear, norm_weights: torch.Tensor = None, device=None
-    ):
+    def copy_module(self, prev_module: nn.Linear, device=None):
         if device is None:
             raise ValueError("device was None")
 
@@ -233,15 +218,6 @@ class MuiInt8Linear(MuiModule):
             self.bias = nn.Parameter(prev_module.bias.detach())
             self.bias.requires_grad = prev_module.bias.requires_grad
 
-        if norm_weights is not None:
-            # the rescaling weights are not fused in the matrices due to instabilities
-
-            norm_weights_requires_grad = norm_weights.requires_grad
-            self.norm_weights = nn.Parameter(norm_weights.detach())
-            self.norm_weights.requires_grad = norm_weights_requires_grad
-
-            self.norm_weights = norm_weights
-
         # put ourselvese on the right device
         self.to(device=device)
 
@@ -263,6 +239,7 @@ class MuiInt8Linear(MuiModule):
         )
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
+        normalize = self.norm is not None
         if self.dispatchable and (input.numel() == input.shape[-1]):
             # input is effectively 1D, and we support the type
             return _MuiInt8Linear.apply(
@@ -270,16 +247,15 @@ class MuiInt8Linear(MuiModule):
                 self.weights_uint8,
                 self.scales_min_vals,
                 self.quantizer.group_size_shift,
-                self.norm_weights,
-                self.variance_epsilon,
+                self.norm.weight if normalize else None,
+                self.norm.variance_epsilon if normalize else 0.0,
+                self.norm.weight_offset if normalize else 0.0,
                 self.bias,
                 residual,
             )
         else:
-            if self.normalize:
-                input = _MuiRMSNorm.apply(
-                    input, self.norm_weights, self.variance_epsilon
-                )
+            if normalize:
+                input = self.norm(input)
 
             # dequantize
             dequantized_weights = self._dequantize_weights()

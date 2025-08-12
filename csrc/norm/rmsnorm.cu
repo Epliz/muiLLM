@@ -11,7 +11,8 @@ void muillm_rmsnorm_fp16(
   const half* __restrict__ W, // weight matrix - size K
   const half* __restrict__ X, // input = size BxK
   half* __restrict__ Y, // output = size BxK
-  float epsilon
+  float epsilon,
+  float weight_offset
 );
 
 void muillm_rmsnorm_bf16(
@@ -21,7 +22,8 @@ void muillm_rmsnorm_bf16(
   const __hip_bfloat16* __restrict__ W, // weight matrix - size K
   const __hip_bfloat16* __restrict__ X, // input = size BxK
   __hip_bfloat16* __restrict__ Y, // output = size BxK
-  float epsilon
+  float epsilon,
+  float weight_offset
 );
 
 #define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
@@ -31,7 +33,9 @@ void muillm_rmsnorm_bf16(
 at::Tensor muillm_rmsnorm_forward(
     torch::Tensor weights,
     torch::Tensor x,
-    float epsilon) {
+    float epsilon,
+    float weight_offset
+) {
   CHECK_INPUT(weights);
   CHECK_INPUT(x);
 
@@ -65,7 +69,8 @@ at::Tensor muillm_rmsnorm_forward(
       (const half*)weights.data_ptr(),
       (const half*)x.data_ptr(),
       (half*)y.data_ptr(),
-      epsilon
+      epsilon,
+      weight_offset
     );
   } else if (dtype == torch::kBFloat16) {
     muillm_rmsnorm_bf16(
@@ -75,7 +80,8 @@ at::Tensor muillm_rmsnorm_forward(
       (const __hip_bfloat16*)weights.data_ptr(),
       (const __hip_bfloat16*)x.data_ptr(),
       (__hip_bfloat16*)y.data_ptr(),
-      epsilon
+      epsilon,
+      weight_offset
     );
   } else {
     TORCH_CHECK(false, "Unsupported dtype for muillm_rmsnorm_forward");

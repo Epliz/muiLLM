@@ -18,6 +18,7 @@ struct MuiLLMLinear: torch::nn::Module {
   torch::Tensor add_bias{nullptr};
 
   float variance_epsilon;
+  float norm_weights_offset;
 
   bool dispatchable;
 
@@ -28,7 +29,8 @@ struct MuiLLMLinear: torch::nn::Module {
     torch::Tensor& weights,
     torch::Tensor& mul_bias,
     torch::Tensor& add_bias,
-    float variance_epsilon
+    float variance_epsilon,
+    float norm_weights_offset
   );
 
   virtual ~MuiLLMLinear();
@@ -50,6 +52,7 @@ muillm_linear_module_ptr_t muillm_linear_module_init_trampoline(
   torch::Tensor weights,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
+  float norm_weights_offset,
   std::optional<torch::Tensor> mul_bias_,
   std::optional<torch::Tensor> add_bias_
 );

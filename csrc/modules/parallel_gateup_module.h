@@ -33,6 +33,7 @@ struct MuiLLMParallelGateUpDownMLP: MuiLLMParallelGateUpDownMLPInterface {
   torch::Tensor down_weights{nullptr};
 
   float variance_epsilon;
+  float norm_weights_offset;
 
   bool dispatchable;
 
@@ -46,7 +47,8 @@ struct MuiLLMParallelGateUpDownMLP: MuiLLMParallelGateUpDownMLPInterface {
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
-    float variance_epsilon
+    float variance_epsilon,
+    float norm_weights_offset
   );
 
   virtual ~MuiLLMParallelGateUpDownMLP();
@@ -69,7 +71,8 @@ muillm_parallel_igateupdownmlp_module_ptr_t muillm_parallel_gateupdownmlp_module
   torch::Tensor& gate_weights,
   torch::Tensor& up_weights,
   torch::Tensor& down_weights,
-  float variance_epsilon
+  float variance_epsilon,
+  float norm_weights_offset
 );
 
 // deinit

@@ -35,6 +35,7 @@ at::Tensor muillm_int8_linear_forward_trampoline(
     int group_size_shift,
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
+    float norm_weights_offset,
     std::optional<torch::Tensor> mul_bias_,
     std::optional<torch::Tensor> add_bias_) {
     torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
@@ -43,6 +44,7 @@ at::Tensor muillm_int8_linear_forward_trampoline(
     return muillm_int8_linear_activ_forward(
         norm_weights,
         epsilon,
+        norm_weights_offset,
         weights,
         scales_min_vals,
         group_size_shift,
@@ -65,6 +67,7 @@ std::tuple<at::Tensor, at::Tensor> muillm_int8_gateupmlp_dequantize_forward(
 at::Tensor muillm_int8_gateupmlp_forward(
     torch::Tensor norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor gate_up_weights,
     torch::Tensor gate_up_scales_min_vals,
     int group_size_shift,
@@ -175,10 +178,10 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "modules/rotary_module.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("engine"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none());
-  m.def("muillm_parallel_linear_forward", &muillm_parallel_linear_forward_trampoline, "muillm parallel linear forward", py::arg("engine"), py::arg("comm"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none(), py::arg("sharding_dim") = 1, py::arg("reduce") = false);
+  m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("engine"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none());
+  m.def("muillm_parallel_linear_forward", &muillm_parallel_linear_forward_trampoline, "muillm parallel linear forward", py::arg("engine"), py::arg("comm"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none(), py::arg("sharding_dim") = 1, py::arg("reduce") = false);
   m.def("muillm_int8_dequantize_forward", &muillm_int8_dequantize_forward, "muillm int8 dequantize forward");
-  m.def("muillm_int8_linear_forward", &muillm_int8_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("scales_min_vals"), py::arg("group_size_shift"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
+  m.def("muillm_int8_linear_forward", &muillm_int8_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("scales_min_vals"), py::arg("group_size_shift"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_gateupmlp_forward", &muillm_gateupmlp_forward_trampoline, "muillm gate up silu forward");
   m.def("muillm_gateupmlpmoe_forward", &muillm_gateupmlpmoe_forward_trampoline, "muillm gate up silu moe forward");
   m.def("muillm_parallel_gateupmlp_forward", &muillm_parallel_gateupmlp_forward_trampoline, "muillm parallel gate up silu forward",
@@ -188,6 +191,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("activation"),
     py::arg("norm_weights"),
     py::arg("epsilon"),
+    py::arg("norm_weights_offset"),
     py::arg("gate_weights"),
     py::arg("up_weights"),
     py::arg("down_weights"),
@@ -203,6 +207,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("num_dynamic_experts"),
     py::arg("norm_weights"),
     py::arg("epsilon"),
+    py::arg("norm_weights_offset"),
     py::arg("gate_weights"),
     py::arg("up_weights"),
     py::arg("down_weights"),
@@ -221,6 +226,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("activation"),
     py::arg("norm_weights"),
     py::arg("epsilon"),
+    py::arg("norm_weights_offset"),
     py::arg("gate_weights"),
     py::arg("up_weights"),
     py::arg("down_weights"),
@@ -236,6 +242,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("num_dynamic_experts"),
     py::arg("norm_weights"),
     py::arg("epsilon"),
+    py::arg("norm_weights_offset"),
     py::arg("gate_weights"),
     py::arg("up_weights"),
     py::arg("down_weights"),
@@ -309,7 +316,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<muillm_linear_module_ptr_t> cl_linear_module(m, "muillm_linear_module_ptr");
   cl_linear_module.def(pybind11::init<>());
 
-  m.def("muillm_linear_module_init", &muillm_linear_module_init_trampoline, "muillm linear module init", py::arg("engine"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
+  m.def("muillm_linear_module_init", &muillm_linear_module_init_trampoline, "muillm linear module init", py::arg("engine"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_linear_module_deinit", &muillm_linear_module_deinit_trampoline, "muillm linear module deinit", py::arg("module"));
   m.def("muillm_linear_module_forward", &muillm_linear_module_forward_trampoline, "muillm linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none());
 
@@ -326,7 +333,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<muillm_parallel_linear_module_ptr_t> cl_parallel_linear_module(m, "muillm_parallel_linear_module_ptr");
   cl_parallel_linear_module.def(pybind11::init<>());
 
-  m.def("muillm_parallel_linear_module_init", &muillm_parallel_linear_module_init_trampoline, "muillm parallel linear module init", py::arg("engine"), py::arg("comm"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("sharding_dim") = 1);
+  m.def("muillm_parallel_linear_module_init", &muillm_parallel_linear_module_init_trampoline, "muillm parallel linear module init", py::arg("engine"), py::arg("comm"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("sharding_dim") = 1);
   m.def("muillm_parallel_linear_module_deinit", &muillm_parallel_linear_module_deinit_trampoline, "muillm parallel linear module deinit", py::arg("module"));
   m.def("muillm_parallel_linear_module_forward", &muillm_parallel_linear_module_forward_trampoline, "muillm parallel linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("reduce") = false);
 
@@ -351,7 +358,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("gate_weights"),
     py::arg("up_weights"),
     py::arg("down_weights"),
-    py::arg("variance_epsilon")
+    py::arg("variance_epsilon"),
+    py::arg("norm_weights_offset")
   );
   m.def("muillm_parallel_gateupdownmlp_module_deinit", &muillm_parallel_gateupdownmlp_module_deinit_trampoline, "muillm parallel gateupdown mlp module deinit", py::arg("module"));
   m.def("muillm_parallel_gateupdownmlp_module_forward", &muillm_parallel_gateupdownmlp_module_forward_trampoline, "muillm parallel gateupdown mlp module forward",
@@ -373,7 +381,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("gate_weights"),
     py::arg("up_weights"),
     py::arg("down_weights"),
-    py::arg("variance_epsilon")
+    py::arg("variance_epsilon"),
+    py::arg("norm_weights_offset")
   );
   m.def("muillm_parallel_gateupdownmlpmoe_module_deinit", &muillm_parallel_gateupdownmlpmoe_module_deinit_trampoline, "muillm parallel gateupdown mlp moe module deinit", py::arg("module"));
   m.def("muillm_parallel_gateupdownmlpmoe_module_forward", &muillm_parallel_gateupdownmlpmoe_module_forward_trampoline, "muillm parallel gateupdown mlp moe module forward",
