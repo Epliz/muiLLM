@@ -1,3 +1,4 @@
+from muillm.modules.attention.gemma3attention import MuiGemma3Attention
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.decoder.llama4decoder import MuiLlama4TextDecoderLayer
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
@@ -51,6 +52,7 @@ from transformers.models.gemma3.modeling_gemma3 import (
     Gemma3MLP,
     Gemma3DecoderLayer,
     Gemma3RMSNorm,
+    Gemma3Attention,
     Gemma3Model,
     Gemma3ForCausalLM,
 )
@@ -93,6 +95,8 @@ _LAYER_REPLACEMENTS = {
     # Rotary embeddings
     MistralRotaryEmbedding: MuiRotaryEmbedding,
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
+    # Attention
+    Gemma3Attention: MuiGemma3Attention,
     # Decoders
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
