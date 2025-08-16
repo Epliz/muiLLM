@@ -7,10 +7,13 @@ import torch.nn as nn
 
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+from transformers.models.gemma3.configuration_gemma3 import Gemma3Config
 from transformers.models.mistral.configuration_mistral import MistralConfig
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 
+from transformers.models.gemma3.modeling_gemma3 import Gemma3RotaryEmbedding
 from transformers.models.mistral.modeling_mistral import MistralRotaryEmbedding
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from transformers.models.llama4.modeling_llama4 import Llama4TextRotaryEmbedding
@@ -170,7 +173,7 @@ class MuiRotaryEmbedding(MuiModule):
     def __init__(
         self,
         engine_config: MuiEngineConfig,
-        config: Union[LlamaConfig, MistralConfig, Llama4TextConfig],
+        config: Union[Gemma3Config, LlamaConfig, MistralConfig, Llama4TextConfig],
         rope_kwargs: Dict[str, Any] = None,
         layer_idx: int = 0,
         output_complex: Optional[bool] = None,
@@ -273,7 +276,9 @@ class MuiRotaryEmbedding(MuiModule):
     @staticmethod
     def replace(
         replacement_context: MuiReplacementContext,
-        prev_module: Union[LlamaRotaryEmbedding, MistralRotaryEmbedding],
+        prev_module: Union[
+            Gemma3RotaryEmbedding, LlamaRotaryEmbedding, MistralRotaryEmbedding
+        ],
     ) -> "MuiRotaryEmbedding":
         engine_config = replacement_context.engine_config
         device = replacement_context.device
@@ -287,7 +292,8 @@ class MuiRotaryEmbedding(MuiModule):
         config = None
         rope_kwargs = None
         if (
-            isinstance(prev_module, LlamaRotaryEmbedding)
+            isinstance(prev_module, Gemma3RotaryEmbedding)
+            or isinstance(prev_module, LlamaRotaryEmbedding)
             or isinstance(prev_module, MistralRotaryEmbedding)
             or isinstance(prev_module, Llama4TextRotaryEmbedding)
         ):
