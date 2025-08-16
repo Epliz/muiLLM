@@ -87,6 +87,7 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+        self.sliding_window = config.sliding_window
 
         # Gemma3 downcasts the below to bfloat16, causing sqrt(3072)=55.4256 to become 55.5. See https://github.com/huggingface/transformers/pull/29402
         self.embed_tokens = embed_tokens
@@ -263,6 +264,11 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
             output_attentions,
         )
 
+        sliding_window_mask = self._create_sliding_window_mask(
+            attention_mask,
+            cache_position,
+        )
+
         # embed positions
         hidden_states = inputs_embeds
 
@@ -290,6 +296,7 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
                     output_attentions,
                     use_cache,
                     cache_position,
+                    sliding_window_mask,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -302,6 +309,7 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
+                    sliding_window_mask=sliding_window_mask,
                     **flash_attn_kwargs,
                 )
 
@@ -364,6 +372,47 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
             batch_size=input_tensor.shape[0],
         )
         return causal_mask
+
+    @torch.no_grad()
+    def _create_sliding_window_mask(
+        self,
+        attention_mask: Optional[torch.Tensor],
+        cache_position: torch.LongTensor,
+    ) -> Optional[torch.Tensor]:
+        if attention_mask is None:
+            # no attention mask, so no sliding window mask
+            return None
+
+        # efficient SDPA and no padding
+        # In prefill, we may be larger than sliding window
+        effective_seq_len = max(cache_position.shape[0], self.sliding_window)
+        # For FA2, the mask is 2D and is of shape [bs, processed_tokens] (not [bs, max_cache_len]),
+        # thus we must slice from the right (at most `effective_seq_len` elements)
+        if self.config._attn_implementation == "flash_attention_2":
+            attention_mask = attention_mask[:, -effective_seq_len:]
+        # Otherwise, the mask is 4D of shape [bs, 1, query_len, max_cache_len] thus we must slice
+        # from the left, with an offset if we are beyond the sliding window
+        else:
+            min_dtype = torch.finfo(attention_mask.dtype).min
+            sliding_window_mask = torch.tril(
+                torch.ones_like(attention_mask, dtype=torch.bool),
+                diagonal=-self.sliding_window,
+            )
+            attention_mask = torch.where(sliding_window_mask, min_dtype, attention_mask)
+            # In case we are beyond the sliding window, we need to correctly offset the mask slicing
+            offset = cache_position[-1] - effective_seq_len + 1
+            # Should only be used when beyond the sliding window (i.e. offset > 0)
+            offset = torch.clamp(offset, min=0)
+            # equivalent to: `attention_mask = attention_mask[:, :, :, offset : offset + effective_seq_len]`,
+            # but without data-dependent slicing (i.e. torch.compile friendly)
+            mask_indexes = torch.arange(
+                min(effective_seq_len, attention_mask.shape[-1]),
+                device=attention_mask.device,
+            )
+            mask_indexes += offset
+            attention_mask = attention_mask[:, :, :, mask_indexes]
+
+        return sliding_window_mask
 
     @staticmethod
     def _prepare_4d_causal_attention_mask_with_cache_position(
