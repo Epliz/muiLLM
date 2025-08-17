@@ -185,6 +185,7 @@ class MuiGemma3Attention(MuiModule):
             key_states = self.k_norm(key_states)
 
             cos, sin = position_embeddings
+
             # TODO: Make it use kernel
             query_states, key_states = apply_rotary_pos_emb(
                 query_states, key_states, cos, sin
