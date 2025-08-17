@@ -313,6 +313,9 @@ class _MuiHybridChunkedCacheUpdate(torch.autograd.Function):
         raise NotImplementedError("Hybrid Chunked cache backward not implemented")
 
 
+# TODO: add a HybridCache
+
+
 class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
 
     def __init__(

@@ -1,5 +1,6 @@
 import os
 from typing import Any, Dict, List, Tuple
+import numpy
 import torch
 import torch.nn as nn
 
@@ -9,6 +10,15 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 
+def max_diff(comp: torch.Tensor, t1: torch.Tensor, t2: torch.Tensor) -> float:
+    comp = comp.reshape(-1)
+    t1 = t1.reshape(-1)
+    t2 = t2.reshape(-1)
+
+    max_val, max_idx = torch.max(comp, dim=0)
+    return max_val.item(), max_idx.item(), t1[max_idx].item(), t2[max_idx].item()
+
+
 def tensors_equal(t1, t2, rtol=1e-04):
     same_shapes = t1.shape == t2.shape
 
@@ -16,14 +26,17 @@ def tensors_equal(t1, t2, rtol=1e-04):
         print(f"Shapes are different: {t1.shape} vs {t2.shape}")
         assert False
 
+    t1 = t1.float()
+    t2 = t2.float()
+
     # we don't care so much about absolute differences, but rather relative differences
     close_enough = torch.allclose(t1, t2, rtol=rtol, atol=1e-01)
+    abs_diff = torch.abs(t1 - t2)
+    rel_diff = torch.abs(t1 - t2) / (torch.abs(t1) + 1e-8)
+    print(f"Max absolute difference: {max_diff(abs_diff, t1, t2)})")
+    print(f"Max relative difference: {max_diff(rel_diff, t1, t2)})")
     if not close_enough:
-        abs_diff = torch.abs(t1 - t2)
-        rel_diff = torch.abs(t1 - t2) / (torch.abs(t1) + 1e-8)
         print(f"Tensors are not close enough: {t1} vs {t2}")
-        print(f"Max absolute difference: {abs_diff.max()})")
-        print(f"Max relative difference: {rel_diff.max()})")
         assert False
 
 
