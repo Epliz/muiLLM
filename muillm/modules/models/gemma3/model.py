@@ -242,22 +242,52 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
             )
             use_cache = False
 
+        inputs_shape = input_ids.shape if input_ids is not None else inputs_embeds.shape
+
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        if use_cache and past_key_values is None and not self.training:
-            batch_size, seq_len, _ = inputs_embeds.shape
-            past_key_values = HybridCache(
-                self.config,
-                max_batch_size=batch_size,
-                max_cache_len=seq_len,
-                dtype=inputs_embeds.dtype,
-            )
+        batch_size = inputs_shape[0]
+        q_len = inputs_shape[1]
+
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+        tot_seq_len = past_seen_tokens + q_len
+
+        if use_cache:
+            if isinstance(past_key_values, Cache) and not isinstance(
+                past_key_values, MuiCache
+            ):
+                # If we have a cache, but not a MuiCache, drop it
+                past_key_values = None
+
+            no_cache = past_key_values is None
+            if no_cache:
+                # create a hybrid cache
+                batch_size, seq_len, _ = inputs_embeds.shape
+                past_key_values = create_hybrid_cache(
+                    engine_config=self.engine_config,
+                    config=self.config,
+                    max_batch_size=batch_size,
+                    seq_len=tot_seq_len,
+                    device=self.mdevice,
+                    dtype=self.mdtype,
+                )
+            else:
+                # we have a previous cache, just re-use it
+                if isinstance(past_key_values, MuiHybridCache):
+                    # grow cache if needed
+                    max_cache_length = self.config.max_position_embeddings
+                    grow_hybrid_cache_if_needed(
+                        past_key_values, tot_seq_len, max_cache_length
+                    )
 
         if cache_position is None:
             past_seen_tokens = (
                 past_key_values.get_seq_length() if past_key_values is not None else 0
             )
+
             cache_position = torch.arange(
                 past_seen_tokens,
                 past_seen_tokens + inputs_embeds.shape[1],
@@ -333,6 +363,11 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
 
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
+
+        if use_cache:
+            if isinstance(past_key_values, MuiCache):
+                # the C++ module increase the seen tokens counts, and we need the python part to see it too
+                past_key_values.sync_back()
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,

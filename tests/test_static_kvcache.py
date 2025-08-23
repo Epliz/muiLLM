@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from transformers.models.llama.modeling_llama import LlamaMLP
 from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.cache_utils import StaticCache
 
 from muillm.modules.kvcache.cache_utils import MuiStaticCache
 
@@ -32,6 +33,14 @@ def _test_static_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
 
+    hf_cache = StaticCache(
+        config=model_config,
+        max_batch_size=batch_size,
+        max_cache_len=max_cache_len,
+        dtype=dtype,
+        device=device,
+    )
+
     cache = MuiStaticCache(
         engine_config=engine_config,
         config=model_config,
@@ -40,6 +49,7 @@ def _test_static_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
         dtype=dtype,
         device=device,
         tensor_parallelism=1,
+        narrow_output=False,
     )
 
     num_key_value_heads = cache.num_key_value_heads
@@ -47,7 +57,6 @@ def _test_static_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
 
     num_layers = model_config.num_hidden_layers
 
-    input_tensors = [None] * num_layers
     # Prefill
     prefill_size = 64
 
@@ -68,11 +77,15 @@ def _test_static_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
             layer_idx=l,
             cache_kwargs={"cache_position": cache_position},
         )
+        hf_k_out, hf_v_out = hf_cache.update(
+            key_states=prefill_input_tensor,
+            value_states=prefill_input_tensor,
+            layer_idx=l,
+            cache_kwargs={"cache_position": cache_position},
+        )
 
-        tensors_equal(prefill_input_tensor, k_out)
-        tensors_equal(prefill_input_tensor, v_out)
-
-        input_tensors[l] = prefill_input_tensor
+        tensors_equal(hf_k_out, k_out)
+        tensors_equal(hf_v_out, v_out)
 
     current_seq_length = prefill_size
     assert current_seq_length == cache.get_seq_length(layer_idx=0)
@@ -101,12 +114,15 @@ def _test_static_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
                 layer_idx=l,
                 cache_kwargs={"cache_position": cache_position},
             )
+            hf_k_out, hf_v_out = hf_cache.update(
+                key_states=decode_input_tensor,
+                value_states=decode_input_tensor,
+                layer_idx=l,
+                cache_kwargs={"cache_position": cache_position},
+            )
 
-            all_tokens = torch.cat([input_tensors[l], decode_input_tensor], dim=2)
-            tensors_equal(all_tokens, k_out)
-            tensors_equal(all_tokens, v_out)
-
-            input_tensors[l] = all_tokens
+            tensors_equal(hf_k_out, k_out)
+            tensors_equal(hf_v_out, v_out)
 
         current_seq_length = current_seq_length + decode_size
         assert current_seq_length == cache.get_seq_length(layer_idx=0)

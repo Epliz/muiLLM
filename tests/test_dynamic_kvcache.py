@@ -10,6 +10,8 @@ from muillm.modules.kvcache.cache_utils import MuiDynamicCache
 
 from .test_utils import tensors_equal
 
+from transformers.cache_utils import DynamicCache
+
 
 def llama3_model_config(hidden_size: int, intermediate_size: int) -> LlamaMLP:
     config = LlamaConfig(
@@ -32,6 +34,7 @@ def _test_dynamic_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
 
+    hf_cache = DynamicCache()
     cache = MuiDynamicCache(engine_config=engine_config)
 
     # Some model define a custom `head_dim` != config.hidden_size // config.num_attention_heads
@@ -49,7 +52,6 @@ def _test_dynamic_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
 
     num_layers = model_config.num_hidden_layers
 
-    input_tensors = [None] * num_layers
     # Prefill
     prefill_size = 64
 
@@ -71,10 +73,15 @@ def _test_dynamic_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
             cache_kwargs={"cache_position": cache_position},
         )
 
-        tensors_equal(prefill_input_tensor, k_out)
-        tensors_equal(prefill_input_tensor, v_out)
+        hf_k_out, hf_v_out = hf_cache.update(
+            key_states=prefill_input_tensor,
+            value_states=prefill_input_tensor,
+            layer_idx=l,
+            cache_kwargs={"cache_position": cache_position},
+        )
 
-        input_tensors[l] = prefill_input_tensor
+        tensors_equal(hf_k_out, k_out)
+        tensors_equal(hf_v_out, v_out)
 
     current_seq_length = prefill_size
     assert current_seq_length == cache.get_seq_length(layer_idx=0)
@@ -104,11 +111,15 @@ def _test_dynamic_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
                 cache_kwargs={"cache_position": cache_position},
             )
 
-            all_tokens = torch.cat([input_tensors[l], decode_input_tensor], dim=2)
-            tensors_equal(all_tokens, k_out)
-            tensors_equal(all_tokens, v_out)
+            hf_k_out, hf_v_out = hf_cache.update(
+                key_states=decode_input_tensor,
+                value_states=decode_input_tensor,
+                layer_idx=l,
+                cache_kwargs={"cache_position": cache_position},
+            )
 
-            input_tensors[l] = all_tokens
+            tensors_equal(hf_k_out, k_out)
+            tensors_equal(hf_v_out, v_out)
 
         current_seq_length = current_seq_length + decode_size
         assert current_seq_length == cache.get_seq_length(layer_idx=0)
