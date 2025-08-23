@@ -3,33 +3,29 @@ from muillm.engineconfig import MuiEngineConfig
 import torch
 import torch.nn as nn
 
-from transformers.models.llama.modeling_llama import LlamaMLP
-from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
-from transformers.cache_utils import HybridChunkedCache
+from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
+from transformers.cache_utils import HybridCache
 
-from muillm.modules.kvcache.cache_utils import MuiHybridChunkedCache, MuiStaticCache
+from muillm.modules.kvcache.cache_utils import MuiHybridCache
 
 from .test_utils import tensors_equal
 
 
-def llama4_model_config(
-    hidden_size: int, intermediate_size: int, attention_chunk_size: int
-) -> LlamaMLP:
-    config = Llama4TextConfig(
+def gemma3_model_config(
+    hidden_size: int, intermediate_size: int, sliding_window: int
+) -> Gemma3TextConfig:
+    config = Gemma3TextConfig(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         num_hidden_layers=8,  # enough layers to get some sliding window ones
         num_attention_heads=16,
-        attention_chunk_size=attention_chunk_size,
-        hidden_act="silu",
-        initializer_factor=0.02,
-        layer_norm_eps=1e-5,
+        sliding_window=sliding_window,
     )
 
     return config
 
 
-def _is_sliding_layer(layer_index: int, config: Llama4TextConfig) -> bool:
+def _is_sliding_layer(layer_index: int, config: Gemma3TextConfig) -> bool:
     if hasattr(config.get_text_config(), "no_rope_layers"):
         return config.no_rope_layers[layer_index]
     else:
@@ -46,16 +42,16 @@ def _last_chunk(tensor: torch.Tensor, chunk_size: int) -> torch.Tensor:
 def _test_hybrid_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
     max_cache_len = 128
     hidden_size = 256
-    attention_chunk_size = 32
-    model_config = llama4_model_config(
+    sliding_window = 32
+    model_config = gemma3_model_config(
         hidden_size=hidden_size,
         intermediate_size=1024,
-        attention_chunk_size=attention_chunk_size,
+        sliding_window=sliding_window,
     )
 
     engine_config = MuiEngineConfig(tensor_parallelism=1)
 
-    hf_cache = HybridChunkedCache(
+    hf_cache = HybridCache(
         config=model_config,
         max_batch_size=batch_size,
         max_cache_len=max_cache_len,
@@ -63,7 +59,7 @@ def _test_hybrid_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
         device=device,
     )
 
-    cache = MuiHybridChunkedCache(
+    cache = MuiHybridCache(
         engine_config=engine_config,
         config=model_config,
         max_batch_size=batch_size,
@@ -90,7 +86,7 @@ def _test_hybrid_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
     )
 
     # Prefill
-    prefill_size = 30  # chosen prefill size to be smaller than attention_chunk_size
+    prefill_size = 30  # chosen prefill size to be smaller than sliding_window
     for l in range(num_layers):
         prefill_input_tensor = torch.rand(
             size=(batch_size, num_key_value_heads, prefill_size, head_dim),

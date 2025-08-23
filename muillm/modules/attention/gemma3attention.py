@@ -203,6 +203,13 @@ class MuiGemma3Attention(MuiModule):
                     key_states, value_states, self.layer_idx, cache_kwargs
                 )
 
+            # if self.layer_idx == 0:
+            #     print(f"query_states shape: {query_states.shape}")
+            #     print(f"key_states shape: {key_states.shape}")
+            #     print(f"value_states shape: {value_states.shape}")
+            #     if attention_mask is not None:
+            #         print(f"attention_mask shape: {attention_mask.shape}")
+
             if attention_mask is not None:
                 # TODO: try to remove it by guaranteeing it is the right size at model level
                 attention_mask = attention_mask[:, :, :, : key_states.shape[-2]]
@@ -274,6 +281,14 @@ class MuiGemma3Attention(MuiModule):
             if attention_mask is not None:
                 # backwards compatibility
                 attention_mask = attention_mask.to(query_states)
+
+            # if self.layer_idx == 0:
+            #     print(f"query_states shape: {query_states.shape}")
+            #     print(f"key_states shape: {key_states.shape}")
+            #     print(f"value_states shape: {value_states.shape}")
+            #     if attention_mask is not None:
+            #         print(f"attention_mask shape: {attention_mask.shape}")
+
             attn_output, attn_weights = attention_interface(
                 self,
                 query_states,

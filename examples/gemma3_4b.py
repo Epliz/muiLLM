@@ -202,6 +202,7 @@ batch_size = tokenized_prompts["input_ids"].shape[0]
 text, time = time_func(
     lambda: generate(model, processor, prompt, 10, disable_compile=True)
 )
+
 text, time = time_func(
     lambda: generate(
         model,
