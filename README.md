@@ -96,7 +96,10 @@ pip install wheel
 python -m build --no-isolation && pip install ./dist/muillm-0.0.1-cp310-cp310-linux_x86_64.whl
 ```
 
-Then you can run the tests, or one of the examples
+Then you can run the tests, or one of the examples.
+
+The compilation can be accelerated by specifying for what GPU architecture you want to build instead of the default which is to compile for all supported targets.
+To do so, you can specify the `PYTORCH_ROCM_ARCH` environment variable, for example specifying `PYTORCH_ROCM_ARCH="gfx908,gfx942"` to compile only for MI100 and MI300.
 
 ## Tests
 
