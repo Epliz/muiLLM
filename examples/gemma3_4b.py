@@ -123,7 +123,10 @@ prompt = [
     {
         "role": "user",
         "content": [
-            {"type": "text", "text": "What is your name?"},
+            {
+                "type": "text",
+                "text": "Write a blogpost about how Croatia is the dream destination for summer vacations.",
+            },
         ],
     },
 ]
@@ -140,7 +143,7 @@ print("tokenized prompts shape: ", tokenized_prompts["input_ids"].shape)
 
 num_input_tokens = tokenized_prompts["input_ids"].shape[1]
 batch_size = tokenized_prompts["input_ids"].shape[0]
-num_output_tokens = 64
+num_output_tokens = 256
 num_total_tokens = (num_input_tokens + num_output_tokens) * batch_size
 
 # Have a look at the original speed
