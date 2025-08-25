@@ -55,9 +55,9 @@ from muillm.modules.decoder.gemma3decoder import MuiGemma3DecoderLayer
 
 from muillm.modules.kvcache.cache_utils import (
     MuiCache,
-    MuiHybridCache,
-    create_hybrid_cache,
-    grow_hybrid_cache_if_needed,
+    MuiHybridChunkedCache,
+    create_hybrid_chunked_cache,
+    grow_hybrid_chunked_cache_if_needed,
 )
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
@@ -264,9 +264,8 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
 
             no_cache = past_key_values is None
             if no_cache:
-                # create a hybrid cache
-                batch_size, seq_len, _ = inputs_embeds.shape
-                past_key_values = create_hybrid_cache(
+                # create a hybrid chunked cache (similar to HybridCache)
+                past_key_values = create_hybrid_chunked_cache(
                     engine_config=self.engine_config,
                     config=self.config,
                     max_batch_size=batch_size,
@@ -276,10 +275,10 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
                 )
             else:
                 # we have a previous cache, just re-use it
-                if isinstance(past_key_values, MuiHybridCache):
+                if isinstance(past_key_values, MuiHybridChunkedCache):
                     # grow cache if needed
                     max_cache_length = self.config.max_position_embeddings
-                    grow_hybrid_cache_if_needed(
+                    grow_hybrid_chunked_cache_if_needed(
                         past_key_values, tot_seq_len, max_cache_length
                     )
 
@@ -398,13 +397,18 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
 
         dtype, device = input_tensor.dtype, input_tensor.device
         sequence_length = input_tensor.shape[1]
+        if isinstance(past_key_values, MuiHybridChunkedCache):
+            # TODO: use minimal size
+            target_length = past_key_values.get_max_cache_shape()
         if isinstance(past_key_values, (HybridCache, StaticCache)):
             target_length = past_key_values.get_max_cache_shape()
         else:
             target_length = (
                 attention_mask.shape[-1]
                 if attention_mask is not None
-                else input_tensor.shape[1]
+                else input_tensor.shape[
+                    1
+                ]  # TODO: + past_key_values.get_seq_length() + 1
             )
 
         # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
@@ -732,7 +736,10 @@ class MuiGemma3ForCausalLM(Gemma3PreTrainedModel, MuiGenerationMixin):
             _ = model_inputs.pop("logits_to_keep", None)
 
         if (
-            isinstance(past_key_values, HybridCache)
+            (
+                isinstance(past_key_values, HybridCache)
+                or isinstance(past_key_values, MuiHybridChunkedCache)
+            )
             and attention_mask.ndim == 2
             and not self.config._attn_implementation == "flash_attention_2"
         ):
@@ -848,6 +855,9 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
         min_dtype = torch.finfo(self.dtype).min
         inputs_lead_dim, sequence_length = input_tensor.shape[:2]
         if using_static_cache:
+            target_length = past_key_values.get_max_cache_shape()
+        elif isinstance(past_key_values, MuiHybridChunkedCache):
+            # TODO: use minimal size
             target_length = past_key_values.get_max_cache_shape()
         elif isinstance(past_key_values, HybridCache):
             target_length = past_key_values.get_max_cache_shape()
@@ -1369,7 +1379,10 @@ class MuiGemma3ForConditionalGeneration(Gemma3PreTrainedModel, MuiGenerationMixi
         if is_prefill:
             model_inputs["pixel_values"] = pixel_values
         is_training = token_type_ids is not None and labels is not None
-        if is_prefill and isinstance(past_key_values, HybridCache):
+        if is_prefill and (
+            isinstance(past_key_values, HybridCache)
+            or isinstance(past_key_values, MuiHybridChunkedCache)
+        ):
             input_tensor = inputs_embeds if inputs_embeds is not None else input_ids
             causal_mask = self.model._update_causal_mask(
                 attention_mask,
