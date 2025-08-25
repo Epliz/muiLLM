@@ -91,6 +91,7 @@ def _test_hybrid_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
 
     # Prefill
     prefill_size = 30  # chosen prefill size to be smaller than attention_chunk_size
+    current_seq_length = prefill_size
     for l in range(num_layers):
         prefill_input_tensor = torch.rand(
             size=(batch_size, num_key_value_heads, prefill_size, head_dim),
@@ -119,10 +120,13 @@ def _test_hybrid_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
 
         # During prefill, we return the K,V input tensors for the sliding layers
         # but HF returns the cache ones, that are bigger
-        tensors_equal(hf_k_out[:, :, :prefill_size, :], k_out[:, :, :prefill_size, :])
-        tensors_equal(hf_v_out[:, :, :prefill_size, :], v_out[:, :, :prefill_size, :])
+        tensors_equal(
+            hf_k_out[:, :, :current_seq_length, :], k_out[:, :, :current_seq_length, :]
+        )
+        tensors_equal(
+            hf_v_out[:, :, :current_seq_length, :], v_out[:, :, :current_seq_length, :]
+        )
 
-    current_seq_length = prefill_size
     assert current_seq_length == cache.get_seq_length(layer_idx=0)
 
     # Decode
@@ -136,6 +140,8 @@ def _test_hybrid_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
         ).to(
             device=device
         )  # move after for platforms without arange implemented
+
+        current_seq_length = current_seq_length + decode_size
 
         for l in range(num_layers):
             decode_input_tensor = torch.rand(
@@ -159,10 +165,15 @@ def _test_hybrid_kv_cache(batch_size: int, dtype: torch.dtype, device: str):
                 cache_kwargs={"cache_position": cache_position},
             )
 
-            tensors_equal(hf_k_out, k_out)
-            tensors_equal(hf_v_out, v_out)
+            tensors_equal(
+                hf_k_out[:, :, :current_seq_length, :],
+                k_out[:, :, :current_seq_length, :],
+            )
+            tensors_equal(
+                hf_v_out[:, :, :current_seq_length, :],
+                v_out[:, :, :current_seq_length, :],
+            )
 
-        current_seq_length = current_seq_length + decode_size
         assert current_seq_length == cache.get_seq_length(layer_idx=0)
 
 

@@ -296,6 +296,7 @@ class MuiStaticCache(StaticCache, MuiCache):
         self._seen_tokens = 0
 
 
+# TODO: remove
 class MuiHybridCache(HybridCache, MuiCache):
     def __init__(
         self,
