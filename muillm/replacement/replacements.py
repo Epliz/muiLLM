@@ -6,13 +6,14 @@ from muillm.modules.decoder.parallelllama4decoder import (
     MuiParallelLlama4TextDecoderLayer,
 )
 from muillm.modules.embedding import MuiEmbedding
-from muillm.modules.norm.l2norm import MuiL2Norm
-from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
-from muillm.modules.models.llama4.model import (
-    MuiLlama4ForCausalLM,
-    MuiLlama4ForConditionalGeneration,
-    MuiLlama4TextModel,
+from muillm.modules.models.gemma3.model import (
+    MuiGemma3ForCausalLM,
+    MuiGemma3ForConditionalGeneration,
+    MuiGemma3Model,
+    MuiGemma3TextModel,
 )
+from muillm.modules.norm.l2norm import MuiL2Norm
+
 
 from muillm.modules.moe.gateupdownmlpmoe import MuiGateUpDownMLPMoe
 from muillm.modules.moe.parallelgateupdownmlpmoe import MuiParallelGateUpDownMLPMoe
@@ -20,15 +21,30 @@ from muillm.modules.multilinear import MuiMultiLinear
 from muillm.modules.parallelgateupdownmlp import MuiParallelGateUpDownMLP
 from muillm.modules.parallellinear import MuiParallelLinear
 from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
-import torch
-import torch.nn as nn
+
+from muillm.modules.models.gemma3.model import (
+    MuiGemma3ForCausalLM,
+    MuiGemma3ForConditionalGeneration,
+    MuiGemma3Model,
+    MuiGemma3TextModel,
+)
+from muillm.modules.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
+from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
+from muillm.modules.models.llama4.model import (
+    MuiLlama4ForCausalLM,
+    MuiLlama4ForConditionalGeneration,
+    MuiLlama4TextModel,
+)
+
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.linear import MuiLinear
 from muillm.modules.norm.rmsnorm import MuiRMSNorm
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
-from muillm.modules.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
 from muillm.memorymanagement.gc import trigger_gc
+
+import torch
+import torch.nn as nn
 
 from transformers.models.mistral.modeling_mistral import (
     MistralRotaryEmbedding,
@@ -53,8 +69,10 @@ from transformers.models.gemma3.modeling_gemma3 import (
     Gemma3DecoderLayer,
     Gemma3RMSNorm,
     Gemma3Attention,
-    Gemma3Model,
+    Gemma3TextModel,
     Gemma3ForCausalLM,
+    Gemma3ForConditionalGeneration,
+    Gemma3Model,
 )
 
 from transformers.models.llama4.modeling_llama4 import (
@@ -103,6 +121,10 @@ _LAYER_REPLACEMENTS = {
     LlamaDecoderLayer: MuiDecoderLayer,
     Llama4TextDecoderLayer: MuiLlama4TextDecoderLayer,
     # replacements for full models
+    Gemma3TextModel: MuiGemma3TextModel,
+    Gemma3ForCausalLM: MuiGemma3ForCausalLM,
+    Gemma3Model: MuiGemma3Model,
+    Gemma3ForConditionalGeneration: MuiGemma3ForConditionalGeneration,
     MistralModel: MuiMistralModel,
     LlamaModel: MuiLlamaModel,
     Llama4TextModel: MuiLlama4TextModel,

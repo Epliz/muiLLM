@@ -733,6 +733,7 @@ class MuiLlama4ForCausalLM(Llama4PreTrainedModel, MuiGenerationMixin):
         if initialize:
             self.post_init()
 
+    @staticmethod
     def replace(
         replacement_context: MuiReplacementContext,
         prev_model: Union["MuiLlama4ForCausalLM", Llama4ForCausalLM],
