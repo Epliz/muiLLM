@@ -838,7 +838,7 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
         self,
         attention_mask,
         token_type_ids,
-        past_key_values,
+        past_key_values: Optional[Cache],
         cache_position,
         input_tensor,
         is_training: bool = False,
@@ -851,9 +851,14 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
             # form and requires no inversion or slicing.
             return attention_mask
 
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+
         using_static_cache = isinstance(past_key_values, StaticCache)
         min_dtype = torch.finfo(self.dtype).min
         inputs_lead_dim, sequence_length = input_tensor.shape[:2]
+
         if using_static_cache:
             target_length = past_key_values.get_max_cache_shape()
         elif isinstance(past_key_values, MuiHybridChunkedCache):
@@ -865,7 +870,7 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
             target_length = (
                 attention_mask.shape[-1]
                 if isinstance(attention_mask, torch.Tensor)
-                else cache_position[0] + sequence_length + 1
+                else past_seen_tokens + sequence_length
             )
 
         if attention_mask is not None and attention_mask.dim() == 4:
@@ -1371,8 +1376,10 @@ class MuiGemma3ForConditionalGeneration(Gemma3PreTrainedModel, MuiGenerationMixi
             **kwargs,
         )
 
-        # TODO: improve
-        is_prefill = cache_position[0] == 0
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+        is_prefill = past_seen_tokens == 0
 
         # If we're in cached decoding stage, pixel values should be None because input ids do not contain special image token anymore
         # Otherwise we need pixel values to be passed to model. NOTE: use_cache=False needs pixel_values always
