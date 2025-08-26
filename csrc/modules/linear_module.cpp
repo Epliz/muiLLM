@@ -42,6 +42,7 @@ torch::Tensor MuiLLMLinear::forward(
     torch::Tensor& inputs,
     torch::Tensor& residual
 ) {
+  auto undef_tensor = torch::Tensor();
   // TODO: is numel slow?
   auto num_elements = inputs.numel();
   if (this->dispatchable && num_elements == inputs.size(inputs.dim() - 1)) {
@@ -64,6 +65,7 @@ torch::Tensor MuiLLMLinear::forward(
       normalized_inputs = muillm_rmsnorm_forward(
         this->norm_weights,
         inputs,
+        /* residual */ undef_tensor,
         this->variance_epsilon,
         this->norm_weights_offset
       );

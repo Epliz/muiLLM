@@ -31,12 +31,15 @@ __device__ float warpReduce(float val) {
 
 // TODO: variance is computed by every block
 //  each block scales and normalizes only a slice
-__global__ void muillm_qkl2norm_bf16_kernel(
+__global__ void muillm_qkrmsnorm_bf16_kernel(
+    const __hip_bfloat16* __restrict__ QW,
+    const __hip_bfloat16* __restrict__ KW,
     const __hip_bfloat16* __restrict__ Q, // input = size BxK
     const __hip_bfloat16* __restrict__ K, // input = size BxK
     __hip_bfloat16* __restrict__ Q_NORM, // output = size BxK
     __hip_bfloat16* __restrict__ K_NORM, // output = size BxK
     float epsilon,
+    float weight_offset,
     unsigned BQ, // batch size for Q
     unsigned N,
     float scale // 1/K
@@ -47,16 +50,19 @@ __global__ void muillm_qkl2norm_bf16_kernel(
 
     unsigned B = blockIdx.y;
 
+    const __hip_bfloat16* __restrict__ W;
     const __hip_bfloat16* __restrict__ X;
     __hip_bfloat16* __restrict__ Y;
 
     if (B < BQ) {
         // Q
+        W = QW;
         X = Q;
         Y = Q_NORM;
     } else {
         // K
         B -= BQ;
+        W = KW;
         X = K;
         Y = K_NORM;
     }
@@ -118,7 +124,28 @@ __global__ void muillm_qkl2norm_bf16_kernel(
     float rsqrt_var = rsqrtf(shared_acc_var * scale);
 
     // normalize & output
-    {
+    if (W != nullptr) {
+      // one thread processes 2 elements
+      unsigned n = blockIdx.x * ELEMENTS_PER_BLOCK + threadIdx.x * 2;
+      if (n + 1 < N) {
+        float2 x = __bfloat1622float2(*((const __hip_bfloat162*)&X[n]));
+        float2 w = __bfloat1622float2(*((const __hip_bfloat162*)&W[n])) + weight_offset;
+
+        float yx = w.x * (x.x * rsqrt_var);
+        float yy = w.y * (x.y * rsqrt_var);
+        
+        Y[n + 0] = __float2bfloat16(yx);
+        Y[n + 1] = __float2bfloat16(yy);
+      }
+      if (n < N) {
+        float x = __bfloat162float(X[n]);
+        float w = __bfloat162float(W[n]) + weight_offset;
+
+        float y = w * (x * rsqrt_var);
+        
+        Y[n] = __float2bfloat16(y);
+      }
+    } else {
       // one thread processes 2 elements
       unsigned n = blockIdx.x * ELEMENTS_PER_BLOCK + threadIdx.x * 2;
       if (n + 1 < N) {
@@ -140,16 +167,19 @@ __global__ void muillm_qkl2norm_bf16_kernel(
     }
 }
 
-void muillm_qkl2norm_bf16(
+void muillm_qkrmsnorm_bf16(
   hipStream_t stream,
   unsigned BQ,
   unsigned BK,
   unsigned N,
+  const __hip_bfloat16* QW,
+  const __hip_bfloat16* KW,
   const __hip_bfloat16* q,
   const __hip_bfloat16* k,
   __hip_bfloat16* q_norm,
   __hip_bfloat16* k_norm,
-  float epsilon
+  float epsilon,
+  float weight_offset
 ) {
   const int threads_per_blocks = THREADS_PER_BLOCK;
   // launch enough blocks to cover all elements in q and k
@@ -157,12 +187,15 @@ void muillm_qkl2norm_bf16(
 
   float scale = 1.f / N;
 
-  muillm_qkl2norm_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+  muillm_qkrmsnorm_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    QW,
+    KW,
     q,
     k,
     q_norm,
     k_norm,
     epsilon,
+    weight_offset,
     BQ,
     N,
     scale

@@ -198,14 +198,15 @@ class MuiGemma3DecoderLayer(MuiModule):
             cache_position=cache_position,
             **kwargs,
         )
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+
+        hidden_states = self.post_attention_layernorm(hidden_states, residual=residual)
 
         residual = hidden_states
         # the pre_feedforward_layernorm is fused in the MLP
         hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_feedforward_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states = self.post_feedforward_layernorm(
+            hidden_states, residual=residual
+        )
 
         outputs = (hidden_states,)
 

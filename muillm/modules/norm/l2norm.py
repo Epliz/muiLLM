@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Optional, Union
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.module import MuiModule
 import torch
@@ -16,8 +16,11 @@ from muillm.replacement.replacementcontext import MuiReplacementContext
 
 class _MuiL2Norm(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inputs, epsilon):
-        output = muillm_ext.muillm_l2norm_forward(inputs, epsilon)
+    def forward(ctx, inputs, epsilon, residual=None):
+        inputs = inputs.contiguous()
+        output = muillm_ext.muillm_l2norm_forward(
+            inputs, residual=residual, epsilon=epsilon
+        )
 
         ctx.save_for_backward(inputs)
 
@@ -82,14 +85,14 @@ class MuiL2Norm(MuiModule):
 
         return new_module
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if (
             self.dispatchable
             and (input.is_cuda)
             and ((input.dtype == torch.float16) or (input.dtype == torch.bfloat16))
         ):
             # we support the type
-            return _MuiL2Norm.apply(input, self.variance_epsilon)
+            return _MuiL2Norm.apply(input, self.variance_epsilon, residual)
         else:
             # non-fused implementation
             input_dtype = input.dtype
@@ -98,4 +101,9 @@ class MuiL2Norm(MuiModule):
             hidden_states = hidden_states * torch.rsqrt(
                 variance + self.variance_epsilon
             )
-            return hidden_states.to(input_dtype)
+            h = hidden_states.to(input_dtype)
+
+            if residual is not None:
+                h = h + residual
+
+            return h

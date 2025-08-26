@@ -75,6 +75,7 @@ at::Tensor muillm_int8_gateupmlp_forward(
 
 #include "norm/l2norm.cuh"
 #include "norm/qkl2norm.cuh"
+#include "norm/qkrmsnorm.cuh"
 #include "norm/rmsnorm.cuh"
 #include "reduce/reduce.cuh"
 #include "topk/topk.cuh"
@@ -255,9 +256,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("muillm_int8_gateupmlp_dequantize_forward", &muillm_int8_gateupmlp_dequantize_forward, "muillm int8 gate up dequantize");
   m.def("muillm_int8_gateupmlp_forward", &muillm_int8_gateupmlp_forward, "muillm int8 gate up silu forward");
-  m.def("muillm_l2norm_forward", &muillm_l2norm_forward, "muillm l2norm forward");
+  m.def("muillm_l2norm_forward", &muillm_l2norm_forward_trampoline, "muillm l2norm forward", py::arg("inputs"), py::arg("residual") = py::none(), py::arg("epsilon") = 0.f);
   m.def("muillm_qkl2norm_forward", &muillm_qkl2norm_forward, "muillm qkl2norm forward");
-  m.def("muillm_rmsnorm_forward", &muillm_rmsnorm_forward, "muillm rmsnorm forward");
+  m.def("muillm_rmsnorm_forward", &muillm_rmsnorm_forward_trampoline, "muillm rmsnorm forward", py::arg("weights"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("epsilon") = 0.f, py::arg("weights_offset") = 0.f);
+  m.def("muillm_qkrmsnorm_forward", &muillm_qkrmsnorm_forward, "muillm qkrmsnorm forward");
   m.def("muillm_reduce_sum_forward", &muillm_reduce_sum_forward, "muillm reduce sum forward");
   m.def("muillm_topk_sigmoid_forward", &muillm_topk_sigmoid_forward, "muillm topk sigmoid forward");
 

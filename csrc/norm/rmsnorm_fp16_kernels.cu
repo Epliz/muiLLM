@@ -35,6 +35,7 @@ __device__ float warpReduce(float val) {
 __global__ void muillm_rmsnorm_fp16_kernel(
     const half* __restrict__ W, // weight matrix - size K
     const half* __restrict__ X, // input = size BxK
+    const half* __restrict__ RB, // optional residual = size BxK
     half* __restrict__ Y, // output = size BxK
     float epsilon,
     float weight_offset,
@@ -54,8 +55,11 @@ __global__ void muillm_rmsnorm_fp16_kernel(
     __syncthreads();
 
     int current_row = blockIdx.y;
-    // align X and Y to the current row
+
+    bool has_residual = RB != nullptr;
+    // align X, RB and Y to the current row
     X = &X[current_row * K];
+    RB = has_residual ? &RB[current_row * K] : nullptr;
     Y = &Y[current_row * K];
 
     // compute the variance (all blocks compute it fully)
@@ -102,15 +106,16 @@ __global__ void muillm_rmsnorm_fp16_kernel(
     float rsqrt_var = rsqrtf(shared_acc_var * scale);
 
     // normalize & output
-    {
+    if (W != nullptr) {
       // one thread processes 2 elements
       unsigned k = blockIdx.x * ELEMENTS_PER_BLOCK + threadIdx.x * 2;
       if (k + 1 < K) {
         float2 x = __half22float2(*((const half2*)&X[k]));
         float2 w = __half22float2(*((const half2*)&W[k])) + weight_offset;
+        float2 r = has_residual ? __half22float2(*((const half2*)&RB[k])) : make_float2(0.f, 0.f);
 
-        float yx = w.x * (x.x * rsqrt_var);
-        float yy = w.y * (x.y * rsqrt_var);
+        float yx = w.x * (x.x * rsqrt_var) + r.x;
+        float yy = w.y * (x.y * rsqrt_var) + r.y;
         
         Y[k + 0] = __float2half(yx);
         Y[k + 1] = __float2half(yy);
@@ -118,9 +123,31 @@ __global__ void muillm_rmsnorm_fp16_kernel(
       if (k < K) {
         float x = __half2float(X[k]);
         float w = __half2float(W[k]) + weight_offset;
+        float r = has_residual ? __half2float(RB[k]) : 0.f;
 
-        float y = w * (x * rsqrt_var);
+        float y = w * (x * rsqrt_var) + r;
+
+        Y[k] = __float2half(y);
+      }
+    } else {
+      // one thread processes 2 elements
+      unsigned k = blockIdx.x * ELEMENTS_PER_BLOCK + threadIdx.x * 2;
+      if (k + 1 < K) {
+        float2 x = __half22float2(*((const half2*)&X[k]));
+        float2 r = has_residual ? __half22float2(*((const half2*)&RB[k])) : make_float2(0.f, 0.f);
+
+        float yx = (x.x * rsqrt_var) + r.x;
+        float yy = (x.y * rsqrt_var) + r.y;
         
+        Y[k + 0] = __float2half(yx);
+        Y[k + 1] = __float2half(yy);
+      }
+      if (k < K) {
+        float x = __half2float(X[k]);
+        float r = has_residual ? __half2float(RB[k]) : 0.f;
+
+        float y = (x * rsqrt_var) + r;
+
         Y[k] = __float2half(y);
       }
     }
@@ -132,6 +159,7 @@ void muillm_rmsnorm_fp16(
   unsigned K,
   const half* __restrict__ W, // weight matrix - size K
   const half* __restrict__ X, // input = size BxK
+  const half* __restrict__ RB, // optional residual = size BxK
   half* __restrict__ Y, // output = size BxK
   float epsilon,
   float weight_offset
@@ -145,6 +173,7 @@ void muillm_rmsnorm_fp16(
   muillm_rmsnorm_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
     W,
     X,
+    RB,
     Y,
     epsilon,
     weight_offset,

@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Optional, Union
 from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.module import MuiModule
@@ -21,10 +21,14 @@ from muillm.replacement.replacementcontext import MuiReplacementContext
 
 class _MuiRMSNorm(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inputs, weights, epsilon, weight_offset):
+    def forward(ctx, inputs, weights, epsilon, weight_offset, residual=None):
         inputs = inputs.contiguous()
         output = muillm_ext.muillm_rmsnorm_forward(
-            weights, inputs, epsilon, weight_offset
+            weights,
+            inputs,
+            residual=residual,
+            epsilon=epsilon,
+            weights_offset=weight_offset,
         )
 
         ctx.save_for_backward(inputs, weights)
@@ -85,7 +89,7 @@ class MuiRMSNorm(MuiModule):
         prev_module: Union[
             "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Gemma3RMSNorm, Llama4TextRMSNorm
         ],
-    ) -> float:
+    ) -> nn.Parameter:
         return prev_module.weight
 
     @staticmethod
@@ -167,11 +171,11 @@ class MuiRMSNorm(MuiModule):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.dispatchable:
             # we support the type
             return _MuiRMSNorm.apply(
-                input, self.weight, self.variance_epsilon, self.weight_offset
+                input, self.weight, self.variance_epsilon, self.weight_offset, residual
             )
         else:
             # non-fused implementation
@@ -187,4 +191,9 @@ class MuiRMSNorm(MuiModule):
                 if self.weight_offset != 0
                 else self.weight
             )
-            return offseted_weights * hidden_states.to(input_dtype)
+            h = offseted_weights * hidden_states.to(input_dtype)
+
+            if residual is not None:
+                h = h + residual
+
+            return h

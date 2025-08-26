@@ -1,4 +1,4 @@
-#include "qkl2norm.cuh"
+#include "qkrmsnorm.cuh"
 
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
@@ -36,15 +36,20 @@ void muillm_qkrmsnorm_bf16(
   float weight_offset
 );
 
-
 #define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-std::tuple<at::Tensor, at::Tensor> muillm_qkl2norm_forward(
+std::tuple<at::Tensor, at::Tensor> muillm_qkrmsnorm_forward(
+    torch::Tensor q_weights,
+    torch::Tensor k_weights,
     torch::Tensor q,
     torch::Tensor k,
-    float epsilon) {
+    float epsilon,
+    float weight_offset
+) {
+  CHECK_INPUT(q_weights);
+  CHECK_INPUT(k_weights);
   CHECK_INPUT(q);
   CHECK_INPUT(k);
 
@@ -82,14 +87,14 @@ std::tuple<at::Tensor, at::Tensor> muillm_qkl2norm_forward(
       BQ,
       BK,
       N,
-      /* QW */ nullptr,
-      /* KW */ nullptr,
+      (const half*)q_weights.data_ptr(),
+      (const half*)k_weights.data_ptr(),
       (const half*)q.data_ptr(),
       (const half*)k.data_ptr(),
       (half*)q_norm.data_ptr(),
       (half*)k_norm.data_ptr(),
       epsilon,
-      0.f
+      weight_offset
     );
   } else if (dtype == torch::kBFloat16) {
     muillm_qkrmsnorm_bf16(
@@ -97,14 +102,14 @@ std::tuple<at::Tensor, at::Tensor> muillm_qkl2norm_forward(
       BQ,
       BK,
       N,
-      /* QW */ nullptr,
-      /* KW */ nullptr,
+      (const __hip_bfloat16*)q_weights.data_ptr(),
+      (const __hip_bfloat16*)k_weights.data_ptr(),
       (const __hip_bfloat16*)q.data_ptr(),
       (const __hip_bfloat16*)k.data_ptr(),
       (__hip_bfloat16*)q_norm.data_ptr(),
       (__hip_bfloat16*)k_norm.data_ptr(),
       epsilon,
-      0.f
+      weight_offset
     );
   } else {
     TORCH_CHECK(false, "Unsupported data type for q and k");

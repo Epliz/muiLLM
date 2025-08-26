@@ -11,6 +11,7 @@ from muillm.modules.attention.rotaryembedding import apply_rotary_pos_emb
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
 from muillm.modules.multilinear import MuiMultiLinear
+from muillm.modules.norm.qkrmsnorm import MuiQKRMSNorm
 from muillm.modules.norm.rmsnorm import MuiRMSNorm
 
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
@@ -85,8 +86,7 @@ class MuiGemma3Attention(MuiModule):
         self,
         engine_config: MuiEngineConfig,
         prev_module: Gemma3Attention,
-        q_norm: MuiRMSNorm,
-        k_norm: MuiRMSNorm,
+        qk_norm: MuiQKRMSNorm,
         o_proj: MuiLinear,
     ):
         super().__init__(engine_config=engine_config)
@@ -117,8 +117,7 @@ class MuiGemma3Attention(MuiModule):
 
         self.sliding_window = config.sliding_window if self.is_sliding else None
 
-        self.q_norm = q_norm
-        self.k_norm = k_norm
+        self.qk_norm = qk_norm
 
     @staticmethod
     def replace(
@@ -127,12 +126,9 @@ class MuiGemma3Attention(MuiModule):
         engine_config = replacement_context.engine_config
 
         # replace q and k norms
-        q_norm = MuiRMSNorm.replace(
+        qk_norm = MuiQKRMSNorm.replace(
             replacement_context,
             prev_module.q_norm,
-        )
-        k_norm = MuiRMSNorm.replace(
-            replacement_context,
             prev_module.k_norm,
         )
 
@@ -144,8 +140,7 @@ class MuiGemma3Attention(MuiModule):
         return MuiGemma3Attention(
             engine_config=engine_config,
             prev_module=prev_module,
-            q_norm=q_norm,
-            k_norm=k_norm,
+            qk_norm=qk_norm,
             o_proj=o_proj,
         )
 
@@ -181,8 +176,7 @@ class MuiGemma3Attention(MuiModule):
                 bsz, self.num_key_value_heads, q_len, self.head_dim
             )
 
-            query_states = self.q_norm(query_states)
-            key_states = self.k_norm(key_states)
+            query_states, key_states = self.qk_norm(query_states, key_states)
 
             cos, sin = position_embeddings
 
@@ -233,8 +227,7 @@ class MuiGemma3Attention(MuiModule):
                 bsz, q_len, self.num_key_value_heads, self.head_dim
             ).transpose(1, 2)
 
-            query_states = self.q_norm(query_states)
-            key_states = self.k_norm(key_states)
+            query_states, key_states = self.qk_norm(query_states, key_states)
 
             cos, sin = position_embeddings
             query_states, key_states = apply_rotary_pos_emb(

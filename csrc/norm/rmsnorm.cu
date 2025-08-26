@@ -10,6 +10,7 @@ void muillm_rmsnorm_fp16(
   unsigned K,
   const half* __restrict__ W, // weight matrix - size K
   const half* __restrict__ X, // input = size BxK
+  const half* __restrict__ RB, // optional residual = size BxK
   half* __restrict__ Y, // output = size BxK
   float epsilon,
   float weight_offset
@@ -21,6 +22,7 @@ void muillm_rmsnorm_bf16(
   unsigned K,
   const __hip_bfloat16* __restrict__ W, // weight matrix - size K
   const __hip_bfloat16* __restrict__ X, // input = size BxK
+  const __hip_bfloat16* __restrict__ RB, // optional residual = size BxK
   __hip_bfloat16* __restrict__ Y, // output = size BxK
   float epsilon,
   float weight_offset
@@ -33,6 +35,7 @@ void muillm_rmsnorm_bf16(
 at::Tensor muillm_rmsnorm_forward(
     torch::Tensor weights,
     torch::Tensor x,
+    torch::Tensor residual, // optional
     float epsilon,
     float weight_offset
 ) {
@@ -68,6 +71,7 @@ at::Tensor muillm_rmsnorm_forward(
       K,
       (const half*)weights.data_ptr(),
       (const half*)x.data_ptr(),
+      residual.defined() ? (const half*)residual.data_ptr() : nullptr,
       (half*)y.data_ptr(),
       epsilon,
       weight_offset
@@ -79,6 +83,7 @@ at::Tensor muillm_rmsnorm_forward(
       K,
       (const __hip_bfloat16*)weights.data_ptr(),
       (const __hip_bfloat16*)x.data_ptr(),
+      residual.defined() ? (const __hip_bfloat16*)residual.data_ptr() : nullptr,
       (__hip_bfloat16*)y.data_ptr(),
       epsilon,
       weight_offset
@@ -88,4 +93,23 @@ at::Tensor muillm_rmsnorm_forward(
   }
 
   return y;
+}
+
+// python trampoline
+at::Tensor muillm_rmsnorm_forward_trampoline(
+    torch::Tensor weights,
+    torch::Tensor x,
+    std::optional<torch::Tensor> residual_,
+    float epsilon,
+    float weight_offset
+) {
+  
+  torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
+  return muillm_rmsnorm_forward(
+      weights,
+      x,
+      residual,
+      epsilon,
+      weight_offset
+  );
 }
