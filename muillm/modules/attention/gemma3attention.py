@@ -3,16 +3,11 @@ import torch.nn as nn
 from typing import Callable, Optional, Tuple, Union
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.attention.causaltransformerdecoding import (
-    mui_causally_decode,
-    mui_causally_decode_masked,
-)
 from muillm.modules.attention.rotaryembedding import apply_rotary_pos_emb
+from muillm.modules.kvcache.cache_utils import MuiHybridChunkedCache
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
-from muillm.modules.multilinear import MuiMultiLinear
 from muillm.modules.norm.qkrmsnorm import MuiQKRMSNorm
-from muillm.modules.norm.rmsnorm import MuiRMSNorm
 
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.utils import logging
@@ -22,6 +17,8 @@ from transformers.models.gemma3.modeling_gemma3 import (
 )
 
 from muillm.replacement.replacementcontext import MuiReplacementContext
+
+import muillm_ext
 
 logger = logging.get_logger(__name__)
 
@@ -79,6 +76,61 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
+class _MuiGemma3AttentionFullForward(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        module,
+        cache_module,
+        q,
+        k,
+        v,
+        m,
+        cos,
+        sin,
+        cache_positions,
+    ):
+        output = muillm_ext.muillm_gemma3_attention_module_rope_forward(
+            module,
+            cache_module,
+            q,
+            k,
+            v,
+            m,
+            cos,
+            sin,
+            cache_positions,
+        )
+
+        ctx.save_for_backward(q, k, v, m)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
+
+
+class _MuiGemma3Attention(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, module, q, k, v, m):
+        output = muillm_ext.muillm_gemma3_attention_module_forward(
+            module,
+            q,
+            k,
+            v,
+            m,
+        )
+
+        ctx.save_for_backward(q, k, v, m)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
+
+
 class MuiGemma3Attention(MuiModule):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -90,6 +142,12 @@ class MuiGemma3Attention(MuiModule):
         o_proj: MuiLinear,
     ):
         super().__init__(engine_config=engine_config)
+
+        self.cpp_engine = engine_config.cpp_engine
+        # the cpp module will be created at the end of all layer replacements
+        # (set the field here before potential OOM errors so that it can still be manipulated in
+        # the destructor)
+        self.cpp_module = None
 
         config = prev_module.config
         layer_idx = prev_module.layer_idx
@@ -118,6 +176,42 @@ class MuiGemma3Attention(MuiModule):
         self.sliding_window = config.sliding_window if self.is_sliding else None
 
         self.qk_norm = qk_norm
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+    def _check_dispatchable(self):
+        self.dispatchable = self.o_proj.dispatchable
+
+    def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+        if self.cpp_module is not None:
+            muillm_ext.muillm_gemma3_attention_module_deinit(self.cpp_module)
+
+        if (self.cpp_engine is None) or (self.o_proj.cpp_module is None):
+            # cannot initialize the cpp module
+            self.cpp_module = None
+            return
+
+        self.cpp_module = muillm_ext.muillm_gemma3_attention_module_init(
+            self.cpp_engine,
+            self.o_proj.cpp_module,
+            self.num_attention_heads,
+            self.num_key_value_heads,
+            self.head_dim,
+            self.qk_norm.q_weights,
+            self.qk_norm.k_weights,
+            self.qk_norm.variance_epsilon,
+            self.qk_norm.weight_offset,
+            self.layer_idx,
+        )
+
+    def finalize_deinit(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_gemma3_attention_module_deinit(self.cpp_module)
+            self.cpp_module = None
 
     @staticmethod
     def replace(
@@ -149,7 +243,7 @@ class MuiGemma3Attention(MuiModule):
         query_states: torch.Tensor,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        position_embeddings: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
@@ -157,62 +251,57 @@ class MuiGemma3Attention(MuiModule):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         bsz, q_len, _ = query_states.size()
 
-        if (
-            (q_len == 1)
-            and (
-                (query_states.dtype == torch.float16)
-                or (query_states.dtype == torch.bfloat16)
-            )
-            and (query_states.is_cuda)
-        ):
-            # as q_len == 1, we can avoid the transposes
-            query_states = query_states.view(
-                bsz, self.num_attention_heads, q_len, self.head_dim
-            )
-            key_states = key_states.view(
-                bsz, self.num_key_value_heads, q_len, self.head_dim
-            )
-            value_states = value_states.view(
-                bsz, self.num_key_value_heads, q_len, self.head_dim
-            )
+        cos, sin = position_embeddings
 
-            query_states, key_states = self.qk_norm(query_states, key_states)
-
-            cos, sin = position_embeddings
-
-            # TODO: Make it use kernel
-            query_states, key_states = apply_rotary_pos_emb(
-                query_states, key_states, cos, sin
-            )
-
-            if past_key_value is not None:
-                # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                cache_kwargs = {
-                    "sin": sin,
-                    "cos": cos,
-                    "cache_position": cache_position,
-                    "sliding_window": self.sliding_window,
-                }
-                key_states, value_states = past_key_value.update(
-                    key_states, value_states, self.layer_idx, cache_kwargs
-                )
-
-            # if self.layer_idx == 0:
-            #     print(f"query_states shape: {query_states.shape}")
-            #     print(f"key_states shape: {key_states.shape}")
-            #     print(f"value_states shape: {value_states.shape}")
-            #     if attention_mask is not None:
-            #         print(f"attention_mask shape: {attention_mask.shape}")
-
-            if attention_mask is not None:
-                # TODO: try to remove it by guaranteeing it is the right size at model level
-                attention_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-                attn_output = mui_causally_decode_masked(
-                    query_states, key_states, value_states, attention_mask
+        if (q_len == 1) and self.dispatchable:
+            if isinstance(past_key_value, MuiHybridChunkedCache):
+                attn_output = _MuiGemma3AttentionFullForward.apply(
+                    self.cpp_module,
+                    past_key_value.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    cos,
+                    sin,
+                    cache_position,
                 )
             else:
-                attn_output = mui_causally_decode(
-                    query_states, key_states, value_states
+                # as q_len == 1, we can avoid the transposes
+                query_states = query_states.view(
+                    bsz, self.num_attention_heads, q_len, self.head_dim
+                )
+                key_states = key_states.view(
+                    bsz, self.num_key_value_heads, q_len, self.head_dim
+                )
+                value_states = value_states.view(
+                    bsz, self.num_key_value_heads, q_len, self.head_dim
+                )
+
+                query_states, key_states = self.qk_norm(query_states, key_states)
+
+                query_states, key_states = apply_rotary_pos_emb(
+                    query_states, key_states, cos, sin
+                )
+
+                if past_key_value is not None:
+                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                    cache_kwargs = {
+                        "sin": sin,
+                        "cos": cos,
+                        "cache_position": cache_position,
+                        "sliding_window": self.sliding_window,
+                    }
+                    key_states, value_states = past_key_value.update(
+                        key_states, value_states, self.layer_idx, cache_kwargs
+                    )
+
+                attn_output = _MuiGemma3Attention.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
                 )
 
             attn_weights = None
@@ -294,6 +383,6 @@ class MuiGemma3Attention(MuiModule):
                 **kwargs,
             )
 
-        attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
+            attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
+            attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights

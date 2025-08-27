@@ -12,6 +12,7 @@ from transformers.models.llama.modeling_llama import LlamaAttention
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from muillm.engineconfig import MuiEngineConfig
+from muillm.modules.kvcache.cache_utils import MuiCache
 from muillm.modules.module import MuiModule
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.attention.causaltransformerdecoding import (
@@ -22,7 +23,62 @@ from muillm.modules.attention.kvcache import repeat_kv
 from muillm.modules.linear import MuiLinear
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
+import muillm_ext
+
 logger = logging.get_logger(__name__)
+
+
+class _MuiAttentionRope(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        module,
+        cache_module,
+        q,
+        k,
+        v,
+        m,
+        residual,
+        position_ids,
+        position_embeddings,
+        cache_positions,
+    ):
+        output = muillm_ext.muillm_attention_module_rope_forward(
+            module,
+            cache_module,
+            q,
+            k,
+            v,
+            m,
+            residual,
+            position_ids,
+            position_embeddings,
+            cache_positions,
+        )
+
+        ctx.save_for_backward(q, k, v, m)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
+
+
+class _MuiAttention(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, module, q, k, v, m, residual):
+        output = muillm_ext.muillm_attention_module_forward(
+            module, q, k, v, m, residual
+        )
+
+        ctx.save_for_backward(q, k, v, m)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
 
 
 class MuiBaseAttention(MuiModule):
@@ -42,6 +98,13 @@ class MuiBaseAttention(MuiModule):
         dtype=None,
     ):
         super().__init__(engine_config=engine_config)
+
+        self.cpp_engine = engine_config.cpp_engine
+        # the cpp module will be created at the end of all layer replacements
+        # (set the field here before potential OOM errors so that it can still be manipulated in
+        # the destructor)
+        self.cpp_module = None
+
         self.config = config
         self.layer_idx = layer_idx
         if layer_idx is None:
@@ -76,8 +139,34 @@ class MuiBaseAttention(MuiModule):
 
         self.rotary_emb = rotary_emb
 
-    staticmethod
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
 
+    def _check_dispatchable(self):
+        self.dispatchable = self.rotary_emb.dispatchable
+
+    def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+        if self.cpp_module is not None:
+            muillm_ext.muillm_attention_module_deinit(self.cpp_module)
+
+        self.cpp_module = muillm_ext.muillm_attention_module_init(
+            self.cpp_engine,
+            self.rotary_emb.cpp_module,
+            self.o_proj.cpp_module,
+            self.num_heads,
+            self.num_key_value_heads,
+            self.head_dim,
+        )
+
+    def finalize_deinit(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_attention_module_deinit(self.cpp_module)
+            self.cpp_module = None
+
+    @staticmethod
     def _create_rotary_embeddings(
         engine_config: MuiEngineConfig,
         config: Union[LlamaConfig, MistralConfig],
@@ -168,55 +257,82 @@ class MuiBaseAttention(MuiModule):
 
         bsz, q_len, _ = query_states.size()
 
-        # TODO: optimization avoiding transpose for q_len==1
-        query_states = query_states.view(
-            bsz, q_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
-        value_states = value_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
-
-        query_states, key_states, value_states = (
-            self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
-                query_states,
-                key_states,
-                position_ids,
-                position_embeddings,
-                value_states,
-                past_key_value,
-                cache_position,
-            )
-        )
-
         # at this point, we have the following shapes:
         #  q: [B, num_q_heads, T, embed_dim]
         #  k: [B, num_k_heads, NEW_T, embed_dim]
         #  v: [B, num_v_heads, NEW_T, embed_dim]
 
-        if (q_len == 1) and (
-            (query_states.dtype == torch.float16)
-            or (query_states.dtype == torch.bfloat16)
-        ):
-            #
-            if all_ones_mask or (attention_mask is None):
-                attn_output = mui_causally_decode(
-                    query_states, key_states, value_states
+        if (q_len == 1) and self.dispatchable:
+            if self.dispatchable and isinstance(past_key_value, MuiCache):
+                # can use the C++ module for doing rope + cache write + attention
+                attn_output = _MuiAttentionRope.apply(
+                    self.cpp_module,
+                    past_key_value.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    residual,
+                    position_ids,
+                    position_embeddings,
+                    cache_position,
                 )
             else:
-                # The mask has shape:
-                # M: [B, 1, NEW_T, T]
-                # It contains 0 where OK, min_dtype where padded
-                # min_dtype obtained with torch.finfo(dtype).min
-                attn_output = mui_causally_decode_masked(
-                    query_states, key_states, value_states, attention_mask
+                # as q_len is 1, we can avoid the transpose
+                query_states = query_states.view(
+                    bsz, self.num_heads, q_len, self.head_dim
+                )
+                key_states = key_states.view(
+                    bsz, self.num_key_value_heads, q_len, self.head_dim
+                )
+                value_states = value_states.view(
+                    bsz, self.num_key_value_heads, q_len, self.head_dim
                 )
 
-            # q_len is 1 so we can remove the transposition
-            attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+                query_states, key_states, value_states = (
+                    self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                        query_states,
+                        key_states,
+                        position_ids,
+                        position_embeddings,
+                        value_states,
+                        past_key_value,
+                        cache_position,
+                    )
+                )
+                attn_output = _MuiAttention.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    residual,
+                )
+
+            attn_weights = None
         else:
+            query_states = query_states.view(
+                bsz, q_len, self.num_heads, self.head_dim
+            ).transpose(1, 2)
+            key_states = key_states.view(
+                bsz, q_len, self.num_key_value_heads, self.head_dim
+            ).transpose(1, 2)
+            value_states = value_states.view(
+                bsz, q_len, self.num_key_value_heads, self.head_dim
+            ).transpose(1, 2)
+
+            query_states, key_states, value_states = (
+                self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                    query_states,
+                    key_states,
+                    position_ids,
+                    position_embeddings,
+                    value_states,
+                    past_key_value,
+                    cache_position,
+                )
+            )
+
             # repeat k/v heads if n_kv_heads < n_heads
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -252,7 +368,7 @@ class MuiBaseAttention(MuiModule):
             # from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
             attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        attn_output = self.o_proj(attn_output, residual=residual)
+            attn_output = self.o_proj(attn_output, residual=residual)
 
         if not output_attentions:
             attn_weights = None

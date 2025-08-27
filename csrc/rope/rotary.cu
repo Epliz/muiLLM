@@ -192,7 +192,11 @@ std::tuple<at::Tensor, at::Tensor> muillm_rope_forward_no_cache(
     torch::Tensor& q_in,
     torch::Tensor& k_in
 ) {
-  CHECK_INPUT(position_ids);
+  bool has_position_ids = position_ids.defined();
+  if (has_position_ids) {
+    CHECK_INPUT(position_ids);
+  }
+
   CHECK_INPUT(cos_cached);
   CHECK_INPUT(sin_cached);
   // q, k are expected to not be contiguous
@@ -218,12 +222,12 @@ std::tuple<at::Tensor, at::Tensor> muillm_rope_forward_no_cache(
 
   auto cache_sizes = cos_cached.sizes().vec();
 
-  auto q_sizes = q_in.sizes().vec();
-  auto q_strides = q_in.strides().vec();
+  auto q_sizes = q_in.sizes();
+  auto q_strides = q_in.strides();
   auto q_out = torch::empty(q_sizes, output_options);
 
-  auto k_sizes = k_in.sizes().vec();
-  auto k_strides = k_in.strides().vec();
+  auto k_sizes = k_in.sizes();
+  auto k_strides = k_in.strides();
   auto k_out = torch::empty(k_sizes, output_options);
 
   unsigned B = q_sizes[0];
@@ -252,6 +256,10 @@ std::tuple<at::Tensor, at::Tensor> muillm_rope_forward_no_cache(
     TORCH_CHECK(false, "Unknown rotary cache layout");
   }
 
+  if (!has_position_ids) {
+    TORCH_CHECK(cache_layout != ROTARY_CACHE_SE_LAYOUT, "If position_ids is not provided, the cache layout must be BTE");
+  }
+
   if (dtype == torch::kFloat16) {
     muillm_apply_rope_forward_fp16_no_cache(
       stream,
@@ -267,7 +275,7 @@ std::tuple<at::Tensor, at::Tensor> muillm_rope_forward_no_cache(
       k_in_head_stride,
       k_in_tok_stride,
       cache_layout,
-      (const uint64_t*)position_ids.data_ptr(),
+      has_position_ids ? (const uint64_t*)position_ids.data_ptr() : nullptr,
       (const half*)cos_cached.data_ptr(),
       (const half*)sin_cached.data_ptr(),
       (const half*)q_in.data_ptr(),
@@ -290,7 +298,7 @@ std::tuple<at::Tensor, at::Tensor> muillm_rope_forward_no_cache(
       k_in_head_stride,
       k_in_tok_stride,
       cache_layout,
-      (const uint64_t*)position_ids.data_ptr(),
+      has_position_ids ? (const uint64_t*)position_ids.data_ptr() : nullptr,
       (const __hip_bfloat16*)cos_cached.data_ptr(),
       (const __hip_bfloat16*)sin_cached.data_ptr(),
       (const __hip_bfloat16*)q_in.data_ptr(),

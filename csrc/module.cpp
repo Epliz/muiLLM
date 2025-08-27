@@ -154,6 +154,9 @@ at::Tensor muillm_to_cpu_trampoline(
 
 #include "modules/linear_module.h"
 #include "modules/embedding_module.h"
+#include "modules/attention_module.h"
+#include "modules/gemma3_attention_module.h"
+#include "modules/llama4_attention_module.h"
 
 #include "parallel_linear_kernels.cuh"
 #include "parallel_gateupmoe_kernels.cuh"
@@ -425,6 +428,35 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_rotary_embedding_module_deinit", &muillm_rotary_embedding_module_deinit_trampoline, "muillm rotary embedding module deinit", py::arg("module"));
   m.def("muillm_rotary_embedding_module_forward", &muillm_rotary_embedding_module_forward_trampoline, "muillm rotary embedding module forward", py::arg("module"), py::arg("cache"), py::arg("q_in"), py::arg("k_in"), py::arg("v_in"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
 
+  // attention
+  pybind11::class_<muillm_attention_module_ptr_t> cl_attention_module(m, "muillm_attention_module_ptr");
+  cl_attention_module.def(pybind11::init<>());
+
+  m.def("muillm_attention_module_init", &muillm_attention_module_init_trampoline, "muillm  attention module init", py::arg("engine"), py::arg("rotary"), py::arg("o_proj"), py::arg("num_tp_heads"), py::arg("num_tp_key_value_heads"), py::arg("head_dim"));
+  m.def("muillm_attention_module_deinit", &muillm_attention_module_deinit_trampoline, "muillm  attention module deinit", py::arg("module"));
+  m.def("muillm_attention_module_forward", &muillm_attention_module_forward_trampoline, "muillm  attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none(), py::arg("residual") = py::none());
+  m.def("muillm_attention_module_rope_forward", &muillm_attention_module_rope_forward_trampoline, "muillm  attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+
+  // gemma 3 attention
+  pybind11::class_<muillm_gemma3_attention_module_ptr_t> cl_gemma3_attention_module(m, "muillm_gemma3_attention_module_ptr");
+  cl_gemma3_attention_module.def(pybind11::init<>());
+
+  m.def("muillm_gemma3_attention_module_init", &muillm_gemma3_attention_module_init_trampoline, "muillm  gemma3 attention module init", py::arg("engine"), py::arg("o_proj"), py::arg("num_heads"), py::arg("num_key_value_heads"), py::arg("head_dim"), py::arg("q_norm_weight"), py::arg("k_norm_weight"), py::arg("norm_epsilon"), py::arg("norm_weights_offset"), py::arg("layer_index"));
+  m.def("muillm_gemma3_attention_module_deinit", &muillm_gemma3_attention_module_deinit_trampoline, "muillm  gemma3 attention module deinit", py::arg("module"));
+  m.def("muillm_gemma3_attention_module_forward", &muillm_gemma3_attention_module_forward_trampoline, "muillm  gemma3 attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none());
+  m.def("muillm_gemma3_attention_module_rope_forward", &muillm_gemma3_attention_module_rope_forward_trampoline, "muillm  gemma3 attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("cos"), py::arg("sin"), py::arg("cache_positions"));
+
+
+  // llama 4 attention
+  pybind11::class_<muillm_llama4_attention_module_ptr_t> cl_llama4_attention_module(m, "muillm_llama4_attention_module_ptr");
+  cl_llama4_attention_module.def(pybind11::init<>());
+
+  m.def("muillm_llama4_attention_module_init", &muillm_llama4_attention_module_init_trampoline, "muillm  llama4 attention module init", py::arg("engine"), py::arg("o_proj"), py::arg("num_tp_heads"), py::arg("num_tp_key_value_heads"), py::arg("head_dim"), py::arg("use_rope"), py::arg("use_qk_norm"), py::arg("norm_epsilon"), py::arg("use_temperature_tuning"), py::arg("attention_scale"), py::arg("floor_scale"), py::arg("layer_index"));
+  m.def("muillm_llama4_attention_module_deinit", &muillm_llama4_attention_module_deinit_trampoline, "muillm  llama4 attention module deinit", py::arg("module"));
+  m.def("muillm_llama4_attention_module_forward", &muillm_llama4_attention_module_forward_trampoline, "muillm  llama4 attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none(), py::arg("residual") = py::none());
+  m.def("muillm_llama4_attention_module_rope_forward", &muillm_llama4_attention_module_rope_forward_trampoline, "muillm  llama4 attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_embeds"), py::arg("cache_positions"));
+
+
   // parallel attention
   pybind11::class_<muillm_parallel_attention_module_ptr_t> cl_parallel_attention_module(m, "muillm_parallel_attention_module_ptr");
   cl_parallel_attention_module.def(pybind11::init<>());
@@ -434,7 +466,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_parallel_attention_module_forward", &muillm_parallel_attention_module_forward_trampoline, "muillm parallel attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none(), py::arg("residual") = py::none());
   m.def("muillm_parallel_attention_module_rope_forward", &muillm_parallel_attention_module_rope_forward_trampoline, "muillm parallel attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
   
-  // parallel attention
+  // parallel llama 4 attention
   pybind11::class_<muillm_parallel_llama4_attention_module_ptr_t> cl_parallel_llama4_attention_module(m, "muillm_parallel_llama4_attention_module_ptr");
   cl_parallel_llama4_attention_module.def(pybind11::init<>());
 

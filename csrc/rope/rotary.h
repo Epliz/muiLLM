@@ -17,7 +17,7 @@ std::tuple<at::Tensor, at::Tensor> muillm_compute_rotary_embed_positions(
 
 // out: query, key
 std::tuple<at::Tensor, at::Tensor> muillm_rope_forward_no_cache(
-    torch::Tensor& position_ids,
+    torch::Tensor& position_ids, // can be undefined
     torch::Tensor& cos_cached,
     torch::Tensor& sin_cached,
     torch::Tensor& q_in,

@@ -16,7 +16,12 @@ from muillm.modules.attention.causaltransformerdecoding import (
     mui_causally_decode_masked,
 )
 from muillm.modules.attention.kvcache import repeat_kv
-from muillm.modules.attention.baseattention import MuiBaseAttention
+from muillm.modules.attention.baseattention import (
+    _MuiAttention,
+    _MuiAttentionRope,
+    MuiBaseAttention,
+)
+from muillm.modules.kvcache.cache_utils import MuiCache
 from muillm.modules.linear import MuiLinear
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
@@ -170,55 +175,81 @@ class MuiSdpaAttention(MuiBaseAttention):
 
         bsz, q_len, _ = query_states.size()
 
-        # TODO: optimization avoiding transpose for q_len==1
-        query_states = query_states.view(
-            bsz, q_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
-        value_states = value_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
-
-        # TODO: make sure it is restricted to seen tokens?
-        query_states, key_states, value_states = (
-            self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
-                query_states,
-                key_states,
-                position_ids,
-                position_embeddings,
-                value_states,
-                past_key_value,
-                cache_position,
-            )
-        )
-
         # at this point, we have the following shapes:
         #  q: [B, num_q_heads, T, embed_dim]
         #  k: [B, num_k_heads, NEW_T, embed_dim]
         #  v: [B, num_v_heads, NEW_T, embed_dim]
-        if (q_len == 1) and (
-            (query_states.dtype == torch.float16)
-            or (query_states.dtype == torch.bfloat16)
-        ):
-            #
-            if all_ones_mask or (attention_mask is None):
-                attn_output = mui_causally_decode(
-                    query_states, key_states, value_states
+        if (q_len == 1) and self.dispatchable:
+            if self.dispatchable and isinstance(past_key_value, MuiCache):
+                # can use the C++ module for doing rope + cache write + attention
+                attn_output = _MuiAttentionRope.apply(
+                    self.cpp_module,
+                    past_key_value.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    residual,
+                    position_ids,
+                    position_embeddings,
+                    cache_position,
                 )
             else:
-                # The mask has shape:
-                # M: [B, 1, NEW_T, T]
-                # It contains 0 where OK, min_dtype where padded
-                # min_dtype obtained with torch.finfo(dtype).min
-                attn_output = mui_causally_decode_masked(
-                    query_states, key_states, value_states, attention_mask
+                # as q_len is 1, we can avoid the transpose
+                query_states = query_states.view(
+                    bsz, self.num_heads, q_len, self.head_dim
+                )
+                key_states = key_states.view(
+                    bsz, self.num_key_value_heads, q_len, self.head_dim
+                )
+                value_states = value_states.view(
+                    bsz, self.num_key_value_heads, q_len, self.head_dim
                 )
 
-            # q_len is 1 so we can remove the transposition
-            attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+                # TODO: make sure it is restricted to seen tokens?
+                query_states, key_states, value_states = (
+                    self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                        query_states,
+                        key_states,
+                        position_ids,
+                        position_embeddings,
+                        value_states,
+                        past_key_value,
+                        cache_position,
+                    )
+                )
+                attn_output = _MuiAttention.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    residual,
+                )
         else:
+            query_states = query_states.view(
+                bsz, q_len, self.num_heads, self.head_dim
+            ).transpose(1, 2)
+            key_states = key_states.view(
+                bsz, q_len, self.num_key_value_heads, self.head_dim
+            ).transpose(1, 2)
+            value_states = value_states.view(
+                bsz, q_len, self.num_key_value_heads, self.head_dim
+            ).transpose(1, 2)
+
+            # TODO: make sure it is restricted to seen tokens?
+            query_states, key_states, value_states = (
+                self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                    query_states,
+                    key_states,
+                    position_ids,
+                    position_embeddings,
+                    value_states,
+                    past_key_value,
+                    cache_position,
+                )
+            )
+
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
@@ -244,13 +275,13 @@ class MuiSdpaAttention(MuiBaseAttention):
                 is_causal=is_causal,
             )
 
-        # from shape [B, num_q_heads, T, embed_dim], go to [B, T, num_q_heads, embed_dim]
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        # from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
-        attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+            # from shape [B, num_q_heads, T, embed_dim], go to [B, T, num_q_heads, embed_dim]
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            # from shape [B, T, num_q_heads, embed_dim] go to [B, T, hidden_size]
+            attn_output = attn_output.view(bsz, q_len, self.hidden_size)
 
-        # when non-batched, could push the o_proj into v?
-        # TODO: could be made 2x faster?
-        attn_output = self.o_proj(attn_output, residual=residual)
+            # when non-batched, could push the o_proj into v?
+            # TODO: could be made 2x faster?
+            attn_output = self.o_proj(attn_output, residual=residual)
 
         return attn_output, None, past_key_value

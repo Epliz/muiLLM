@@ -118,6 +118,9 @@ setup(
                 "csrc/modules/dynamic_kvcache.cpp",
                 "csrc/modules/hybrid_chunked_kvcache.cpp",
                 "csrc/modules/rotary_module.cpp",
+                "csrc/modules/attention_module.cpp",
+                "csrc/modules/gemma3_attention_module.cpp",
+                "csrc/modules/llama4_attention_module.cpp",
                 # parallel modules
                 "csrc/modules/parallel_linear_module.cpp",
                 "csrc/modules/parallel_multilinear_module.cpp",
