@@ -120,8 +120,20 @@ class MuiParallelGateUpDownMLP(MuiModule):
         self.method = _MuiParallelGateUpMLPMethod.GATEUPMLP_FUSED
 
     def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+        self.gate_proj.finalize_init()
+        self.up_proj.finalize_init()
+        self.down_proj.finalize_init()
+
         if self.cpp_module is not None:
             muillm_ext.muillm_parallel_gateupdownmlp_module_deinit(self.cpp_module)
+
+        if not self.dispatchable:
+            # cannot initialize the cpp module
+            self.cpp_module = None
+            return
 
         normalize = self.norm is not None
         norm_weights = self.norm.weight if normalize else None
@@ -138,9 +150,6 @@ class MuiParallelGateUpDownMLP(MuiModule):
             self.norm.variance_epsilon if normalize else 0.0,
             self.norm.weight_offset if normalize else 0.0,
         )
-
-        # cache the flags checking if it is dispatchable
-        self._check_dispatchable()
 
     def _check_dispatchable(self):
         wdtype = self.gate_proj.dtype

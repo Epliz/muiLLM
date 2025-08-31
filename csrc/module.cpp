@@ -171,8 +171,10 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "modules/parallel_gateup_module.h"
 #include "modules/parallel_gateupmoe_module.h"
 #include "modules/parallel_attention_module.h"
+#include "modules/parallel_gemma3_attention_module.h"
 #include "modules/parallel_llama4_attention_module.h"
 #include "modules/parallel_decoder_module.h"
+#include "modules/parallel_gemma3_decoder_module.h"
 #include "modules/parallel_llama4_decoder_module.h"
 #include "modules/parallel_decoder_stack.h"
 #include "modules/parallel_llama4_decoder_stack.h"
@@ -527,6 +529,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_parallel_attention_module_forward", &muillm_parallel_attention_module_forward_trampoline, "muillm parallel attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none(), py::arg("residual") = py::none());
   m.def("muillm_parallel_attention_module_rope_forward", &muillm_parallel_attention_module_rope_forward_trampoline, "muillm parallel attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
   
+  // parallel gemma 3 attention
+  pybind11::class_<muillm_parallel_gemma3_attention_module_ptr_t> cl_parallel_gemma3_attention_module(m, "muillm_parallel_gemma3_attention_module_ptr");
+  cl_parallel_gemma3_attention_module.def(pybind11::init<>());
+
+  m.def("muillm_parallel_gemma3_attention_module_init", &muillm_parallel_gemma3_attention_module_init_trampoline, "muillm parallel gemma3 attention module init", py::arg("engine"), py::arg("comm"), py::arg("o_proj"), py::arg("num_tp_heads"), py::arg("num_tp_key_value_heads"), py::arg("head_dim"), py::arg("q_norm_weight"), py::arg("k_norm_weight"), py::arg("norm_epsilon"), py::arg("norm_weights_offset"), py::arg("layer_index"));
+  m.def("muillm_parallel_gemma3_attention_module_deinit", &muillm_parallel_gemma3_attention_module_deinit_trampoline, "muillm parallel gemma3 attention module deinit", py::arg("module"));
+  m.def("muillm_parallel_gemma3_attention_module_forward", &muillm_parallel_gemma3_attention_module_forward_trampoline, "muillm parallel gemma3 attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none());
+  m.def("muillm_parallel_gemma3_attention_module_rope_forward", &muillm_parallel_gemma3_attention_module_rope_forward_trampoline, "muillm parallel gemma3 attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("cos"), py::arg("sin"), py::arg("cache_positions"));
+
+
   // parallel llama 4 attention
   pybind11::class_<muillm_parallel_llama4_attention_module_ptr_t> cl_parallel_llama4_attention_module(m, "muillm_parallel_llama4_attention_module_ptr");
   cl_parallel_llama4_attention_module.def(pybind11::init<>());
@@ -543,6 +555,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_parallel_decoder_module_init", &muillm_parallel_decoder_module_init_trampoline, "muillm parallel decoder module init", py::arg("engine"), py::arg("comm"), py::arg("multilinear"), py::arg("attention"), py::arg("mlp"));
   m.def("muillm_parallel_decoder_module_deinit", &muillm_parallel_decoder_module_deinit_trampoline, "muillm parallel decoder module deinit", py::arg("module"));
   m.def("muillm_parallel_decoder_module_forward", &muillm_parallel_decoder_module_forward, "muillm parallel decoder module forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("m"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+
+  // parallel gemma 3 decoder
+  pybind11::class_<muillm_parallel_gemma3_decoder_module_ptr_t> cl_parallel_gemma3_decoder_module(m, "muillm_parallel_gemma3_decoder_module_ptr");
+  cl_parallel_gemma3_decoder_module.def(pybind11::init<>());
+
+  m.def("muillm_parallel_gemma3_decoder_module_init", &muillm_parallel_gemma3_decoder_module_init_trampoline, "muillm parallel gemma3 decoder module init", py::arg("engine"), py::arg("comm"), py::arg("multilinear"), py::arg("attention"), py::arg("mlp"), py::arg("sliding_layer"), py::arg("post_attention_layer_norm_weight"), py::arg("post_attention_layer_norm_epsilon"), py::arg("post_attention_layer_norm_weights_offset"), py::arg("post_feedforward_layer_norm_weight"), py::arg("post_feedforward_layer_norm_epsilon"), py::arg("post_feedforward_layer_norm_weights_offset"));
+  m.def("muillm_parallel_gemma3_decoder_module_deinit", &muillm_parallel_gemma3_decoder_module_deinit_trampoline, "muillm parallel gemma3 decoder module deinit", py::arg("module"));
+  m.def("muillm_parallel_gemma3_decoder_module_forward", &muillm_parallel_gemma3_decoder_module_forward, "muillm parallel gemma3 decoder module forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("mask"), py::arg("sliding_mask"), py::arg("position_embeds_global"), py::arg("position_embeds_local"), py::arg("cache_positions"));
 
   // parallel llama 4 decoder
   pybind11::class_<muillm_parallel_llama4_decoder_module_ptr_t> cl_parallel_llama4_decoder_module(m, "muillm_parallel_llama4_decoder_module_ptr");

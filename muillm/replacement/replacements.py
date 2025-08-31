@@ -2,6 +2,7 @@ from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.decoder.gemma3decoder import MuiGemma3DecoderLayer
 from muillm.modules.decoder.llama4decoder import MuiLlama4TextDecoderLayer
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
+from muillm.modules.decoder.parallelgemma3decoder import MuiParallelGemma3DecoderLayer
 from muillm.modules.decoder.parallelllama4decoder import (
     MuiParallelLlama4TextDecoderLayer,
 )
@@ -160,10 +161,15 @@ _TP_LAYER_REPLACEMENTS = {
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
+    Gemma3DecoderLayer: MuiParallelGemma3DecoderLayer,
     MistralDecoderLayer: MuiParallelDecoderLayer,
     LlamaDecoderLayer: MuiParallelDecoderLayer,
     Llama4TextDecoderLayer: MuiParallelLlama4TextDecoderLayer,
     # replacements for full models
+    Gemma3TextModel: MuiGemma3TextModel,
+    Gemma3ForCausalLM: MuiGemma3ForCausalLM,
+    Gemma3Model: MuiGemma3Model,
+    Gemma3ForConditionalGeneration: MuiGemma3ForConditionalGeneration,
     MistralModel: MuiMistralModel,
     LlamaModel: MuiLlamaModel,
     Llama4TextModel: MuiLlama4TextModel,

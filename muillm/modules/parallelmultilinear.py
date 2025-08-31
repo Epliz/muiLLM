@@ -112,10 +112,18 @@ class MuiParallelMultiLinear(MuiModule):
         self.__sync_all()
 
     def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
         self.linear.finalize_init()
 
         if self.cpp_module is not None:
             muillm_ext.muillm_parallel_multilinear_module_deinit(self.cpp_module)
+
+        if not self.dispatchable:
+            # cannot initialize the cpp module
+            self.cpp_module = None
+            return
 
         self.cpp_module = muillm_ext.muillm_parallel_multilinear_module_init(
             self.cpp_engine,
@@ -124,9 +132,6 @@ class MuiParallelMultiLinear(MuiModule):
             self.slices,
             self.sharding_dim,
         )
-
-        # cache the flags checking if it is dispatchable
-        self._check_dispatchable()
 
     def _check_dispatchable(self):
         self.dispatchable = self.linear.dispatchable

@@ -95,8 +95,16 @@ class MuiParallelLinear(MuiModule):
         self.__sync_all()
 
     def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
         if self.cpp_module is not None:
             muillm_ext.muillm_parallel_linear_module_deinit(self.cpp_module)
+
+        if not self.dispatchable:
+            # cannot initialize the cpp module
+            self.cpp_module = None
+            return
 
         normalize = self.norm is not None
         bias = self.biases[0] if self.biases is not None else None
@@ -112,9 +120,6 @@ class MuiParallelLinear(MuiModule):
             bias,
             self.sharding_dim,
         )
-
-        # cache the flags checking if it is dispatchable
-        self._check_dispatchable()
 
     def _severe_ties(self):
         # severe ties to weights, biases and norm_weights

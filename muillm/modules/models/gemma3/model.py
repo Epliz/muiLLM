@@ -53,6 +53,7 @@ from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.decoder.gemma3decoder import MuiGemma3DecoderLayer
 
+from muillm.modules.decoder.parallelgemma3decoder import MuiParallelGemma3DecoderLayer
 from muillm.modules.kvcache.cache_utils import (
     MuiCache,
     MuiHybridChunkedCache,
@@ -132,7 +133,10 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
                 )
             else:
                 # tensor parallelism
-                raise NotImplementedError("not implemented for Gemma3 yet")
+                layer = MuiParallelGemma3DecoderLayer.replace(
+                    replacement_context,
+                    prev_module=decoder_layer,
+                )
 
             layers.insert(0, layer)  # add to the begining of the list
 
