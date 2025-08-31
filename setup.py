@@ -124,6 +124,9 @@ setup(
                 "csrc/modules/attention_module.cpp",
                 "csrc/modules/gemma3_attention_module.cpp",
                 "csrc/modules/llama4_attention_module.cpp",
+                "csrc/modules/decoder_module.cpp",
+                "csrc/modules/llama4_decoder_module.cpp",
+                "csrc/modules/gemma3_decoder_module.cpp",
                 # parallel modules
                 "csrc/modules/parallel_linear_module.cpp",
                 "csrc/modules/parallel_multilinear_module.cpp",

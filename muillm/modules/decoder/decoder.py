@@ -1,6 +1,7 @@
 from typing import Optional, Tuple, Union
 import warnings
 from muillm.memorymanagement.gc import trigger_gc
+from muillm.modules.kvcache.cache_utils import MuiCache
 from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
@@ -12,11 +13,44 @@ from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
 from muillm.modules.multilinear import MuiMultiLinear
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
+import muillm_ext
+
 from transformers.models.mistral.modeling_mistral import (
     MistralDecoderLayer,
     MistralAttention,
 )
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaAttention
+
+
+class _MuiDecoder(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        module,
+        cache_module,
+        h,
+        m,
+        position_ids,
+        position_embeddings,
+        cache_positions,
+    ):
+        output = muillm_ext.muillm_decoder_module_forward(
+            module,
+            cache_module,
+            h,
+            m,
+            position_ids,
+            position_embeddings,
+            cache_positions,
+        )
+
+        ctx.save_for_backward(h, m)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
 
 
 class MuiDecoderLayer(MuiModule):
@@ -29,10 +63,42 @@ class MuiDecoderLayer(MuiModule):
     ):
         super().__init__(engine_config=engine_config)
 
+        self.cpp_engine = engine_config.cpp_engine
+        # the cpp module will be created at the end of all layer replacements
+        # (set the field here before potential OOM errors so that it can still be manipulated in
+        # the destructor)
+        self.cpp_module = None
+
         self.qkv_proj = qkv_proj
         self.self_attn = self_attn
 
         self.mlp = mlp
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+    def _check_dispatchable(self):
+        self.dispatchable = self.self_attn.dispatchable and self.mlp.dispatchable
+
+    def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+        # initialize the cpp module
+        if self.cpp_module is not None:
+            muillm_ext.muillm_decoder_module_deinit(self.cpp_module)
+
+        self.cpp_module = muillm_ext.muillm_decoder_module_init(
+            self.cpp_engine,
+            self.qkv_proj.cpp_module,
+            self.self_attn.cpp_module,
+            self.mlp.cpp_module,
+        )
+
+    def finalize_deinit(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_decoder_module_deinit(self.cpp_module)
+            self.cpp_module = None
 
     @staticmethod
     def replace(
@@ -126,33 +192,51 @@ class MuiDecoderLayer(MuiModule):
                 (see `past_key_values`).
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
         """
+        bsz, q_len, _ = hidden_states.size()
+        if (
+            self.dispatchable
+            and (bsz == 1)
+            and (q_len == 1)
+            and isinstance(past_key_value, MuiCache)
+        ):
+            hidden_states = _MuiDecoder.apply(
+                self.cpp_module,
+                past_key_value.cpp_module,
+                hidden_states,
+                attention_mask,
+                position_ids,
+                position_embeddings,
+                cache_position,
+            )
 
-        residual = hidden_states
+            present_key_value = past_key_value
+        else:
+            residual = hidden_states
 
-        # Transform q, k, v
-        # input layer norm is fused
-        query_states, key_states, value_states = self.qkv_proj(hidden_states)
+            # Transform q, k, v
+            # input layer norm is fused
+            query_states, key_states, value_states = self.qkv_proj(hidden_states)
 
-        # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
-            query_states=query_states,
-            key_states=key_states,
-            value_states=value_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            position_embeddings=position_embeddings,
-            all_ones_mask=all_ones_mask,
-            residual=residual,
-        )
+            # Self Attention
+            hidden_states, self_attn_weights, present_key_value = self.self_attn(
+                query_states=query_states,
+                key_states=key_states,
+                value_states=value_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                all_ones_mask=all_ones_mask,
+                residual=residual,
+            )
 
-        # Fully Connected
-        residual = hidden_states
-        # post attention layer norm is fused in the MLP
-        hidden_states = self.mlp(hidden_states, residual=residual)
+            # Fully Connected
+            residual = hidden_states
+            # post attention layer norm is fused in the MLP
+            hidden_states = self.mlp(hidden_states, residual=residual)
 
         outputs = (hidden_states,)
 
