@@ -153,6 +153,7 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "comms/comm_torch.h"
 
 #include "modules/linear_module.h"
+#include "modules/multilinear_module.h"
 #include "modules/gateup_module.h"
 #include "modules/embedding_module.h"
 #include "modules/attention_module.h"
@@ -325,6 +326,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_module_init", &muillm_linear_module_init_trampoline, "muillm linear module init", py::arg("engine"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_linear_module_deinit", &muillm_linear_module_deinit_trampoline, "muillm linear module deinit", py::arg("module"));
   m.def("muillm_linear_module_forward", &muillm_linear_module_forward_trampoline, "muillm linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none());
+
+  // multilinear
+  pybind11::class_<muillm_multilinear_module_ptr_t> cl_multilinear_module(m, "muillm_multilinear_module_ptr");
+  cl_multilinear_module.def(pybind11::init<>());
+
+  m.def("muillm_multilinear_module_init", &muillm_multilinear_module_init_trampoline, "muillm multilinear module init", py::arg("engine"), py::arg("linear"), py::arg("slices"));
+  m.def("muillm_multilinear_module_deinit", &muillm_multilinear_module_deinit_trampoline, "muillm multilinear module deinit", py::arg("module"));
+  m.def("muillm_multilinear_module_forward", &muillm_multilinear_module_forward_trampoline, "muillm multilinear module forward", py::arg("module"), py::arg("input"));
 
 
   // mlp interface

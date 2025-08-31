@@ -78,8 +78,16 @@ class MuiLinear(MuiModule, nn.Linear):
         self.dispatchable = dispatchable_device and dispatchable_type
 
     def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
         if self.cpp_module is not None:
             muillm_ext.muillm_linear_module_deinit(self.cpp_module)
+
+        if not self.dispatchable:
+            # cannot initialize the cpp module
+            self.cpp_module = None
+            return
 
         normalize = self.norm is not None
         bias = self.bias if self.bias is not None else None
@@ -93,9 +101,6 @@ class MuiLinear(MuiModule, nn.Linear):
             None,  # mul_bias
             bias,
         )
-
-        # cache the flags checking if it is dispatchable
-        self._check_dispatchable()
 
     def _severe_ties(self):
         # severe ties to weights, biases and norm_weights

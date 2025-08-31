@@ -112,6 +112,7 @@ setup(
                 "csrc/parallel_gateupmoe_kernels.cu",
                 # modules
                 "csrc/modules/linear_module.cpp",
+                "csrc/modules/multilinear_module.cpp",
                 "csrc/modules/gateup_module_interface.cpp",
                 "csrc/modules/gateup_module.cpp",
                 "csrc/modules/embedding_module.cpp",
