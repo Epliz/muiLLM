@@ -153,6 +153,7 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "comms/comm_torch.h"
 
 #include "modules/linear_module.h"
+#include "modules/gateup_module.h"
 #include "modules/embedding_module.h"
 #include "modules/attention_module.h"
 #include "modules/gemma3_attention_module.h"
@@ -324,6 +325,29 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_linear_module_init", &muillm_linear_module_init_trampoline, "muillm linear module init", py::arg("engine"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_linear_module_deinit", &muillm_linear_module_deinit_trampoline, "muillm linear module deinit", py::arg("module"));
   m.def("muillm_linear_module_forward", &muillm_linear_module_forward_trampoline, "muillm linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none());
+
+
+  // mlp interface
+  pybind11::class_<muillm_igateupdownmlp_module_ptr_t> cl_igateupdownmlp_module(m, "muillm_igateupdownmlp_module_ptr");
+
+  // gateup/down mlp
+  m.def("muillm_gateupdownmlp_module_init", &muillm_gateupdownmlp_module_init_trampoline, "muillm gateupdown mlp module init",
+    py::arg("engine"),
+    py::arg("activation"),
+    py::arg("method"),
+    py::arg("norm_weights"),
+    py::arg("gate_weights"),
+    py::arg("up_weights"),
+    py::arg("down_weights"),
+    py::arg("variance_epsilon"),
+    py::arg("norm_weights_offset")
+  );
+  m.def("muillm_gateupdownmlp_module_deinit", &muillm_gateupdownmlp_module_deinit_trampoline, "muillm gateupdown mlp module deinit", py::arg("module"));
+  m.def("muillm_gateupdownmlp_module_forward", &muillm_gateupdownmlp_module_forward_trampoline, "muillm gateupdown mlp module forward",
+    py::arg("module"),
+    py::arg("inputs"),
+    py::arg("residual") = py::none()
+  );
 
   // embedding
   pybind11::class_<muillm_embedding_module_ptr_t> cl_embedding_module(m, "muillm_embedding_module_ptr");

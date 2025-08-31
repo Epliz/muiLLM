@@ -17,7 +17,7 @@ from transformers.models.mistral.modeling_mistral import MistralMLP, MistralRMSN
 
 from muillm.modules.linear import MuiLinear
 
-from muillm.modules.norm.rmsnorm import _MuiRMSNorm, MuiRMSNorm
+from muillm.modules.norm.rmsnorm import MuiRMSNorm
 import muillm_ext
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
@@ -47,7 +47,7 @@ class MuiGateUpDownMLPActivation(IntEnum):
             return MuiGateUpDownMLPActivation.UNSUPPORTED
 
 
-class _MuiGateUpMLPMethod(Enum):
+class _MuiGateUpMLPMethod(IntEnum):
     # Basic method where Gate/Up projections + mul are done distinctly
     GATEUPMLP_UNFUSED = 0
     # Method where the Gate/Up projections + mul are all fused
@@ -60,90 +60,18 @@ class _MuiGateUpMLPMethod(Enum):
 
 class _MuiGateUpMLP(torch.autograd.Function):
     @staticmethod
-    def forward(
-        ctx,
-        engine,
-        activation,
-        inputs,
-        norm_weights,
-        variance_epsilon,
-        weight_offset,
-        gate_weights,
-        up_weights,
-        down_weights,
-        residual,
-    ):
-        output = muillm_ext.muillm_gateupmlp_forward(
-            engine,
-            activation,
-            norm_weights,
-            variance_epsilon,
-            weight_offset,
-            gate_weights,
-            up_weights,
-            down_weights,
-            residual,
-            inputs,
+    def forward(ctx, module, inputs, residual):
+        output = muillm_ext.muillm_gateupdownmlp_module_forward(
+            module, inputs, residual
         )
 
-        ctx.save_for_backward(
-            inputs,
-            norm_weights,
-            gate_weights,
-            up_weights,
-            down_weights,
-            residual,
-        )
+        ctx.save_for_backward(inputs, residual)
 
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         raise NotImplementedError("GateUpMLP backward is not implemented")
-
-
-class _MuiGateUpMLPSplit(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx,
-        engine,
-        activation,
-        inputs,
-        norm_weights,
-        variance_epsilon,
-        weight_offset,
-        gate_weights,
-        up_weights,
-        down_weights,
-        residual,
-    ):
-        output = muillm_ext.muillm_gateupmlp_split_forward(
-            engine,
-            activation,
-            norm_weights,
-            variance_epsilon,
-            weight_offset,
-            gate_weights,
-            up_weights,
-            down_weights,
-            residual,
-            inputs,
-        )
-
-        ctx.save_for_backward(
-            inputs,
-            norm_weights,
-            gate_weights,
-            up_weights,
-            down_weights,
-            residual,
-        )
-
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        raise NotImplementedError("GateUpMLP split K backward is not implemented")
 
 
 class MuiGateUpDownMLP(MuiModule):
@@ -159,6 +87,10 @@ class MuiGateUpDownMLP(MuiModule):
     ) -> None:
         super().__init__(engine_config=engine_config)
         self.cpp_engine = engine_config.cpp_engine
+        # the cpp module will be created at the end of all layer replacements
+        # (set the field here before potential OOM errors so that it can still be manipulated in
+        # the destructor)
+        self.cpp_module = None
 
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -201,6 +133,32 @@ class MuiGateUpDownMLP(MuiModule):
         # TODO: improve method selection
         self.method = _MuiGateUpMLPMethod.GATEUPMLP_FUSED
 
+    def finalize_init(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_gateupdownmlp_module_deinit(self.cpp_module)
+
+        normalize = self.norm is not None
+        norm_weights = self.norm.weight if normalize else None
+
+        self.cpp_module = muillm_ext.muillm_gateupdownmlp_module_init(
+            self.cpp_engine,
+            int(self.mui_activation),
+            int(self.method),
+            norm_weights,
+            self.gate_proj.weight,
+            self.up_proj.weight,
+            self.down_proj.weight,
+            self.norm.variance_epsilon if normalize else 0.0,
+            self.norm.weight_offset if normalize else 0.0,
+        )
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+        self.gate_proj.finalize_init()
+        self.up_proj.finalize_init()
+        self.down_proj.finalize_init()
+
     def _check_dispatchable(self):
         wdtype = self.gate_proj.weight.dtype
         dispatchable_activation = (
@@ -212,13 +170,10 @@ class MuiGateUpDownMLP(MuiModule):
             dispatchable_activation and dispatchable_device and dispatchable_type
         )
 
-    def finalize_init(self):
-        # cache the flags checking if it is dispatchable
-        self._check_dispatchable()
-
-        self.gate_proj.finalize_init()
-        self.up_proj.finalize_init()
-        self.down_proj.finalize_init()
+    def finalize_deinit(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_gateupdownmlp_module_deinit(self.cpp_module)
+            self.cpp_module = None
 
     @staticmethod
     def replace(
@@ -370,71 +325,12 @@ class MuiGateUpDownMLP(MuiModule):
 
         return output
 
-    def _forward_fused(
-        self, input: Tensor, residual: Optional[Tensor] = None
-    ) -> Tensor:
-        if self.dispatchable and (input.numel() == input.shape[-1]):
-            # input is effectively 1D, and we support the type
-
-            # Also check that we don't have quantized linear
-            if isinstance(self.gate_proj, MuiLinear) and isinstance(
-                self.up_proj, MuiLinear
-            ):
-                normalize = self.norm is not None
-                return _MuiGateUpMLP.apply(
-                    self.cpp_engine,
-                    self.mui_activation,
-                    input,
-                    self.norm.weight if normalize else None,
-                    self.norm.variance_epsilon if normalize else 0.0,
-                    self.norm.weight_offset if normalize else 0.0,
-                    self.gate_proj.weight,
-                    self.up_proj.weight,
-                    self.down_proj.weight,
-                    residual,
-                )
-
-        # else: # not dispatchable or not MuiLinear
-        return self._forward_unfused(input=input, residual=residual)
-
-    def _forward_split(
-        self, input: Tensor, residual: Optional[Tensor] = None
-    ) -> Tensor:
-        if self.dispatchable and (input.numel() == input.shape[-1]):
-            # input is effectively 1D, and we support the type
-
-            # Also check that we don't have quantized linear
-            if isinstance(self.gate_proj, MuiLinear) and isinstance(
-                self.up_proj, MuiLinear
-            ):
-                # we shard gate/up by rows so that we can still use the fused kernel and
-                # the all_reduce from the gate/up linears can be avoided
-
-                # as we shard gate/up by rows, we don't need to shard the input and we
-                # still can use the fused RMSNorm
-                normalize = self.norm is not None
-                return _MuiGateUpMLPSplit.apply(
-                    self.cpp_engine,
-                    self.mui_activation,
-                    input,
-                    self.norm.weight if normalize else None,
-                    self.norm.variance_epsilon if normalize else 0.0,
-                    self.norm.weight_offset if normalize else 0.0,
-                    self.gate_proj.weight,
-                    self.up_proj.weight,
-                    self.down_proj.weight,
-                    residual,
-                )
-
-        # else: # not dispatchable or not MuiLinear
-        return self._forward_unfused(input=input, residual=residual)
-
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
-        if self.method == _MuiGateUpMLPMethod.GATEUPMLP_FUSED:
-            return self._forward_fused(input=input, residual=residual)
-        elif self.method == _MuiGateUpMLPMethod.GATEUPMLP_UNFUSED:
-            return self._forward_unfused(input=input, residual=residual)
-        elif self.method == _MuiGateUpMLPMethod.GATEUPMLP_SPLIT:
-            return self._forward_split(input=input, residual=residual)
-        else:
-            raise ValueError("Unsupported Gate/Up Silu method")
+        if self.dispatchable and (input.numel() == input.shape[-1]):
+            # Also check that we don't have quantized linear
+            if isinstance(self.gate_proj, MuiLinear) and isinstance(
+                self.up_proj, MuiLinear
+            ):
+                return _MuiGateUpMLP.apply(self.cpp_module, input, residual)
+
+        return self._forward_unfused(input=input, residual=residual)
