@@ -489,15 +489,17 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
         dtype = self.mdtype
         sequence_length = inputs_shape[1]
-        # SlidingWindowCache
-        if using_sliding_window_cache:
+
+        if isinstance(past_key_values, MuiCache):
+            # use the minimal size
+            target_length = past_seen_tokens + sequence_length
+        # TODO: muiLLM sliding window cache
+        elif using_sliding_window_cache:
             target_length = max(sequence_length, self.config.sliding_window)
-        # StaticCache
-        elif False:  # using_static_cache:
+        elif isinstance(past_key_values, StaticCache):
             # modification compared to normal HF transformers
             # we use the same normal code as for dynamic cache
             target_length = past_key_values.get_max_length()
-        # DynamicCache or no cache
         else:
             target_length = (
                 attention_mask.shape[-1]

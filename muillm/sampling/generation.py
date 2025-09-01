@@ -253,7 +253,10 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
                 **model_kwargs,
             )
 
-            if not checked_mask_content:
+            if (not checked_mask_content) and (not is_prefill):
+                # we check the content of the attention mask after the prefill
+                # as some models (like Gemma3) may require a specific mask during prefill
+                # e.g. due to passed image masks
                 checked_mask_content = True
 
                 if "attention_mask" in model_inputs:

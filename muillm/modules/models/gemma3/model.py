@@ -51,6 +51,7 @@ from transformers.models.gemma3.configuration_gemma3 import (
 from muillm.engineconfig import MuiEngineConfig
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
+from muillm.modules.attention.sdpaattention import _ignore_causal_mask_sdpa
 from muillm.modules.decoder.gemma3decoder import MuiGemma3DecoderLayer
 
 from muillm.modules.decoder.parallelgemma3decoder import MuiParallelGemma3DecoderLayer
@@ -221,6 +222,7 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        all_ones_mask: Optional[bool] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> BaseModelOutputWithPast:
         output_attentions = (
@@ -300,13 +302,21 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
+        if all_ones_mask is None:
+            # if not specified, assume it might not have just ones
+            all_ones_mask = False
+
         causal_mask = self._update_causal_mask(
             attention_mask,
             inputs_embeds,
             cache_position,
             past_key_values,
             output_attentions,
+            all_ones_mask,
         )
+
+        if all_ones_mask:
+            causal_mask = None
 
         sliding_window_mask = self._create_sliding_window_mask(
             causal_mask,
@@ -387,6 +397,7 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
         cache_position: torch.Tensor,
         past_key_values: HybridCache,
         output_attentions: bool = False,
+        all_ones_mask: Optional[bool] = None,
     ):
         # Flash Attention currently doesn't support static cache but Gemma3Text work only with static cache.
         # So we will pass in attention mask as is in any case, not only when ther's padding. Then we'll use its shape
@@ -399,20 +410,49 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
                 attention_mask = make_flex_block_causal_mask(attention_mask)
             return attention_mask
 
+        inputs_shape = input_tensor.shape
+
+        # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
+        # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
+        # to infer the attention mask.
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+
+        # Gemma 3 might have images during prefill
+        # While we should not have all_ones_mask set to True during prefill, just in case
+        # we condition the ignore of the mask on it too
+        is_prefill = past_seen_tokens == 0
+
+        # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
+        # the eager implementation needs a 4d attention mask that we need to prepare
+        if (
+            (not is_prefill)
+            and self.config._attn_implementation == "sdpa"
+            # and not using_static_cache  # using static cache doesn't matter for muiLLM
+            and not output_attentions
+        ):
+            if _ignore_causal_mask_sdpa(
+                attention_mask,
+                inputs_shape=inputs_shape,
+                past_key_values_length=past_seen_tokens,
+                # TODO: pass is_training?
+                all_ones_mask=all_ones_mask,
+            ):
+                return None
+
         dtype, device = input_tensor.dtype, input_tensor.device
         sequence_length = input_tensor.shape[1]
         if isinstance(past_key_values, MuiHybridChunkedCache):
-            # TODO: use minimal size
-            target_length = past_key_values.get_max_cache_shape()
+            # use minimal size
+            target_length = past_seen_tokens + sequence_length
         if isinstance(past_key_values, (HybridCache, StaticCache)):
             target_length = past_key_values.get_max_cache_shape()
         else:
             target_length = (
                 attention_mask.shape[-1]
                 if attention_mask is not None
-                else input_tensor.shape[
-                    1
-                ]  # TODO: + past_key_values.get_seq_length() + 1
+                else past_seen_tokens + sequence_length
             )
 
         # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
@@ -433,6 +473,7 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
         attention_mask: Optional[torch.Tensor],
         cache_position: torch.LongTensor,
     ) -> Optional[torch.Tensor]:
+
         if attention_mask is None:
             # no attention mask, so no sliding window mask
             return None
@@ -468,6 +509,74 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
 
         return attention_mask
 
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        attention_mask=None,
+        use_cache=True,
+        num_logits_to_keep=None,
+        next_tokens=None,
+        prev_position_ids=None,
+        **kwargs,
+    ):
+
+        # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
+        # Exception 1: when passing input_embeds, input_ids may be missing entries
+        # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
+        if past_key_values is not None:
+            if next_tokens is not None:
+                # previously computed next tokens are the tokens to process now
+                # next_tokens has shape [batch_size], but we need [batch_size, 1]
+                input_ids = next_tokens.unsqueeze(1)
+            elif inputs_embeds is not None:  # Exception 1
+                input_ids = input_ids[:, -cache_position.shape[0] :]
+            elif (
+                input_ids.shape[1] != cache_position.shape[0]
+            ):  # Default case (the "else", a no op, is Exception 2)
+                input_ids = input_ids[:, cache_position]
+
+        if (attention_mask is not None) and (position_ids is None):
+            if prev_position_ids is None:
+                # No previous position_ids, so we create them from the attention mask
+                position_ids = attention_mask.long().cumsum(-1) - 1
+                position_ids.masked_fill_(attention_mask == 0, 1)
+            else:
+                # just increment the previous position ids
+                position_ids = prev_position_ids + 1
+
+            if past_key_values:
+                if position_ids.shape[1] != input_ids.shape[1]:
+                    # if we are doing the first decode, prev_position_ids
+                    # contain several tokens but need a single one
+                    position_ids = position_ids[:, -input_ids.shape[1] :]
+
+        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        if inputs_embeds is not None and cache_position[0] == 0:
+            model_inputs = {"inputs_embeds": inputs_embeds}
+        else:
+            model_inputs = {
+                "input_ids": input_ids.contiguous()
+            }  # `contiguous()` needed for compilation use cases
+
+        if num_logits_to_keep is not None:
+            model_inputs["num_logits_to_keep"] = num_logits_to_keep
+
+        model_inputs.update(
+            {
+                "position_ids": position_ids,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "use_cache": use_cache,
+                "attention_mask": attention_mask,
+            }
+        )
+
+        return model_inputs
+
     @staticmethod
     def _prepare_4d_causal_attention_mask_with_cache_position(
         attention_mask: torch.Tensor,
@@ -498,6 +607,7 @@ class MuiGemma3TextModel(Gemma3PreTrainedModel, MuiModule):
             batch_size (`torch.Tensor`):
                 Batch size.
         """
+
         if attention_mask is not None and attention_mask.dim() == 4:
             # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
             causal_mask = attention_mask
@@ -551,6 +661,10 @@ class MuiGemma3ForCausalLM(Gemma3PreTrainedModel, MuiGenerationMixin):
         self.model = model
         self.vocab_size = model.config.vocab_size
         self.lm_head = lm_head
+
+        # Used to avoid checking the mask over and over in _prepare_4d_causal_attention_mask_for_sdpa
+        # set by _less_sync_sample in wrappedtransformers
+        self.all_ones_mask = None
 
         # Initialize weights and apply final processing
         if initialize:
@@ -629,6 +743,7 @@ class MuiGemma3ForCausalLM(Gemma3PreTrainedModel, MuiGenerationMixin):
         output_hidden_states: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
+        all_ones_mask: Optional[bool] = None,
         **loss_kwargs,
     ) -> CausalLMOutputWithPast:
         r"""
@@ -653,6 +768,9 @@ class MuiGemma3ForCausalLM(Gemma3PreTrainedModel, MuiGenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "What is your favorite condiment?"
         ```"""
+
+        if all_ones_mask is not None:
+            self.all_ones_mask = all_ones_mask
 
         if self.training and self.config._attn_implementation != "eager":
             logger.warning_once(
@@ -680,6 +798,7 @@ class MuiGemma3ForCausalLM(Gemma3PreTrainedModel, MuiGenerationMixin):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             cache_position=cache_position,
+            all_ones_mask=self.all_ones_mask,
             **loss_kwargs,
         )
 
@@ -712,60 +831,32 @@ class MuiGemma3ForCausalLM(Gemma3PreTrainedModel, MuiGenerationMixin):
         self,
         input_ids,
         past_key_values=None,
-        attention_mask=None,
         inputs_embeds=None,
         cache_position=None,
         position_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
         use_cache=True,
         logits_to_keep=None,
+        labels=None,
+        next_tokens=None,
+        prev_position_ids=None,
         **kwargs,
     ):
-        # Overwritten: has a special cache type, `HybridCache`
-
-        model_inputs = super().prepare_inputs_for_generation(
+        model_inputs = self.model.prepare_inputs_for_generation(
             input_ids,
             past_key_values=past_key_values,
-            attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
-            cache_position=cache_position,
+            attention_mask=attention_mask,
             position_ids=position_ids,
+            cache_position=cache_position,
             use_cache=use_cache,
             logits_to_keep=logits_to_keep,
+            token_type_ids=token_type_ids,
+            next_tokens=next_tokens,
+            prev_position_ids=prev_position_ids,
             **kwargs,
         )
-
-        # print(f"model_inputs keys: {list(model_inputs.keys())}")
-
-        if logits_to_keep is None:
-            _ = model_inputs.pop("logits_to_keep", None)
-
-        if (
-            (
-                isinstance(past_key_values, HybridCache)
-                or isinstance(past_key_values, MuiHybridChunkedCache)
-            )
-            and attention_mask.ndim == 2
-            and not self.config._attn_implementation == "flash_attention_2"
-        ):
-            if model_inputs["inputs_embeds"] is not None:
-                batch_size, sequence_length, _ = model_inputs["inputs_embeds"].shape
-                device = model_inputs["inputs_embeds"].device
-            else:
-                batch_size, sequence_length = model_inputs["input_ids"].shape
-                device = model_inputs["input_ids"].device
-
-            attention_mask = (
-                self.model._prepare_4d_causal_attention_mask_with_cache_position(
-                    attention_mask,
-                    sequence_length=sequence_length,
-                    target_length=past_key_values.get_max_cache_shape(),
-                    dtype=self.lm_head.weight.dtype,
-                    device=device,
-                    cache_position=cache_position,
-                    batch_size=batch_size,
-                )
-            )
-            model_inputs["attention_mask"] = attention_mask
 
         return model_inputs
 
@@ -794,6 +885,10 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
         self.pad_token_id = (
             self.config.pad_token_id if self.config.pad_token_id is not None else -1
         )
+
+        # Used to avoid checking the mask over and over in _prepare_4d_causal_attention_mask_for_sdpa
+        # set by _less_sync_sample in wrappedtransformers
+        self.all_ones_mask = None
 
         if initialize:
             self.post_init()
@@ -838,115 +933,6 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
     def set_input_embeddings(self, value):
         self.language_model.set_input_embeddings(value)
 
-    def _update_causal_mask(
-        self,
-        attention_mask,
-        token_type_ids,
-        past_key_values: Optional[Cache],
-        cache_position,
-        input_tensor,
-        is_training: bool = False,
-    ):
-        if self.config.text_config._attn_implementation == "flash_attention_2":
-            return attention_mask
-
-        if attention_mask is not None and attention_mask.dim() == 4:
-            # In this case we assume that the mask comes already in inverted
-            # form and requires no inversion or slicing.
-            return attention_mask
-
-        past_seen_tokens = (
-            past_key_values.get_seq_length() if past_key_values is not None else 0
-        )
-
-        using_static_cache = isinstance(past_key_values, StaticCache)
-        min_dtype = torch.finfo(self.dtype).min
-        inputs_lead_dim, sequence_length = input_tensor.shape[:2]
-
-        if using_static_cache:
-            target_length = past_key_values.get_max_cache_shape()
-        elif isinstance(past_key_values, MuiHybridChunkedCache):
-            # TODO: use minimal size
-            target_length = past_key_values.get_max_cache_shape()
-        elif isinstance(past_key_values, HybridCache):
-            target_length = past_key_values.get_max_cache_shape()
-        else:
-            target_length = (
-                attention_mask.shape[-1]
-                if isinstance(attention_mask, torch.Tensor)
-                else past_seen_tokens + sequence_length
-            )
-
-        if attention_mask is not None and attention_mask.dim() == 4:
-            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
-            return attention_mask
-
-        causal_mask = torch.full(
-            (sequence_length, target_length),
-            fill_value=min_dtype,
-            dtype=self.dtype,
-            device=cache_position.device,
-        )
-
-        # Causal diagonal mask only if training, otherwise attend to the whole prefix. Training-specific attn for prefix is handled below
-        if sequence_length != 1:
-            causal_mask = torch.triu(causal_mask, diagonal=1)
-
-        causal_mask *= torch.arange(
-            target_length, device=cache_position.device
-        ) > cache_position.reshape(-1, 1)
-        causal_mask = causal_mask[None, None, :, :].expand(inputs_lead_dim, 1, -1, -1)
-
-        # Apply bidirectional mask on images if token type ids are provided
-        if token_type_ids is not None and sequence_length != 1:
-            token_type_mask = token_type_ids.unsqueeze(1) == token_type_ids.unsqueeze(2)
-            token_type_mask[token_type_ids == 0] = (
-                False  # if text token do not change anything
-            )
-
-            # Find where a new image block starts: 1 if image and previous not image
-            # The images cannot attend to future images, but can attend to all prev images and to itself bidirectionally
-            is_image = token_type_ids == 1
-            new_image_start = (
-                is_image & ~nn.functional.pad(is_image, (1, 0), value=0)[:, :-1]
-            )
-            image_group_ids = torch.cumsum(new_image_start.int(), dim=1) - 1
-            image_group_ids = torch.where(
-                is_image, image_group_ids, torch.full_like(token_type_ids, -1)
-            )
-
-            same_image_mask = image_group_ids.unsqueeze(1) == image_group_ids.unsqueeze(
-                2
-            )
-            same_image_mask[image_group_ids == -1] = False  # remove non-image
-            image_mask = (
-                (token_type_mask & same_image_mask)
-                .unsqueeze(1)
-                .to(causal_mask.device, dtype=torch.bool)
-            )
-
-            causal_mask = causal_mask.clone()
-            causal_mask[:, :, :, :sequence_length] = causal_mask[
-                :, :, :, :sequence_length
-            ].masked_fill(image_mask, 0.0)
-
-        if attention_mask is not None:
-            causal_mask = (
-                causal_mask.clone()
-            )  # copy to contiguous memory for in-place edit
-            mask_length = attention_mask.shape[-1]
-
-            # Then apply padding mask (will mask pad tokens)
-            padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[
-                :, None, None, :
-            ].to(causal_mask.device)
-            padding_mask = padding_mask == 0
-            causal_mask[:, :, :, :mask_length] = causal_mask[
-                :, :, :, :mask_length
-            ].masked_fill(padding_mask, min_dtype)
-
-        return causal_mask
-
     def get_image_features(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """
         Projects the last hidden state from the vision model into language model space.
@@ -964,7 +950,7 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
     def forward(
         self,
         input_ids: torch.LongTensor = None,
-        pixel_values: torch.FloatTensor = None,
+        pixel_values: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Union[List[torch.FloatTensor], Cache]] = None,
@@ -976,6 +962,7 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        all_ones_mask: Optional[bool] = None,
         **lm_kwargs,
     ) -> Union[Tuple, Gemma3ModelOutputWithPast]:
         r"""
@@ -1005,6 +992,10 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
         >>> processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Where is the cat standing?\nsnow"
         ```"""
+
+        if all_ones_mask is not None:
+            self.all_ones_mask = all_ones_mask
+
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
                 "You must specify exactly one of input_ids or inputs_embeds"
@@ -1090,7 +1081,10 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
             past_key_values,
             cache_position,
             inputs_embeds,
-            is_training,
+            pixel_values=pixel_values,
+            is_training=is_training,
+            output_attentions=output_attentions,
+            all_ones_mask=all_ones_mask,
         )
         outputs = self.language_model(
             attention_mask=causal_mask,
@@ -1102,6 +1096,7 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
             output_hidden_states=output_hidden_states,
             return_dict=True,
             cache_position=cache_position,
+            all_ones_mask=self.all_ones_mask,
             **lm_kwargs,
         )
 
@@ -1112,6 +1107,178 @@ class MuiGemma3Model(Gemma3PreTrainedModel, MuiModule):
             attentions=outputs.attentions,
             image_hidden_states=image_features if pixel_values is not None else None,
         )
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        pixel_values=None,
+        attention_mask=None,
+        token_type_ids=None,
+        use_cache=True,
+        logits_to_keep=None,
+        labels=None,
+        next_tokens=None,
+        prev_position_ids=None,
+        **kwargs,
+    ):
+        return self.language_model.prepare_inputs_for_generation(
+            input_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            cache_position=cache_position,
+            position_ids=position_ids,
+            pixel_values=pixel_values,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            use_cache=use_cache,
+            logits_to_keep=logits_to_keep,
+            labels=labels,
+            next_tokens=next_tokens,
+            prev_position_ids=prev_position_ids,
+            **kwargs,
+        )
+
+    def _update_causal_mask(
+        self,
+        attention_mask,
+        token_type_ids,
+        past_key_values: Optional[Cache],
+        cache_position,
+        input_tensor,
+        pixel_values: Optional[torch.FloatTensor] = None,
+        is_training: bool = False,
+        output_attentions: bool = False,
+        all_ones_mask: Optional[bool] = None,
+    ):
+        if self.config.text_config._attn_implementation == "flash_attention_2":
+            return attention_mask
+
+        inputs_shape = input_tensor.shape
+
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+
+        # Gemma 3 might have images during prefill
+        # While we should not have all_ones_mask set to True during prefill, just in case
+        # we condition the ignore of the mask on it too
+        is_prefill = past_seen_tokens == 0
+
+        # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
+        # the eager implementation needs a 4d attention mask that we need to prepare
+        if (
+            (not is_prefill)
+            and self.config._attn_implementation == "sdpa"
+            # and not using_static_cache  # using static cache doesn't matter for muiLLM
+            and not output_attentions
+        ):
+            if _ignore_causal_mask_sdpa(
+                attention_mask,
+                inputs_shape=inputs_shape,
+                past_key_values_length=past_seen_tokens,
+                is_training=is_training,
+                all_ones_mask=all_ones_mask,
+            ):
+                return None
+
+        if attention_mask is not None and attention_mask.dim() == 4:
+            # In this case we assume that the mask comes already in inverted
+            # form and requires no inversion or slicing.
+            return attention_mask
+
+        # prepare 4D mask
+        if attention_mask is not None and attention_mask.dim() == 4:
+            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
+            return attention_mask
+
+        min_dtype = torch.finfo(self.dtype).min
+        inputs_lead_dim, sequence_length = input_tensor.shape[:2]
+
+        if isinstance(past_key_values, MuiCache):
+            # use minimal size
+            target_length = past_seen_tokens + sequence_length
+        elif isinstance(past_key_values, (StaticCache, HybridCache)):
+            target_length = past_key_values.get_max_cache_shape()
+        else:
+            target_length = (
+                attention_mask.shape[-1]
+                if isinstance(attention_mask, torch.Tensor)
+                else past_seen_tokens + sequence_length
+            )
+
+        causal_mask = torch.full(
+            (sequence_length, target_length),
+            fill_value=min_dtype,
+            dtype=self.dtype,
+            device=cache_position.device,
+        )
+
+        # Causal diagonal mask only if training, otherwise attend to the whole prefix. Training-specific attn for prefix is handled below
+        if sequence_length != 1:
+            causal_mask = torch.triu(causal_mask, diagonal=1)
+
+        causal_mask *= torch.arange(
+            target_length, device=cache_position.device
+        ) > cache_position.reshape(-1, 1)
+        causal_mask = causal_mask[None, None, :, :].expand(inputs_lead_dim, 1, -1, -1)
+
+        # Apply bidirectional mask on images if token type ids are provided
+        if (
+            (pixel_values is not None)
+            and (token_type_ids is not None)
+            and (sequence_length != 1)
+        ):
+            token_type_mask = token_type_ids.unsqueeze(1) == token_type_ids.unsqueeze(2)
+            token_type_mask[token_type_ids == 0] = (
+                False  # if text token do not change anything
+            )
+
+            # Find where a new image block starts: 1 if image and previous not image
+            # The images cannot attend to future images, but can attend to all prev images and to itself bidirectionally
+            is_image = token_type_ids == 1
+            new_image_start = (
+                is_image & ~nn.functional.pad(is_image, (1, 0), value=0)[:, :-1]
+            )
+            image_group_ids = torch.cumsum(new_image_start.int(), dim=1) - 1
+            image_group_ids = torch.where(
+                is_image, image_group_ids, torch.full_like(token_type_ids, -1)
+            )
+
+            same_image_mask = image_group_ids.unsqueeze(1) == image_group_ids.unsqueeze(
+                2
+            )
+            same_image_mask[image_group_ids == -1] = False  # remove non-image
+            image_mask = (
+                (token_type_mask & same_image_mask)
+                .unsqueeze(1)
+                .to(causal_mask.device, dtype=torch.bool)
+            )
+
+            causal_mask = causal_mask.clone()
+            causal_mask[:, :, :, :sequence_length] = causal_mask[
+                :, :, :, :sequence_length
+            ].masked_fill(image_mask, 0.0)
+
+        if attention_mask is not None:
+            causal_mask = (
+                causal_mask.clone()
+            )  # copy to contiguous memory for in-place edit
+            mask_length = attention_mask.shape[-1]
+
+            # Then apply padding mask (will mask pad tokens)
+            padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[
+                :, None, None, :
+            ].to(causal_mask.device)
+            padding_mask = padding_mask == 0
+            causal_mask[:, :, :, :mask_length] = causal_mask[
+                :, :, :, :mask_length
+            ].masked_fill(padding_mask, min_dtype)
+
+        return causal_mask
 
 
 class MuiGemma3ForConditionalGeneration(Gemma3PreTrainedModel, MuiGenerationMixin):
@@ -1135,6 +1302,10 @@ class MuiGemma3ForConditionalGeneration(Gemma3PreTrainedModel, MuiGenerationMixi
 
         self.model = model
         self.lm_head = lm_head
+
+        # Used to avoid checking the mask over and over in _prepare_4d_causal_attention_mask_for_sdpa
+        # set by _less_sync_sample in wrappedtransformers
+        self.all_ones_mask = None
 
         if initialize:
             # Initialize weights and apply final processing
@@ -1223,6 +1394,7 @@ class MuiGemma3ForConditionalGeneration(Gemma3PreTrainedModel, MuiGenerationMixi
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
+        all_ones_mask: Optional[bool] = None,
         **lm_kwargs,
     ) -> Union[Tuple, Gemma3CausalLMOutputWithPast]:
         r"""
@@ -1270,6 +1442,9 @@ class MuiGemma3ForConditionalGeneration(Gemma3PreTrainedModel, MuiGenerationMixi
         ```
         """
 
+        if all_ones_mask is not None:
+            self.all_ones_mask = all_ones_mask
+
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -1298,6 +1473,7 @@ class MuiGemma3ForConditionalGeneration(Gemma3PreTrainedModel, MuiGenerationMixi
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            all_ones_mask=self.all_ones_mask,
             **lm_kwargs,
         )
 
@@ -1364,10 +1540,13 @@ class MuiGemma3ForConditionalGeneration(Gemma3PreTrainedModel, MuiGenerationMixi
         use_cache=True,
         logits_to_keep=None,
         labels=None,
+        next_tokens=None,
+        prev_position_ids=None,
         **kwargs,
     ):
+
         # Overwritten -- custom `position_ids` and `pixel_values` handling
-        model_inputs = super().prepare_inputs_for_generation(
+        model_inputs = self.model.prepare_inputs_for_generation(
             input_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
@@ -1377,6 +1556,9 @@ class MuiGemma3ForConditionalGeneration(Gemma3PreTrainedModel, MuiGenerationMixi
             use_cache=use_cache,
             logits_to_keep=logits_to_keep,
             token_type_ids=token_type_ids,
+            pixel_values=pixel_values,
+            next_tokens=next_tokens,
+            prev_position_ids=prev_position_ids,
             **kwargs,
         )
 
@@ -1389,96 +1571,5 @@ class MuiGemma3ForConditionalGeneration(Gemma3PreTrainedModel, MuiGenerationMixi
         # Otherwise we need pixel values to be passed to model. NOTE: use_cache=False needs pixel_values always
         if is_prefill:
             model_inputs["pixel_values"] = pixel_values
-        is_training = token_type_ids is not None and labels is not None
-        if is_prefill and (
-            isinstance(past_key_values, HybridCache)
-            or isinstance(past_key_values, MuiHybridChunkedCache)
-        ):
-            input_tensor = inputs_embeds if inputs_embeds is not None else input_ids
-            causal_mask = self.model._update_causal_mask(
-                attention_mask,
-                token_type_ids,
-                past_key_values,
-                cache_position,
-                input_tensor,
-                is_training,
-            )
-            model_inputs["attention_mask"] = causal_mask
 
         return model_inputs
-
-    @staticmethod
-    def _prepare_4d_causal_attention_mask_with_cache_position(
-        attention_mask: torch.Tensor,
-        sequence_length: int,
-        target_length: int,
-        dtype: torch.dtype,
-        cache_position: torch.Tensor,
-        batch_size: int,
-        **kwargs,
-    ):
-        """
-        Creates a causal 4D mask of shape `(batch_size, 1, query_length, key_value_length)` from a 2D mask of shape
-        `(batch_size, key_value_length)`, or if the input `attention_mask` is already 4D, do nothing.
-
-        Args:
-            attention_mask (`torch.Tensor`):
-                A 2D attention mask of shape `(batch_size, key_value_length)` or a 4D attention mask of shape
-                `(batch_size, 1, query_length, key_value_length)`.
-            sequence_length (`int`):
-                The sequence length being processed.
-            target_length (`int`):
-                The target length: when generating with static cache, the mask should be as long as the static cache,
-                to account for the 0 padding, the part of the cache that is not filled yet.
-            dtype (`torch.dtype`):
-                The dtype to use for the 4D attention mask.
-            cache_position (`torch.Tensor`):
-                Indices depicting the position of the input sequence tokens in the sequence.
-            batch_size (`torch.Tensor`):
-                Batch size.
-        """
-        # print(
-        #     f"MuiGemma3ForConditionalGeneration._prepare_4d_causal_attention_mask_with_cache_position"
-        # )
-        # if attention_mask is not None:
-        #     print(f"  attention_mask: {attention_mask.shape}")
-        # print(f"  sequence_length: {sequence_length} target_length: {target_length}")
-
-        if attention_mask is not None:
-            # because we are growing the cache in forward(), which is called after preparing inputs
-            # (which is when this method is called), we need to ensure that the
-            # target_length is correct according to the mask length
-            mask_length = attention_mask.shape[-1]
-            target_length = max(target_length, mask_length)
-
-        if attention_mask is not None and attention_mask.dim() == 4:
-            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
-            causal_mask = attention_mask
-        else:
-            min_dtype = torch.finfo(dtype).min
-            causal_mask = torch.full(
-                (sequence_length, target_length),
-                fill_value=min_dtype,
-                dtype=dtype,
-                device=cache_position.device,
-            )
-            if sequence_length != 1:
-                causal_mask = torch.triu(causal_mask, diagonal=1)
-            causal_mask *= torch.arange(
-                target_length, device=cache_position.device
-            ) > cache_position.reshape(-1, 1)
-            causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
-            if attention_mask is not None:
-                causal_mask = (
-                    causal_mask.clone()
-                )  # copy to contiguous memory for in-place edit
-                mask_length = attention_mask.shape[-1]
-                padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[
-                    :, None, None, :
-                ].to(causal_mask.device)
-                padding_mask = padding_mask == 0
-                causal_mask[:, :, :, :mask_length] = causal_mask[
-                    :, :, :, :mask_length
-                ].masked_fill(padding_mask, min_dtype)
-
-        return causal_mask
