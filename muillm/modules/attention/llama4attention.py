@@ -14,23 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.attention.causaltransformerdecoding import (
-    mui_causally_decode,
-    mui_causally_decode_masked,
-)
-from muillm.modules.attention.rotaryembedding import _MuiComplexRotaryNoCache
+from muillm.modules.rope.ropeops import apply_complex_rotary_emb
 from muillm.modules.attention.temperaturetuning import _MuiTemperatureTuning
-from muillm.modules.kvcache.cache_utils import MuiHybridChunkedCache
+from muillm.modules.kvcache.cache_utils import MuiCache, MuiHybridChunkedCache
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.utils.checkpoint
 
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
@@ -40,40 +33,14 @@ from transformers.processing_utils import Unpack
 from transformers.utils import logging
 from transformers.models.llama4.modeling_llama4 import (
     Llama4TextAttention,
-    Llama4TextL2Norm,
 )
-from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 
-from muillm.modules.multilinear import MuiMultiLinear
 from muillm.modules.norm.qkl2norm import MuiQKL2Norm
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
 import muillm_ext
 
 logger = logging.get_logger(__name__)
-
-
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    dtype = xq.dtype
-    if (xq.is_cuda) and ((dtype == torch.float16) or (dtype == torch.bfloat16)):
-        freqs_cis = freqs_cis.contiguous()
-        # can dispatch to the custom kernel
-        return _MuiComplexRotaryNoCache.apply(
-            xq,
-            xk,
-            freqs_cis,
-        )
-    else:
-        # freqs_cis is always a complex tensor of floats
-        xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-        xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-        xq_out = torch.view_as_real(xq_ * freqs_cis[:, None, :, :]).flatten(3)
-        xk_out = torch.view_as_real(xk_ * freqs_cis[:, None, :, :]).flatten(3)
-        return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
 def apply_temperature_tuning(
@@ -309,7 +276,7 @@ class MuiLlama4TextAttention(MuiModule):
         query_states: torch.Tensor,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        position_embeddings: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
@@ -343,15 +310,6 @@ class MuiLlama4TextAttention(MuiModule):
                     bsz, self.num_key_value_heads, q_len, self.head_dim
                 )
 
-                if (
-                    self.use_rope
-                ):  # the 16E model skips rope for long context on certain layers
-                    query_states, key_states = apply_rotary_emb(
-                        query_states,
-                        key_states,
-                        position_embeddings,
-                    )
-
                 # (rope and qk_norm commute as rope is a rotation)
                 if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
                     query_states, key_states = self.qk_norm(query_states, key_states)
@@ -365,15 +323,33 @@ class MuiLlama4TextAttention(MuiModule):
                         self.floor_scale,
                     )
 
-                query_states = query_states
-                key_states = key_states
-
-                if past_key_value is not None:
+                cache_kwargs = {
+                    "cache_position": cache_position,
+                }
+                if self.use_rope and isinstance(past_key_value, MuiCache):
                     # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                    cache_kwargs = {"cache_position": cache_position}
-                    key_states, value_states = past_key_value.update(
-                        key_states, value_states, self.layer_idx, cache_kwargs
+                    query_states, key_states, value_states = past_key_value.rope_update(
+                        query_states,
+                        key_states,
+                        value_states,
+                        position_embeddings,
+                        self.layer_idx,
+                        cache_kwargs,
+                        complex_rope=True,
                     )
+                else:
+                    if self.use_rope:
+                        query_states, key_states = apply_complex_rotary_emb(
+                            query_states,
+                            key_states,
+                            position_embeddings,
+                        )
+
+                    if past_key_value is not None:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        key_states, value_states = past_key_value.update(
+                            key_states, value_states, self.layer_idx, cache_kwargs
+                        )
 
                 attn_output = _MuiLlama4Attention.apply(
                     self.cpp_module,
@@ -400,15 +376,6 @@ class MuiLlama4TextAttention(MuiModule):
             key_states = key_states.transpose(1, 2)
             value_states = value_states.transpose(1, 2)
 
-            if (
-                self.use_rope
-            ):  # the 16E model skips rope for long context on certain layers
-                query_states, key_states = apply_rotary_emb(
-                    query_states,
-                    key_states,
-                    position_embeddings,
-                )
-
             # (rope and qk_norm commute as rope is a rotation)
             if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
                 query_states, key_states = self.qk_norm(query_states, key_states)
@@ -422,12 +389,33 @@ class MuiLlama4TextAttention(MuiModule):
                     self.floor_scale,
                 )
 
-            if past_key_value is not None:
+            cache_kwargs = {
+                "cache_position": cache_position,
+            }
+            if self.use_rope and isinstance(past_key_value, MuiCache):
                 # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                cache_kwargs = {"cache_position": cache_position}
-                key_states, value_states = past_key_value.update(
-                    key_states, value_states, self.layer_idx, cache_kwargs
+                query_states, key_states, value_states = past_key_value.rope_update(
+                    query_states,
+                    key_states,
+                    value_states,
+                    position_embeddings,
+                    self.layer_idx,
+                    cache_kwargs,
+                    complex_rope=True,
                 )
+            else:
+                if self.use_rope:
+                    query_states, key_states = apply_complex_rotary_emb(
+                        query_states,
+                        key_states,
+                        position_embeddings,
+                    )
+
+                if past_key_value is not None:
+                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                    key_states, value_states = past_key_value.update(
+                        key_states, value_states, self.layer_idx, cache_kwargs
+                    )
 
             attention_interface: Callable = eager_attention_forward
             if self.config._attn_implementation != "eager":

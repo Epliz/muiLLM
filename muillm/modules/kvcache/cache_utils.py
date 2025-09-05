@@ -1,3 +1,4 @@
+from ast import List
 from typing import Any, Dict, Optional, Tuple, Union
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.module import MuiModule
@@ -11,6 +12,8 @@ from transformers.configuration_utils import PretrainedConfig
 
 import muillm_ext
 import torch
+
+from muillm.modules.rope.ropeops import apply_complex_rotary_emb, apply_rotary_pos_emb
 
 
 def _set_sharded_attention_config(
@@ -55,24 +58,200 @@ class MuiCache:
     def sync_back(self):
         pass
 
+    def rope_update(
+        self,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        position_embeds: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+        complex_rope: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if complex_rope:
+            query_states, key_states = apply_complex_rotary_emb(
+                query_states,
+                key_states,
+                position_embeds,
+            )
+        else:
+            cos, sin = position_embeds
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states, key_states, cos, sin
+            )
+
+        key_states, value_states = self.update(
+            key_states, value_states, layer_idx, cache_kwargs
+        )
+
+        return query_states, key_states, value_states
+
+
+class _MuiDynamicCacheUpdate(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        cpp_module,
+        key_states,
+        value_states,
+        cache_position,
+        layer_index,
+    ):
+        output = muillm_ext.muillm_dynamic_kvcache_module_update(
+            cpp_module,
+            key_states,
+            value_states,
+            cache_position,
+            layer_index,
+        )
+        ctx.save_for_backward(key_states, value_states)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("Dynamic cache backward not implemented")
+
+
+class _MuiDynamicCacheRopeUpdate(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        cpp_module,
+        query_states,
+        key_states,
+        value_states,
+        position_embeddings,
+        cache_position,
+        layer_index,
+    ):
+        output = muillm_ext.muillm_dynamic_kvcache_module_rope_update(
+            cpp_module,
+            query_states,
+            key_states,
+            value_states,
+            position_embeddings,
+            cache_position,
+            layer_index,
+        )
+        ctx.save_for_backward(key_states, value_states)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("Dynamic cache rope update backward not implemented")
+
+
+class _MuiDynamicCacheComplexRopeUpdate(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        cpp_module,
+        query_states,
+        key_states,
+        value_states,
+        position_embeddings,
+        cache_position,
+        layer_index,
+    ):
+        output = muillm_ext.muillm_dynamic_kvcache_module_complex_rope_update(
+            cpp_module,
+            query_states,
+            key_states,
+            value_states,
+            position_embeddings,
+            cache_position,
+            layer_index,
+        )
+        ctx.save_for_backward(key_states, value_states)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError(
+            "Dynamic cache complex rope update backward not implemented"
+        )
+
 
 class MuiDynamicCache(DynamicCache, MuiCache):
-    def __init__(self, engine_config: MuiEngineConfig, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        engine_config: MuiEngineConfig,
+        config: PretrainedConfig,
+        max_batch_size: int,
+        device: Union[torch.device, str, None] = None,
+        dtype: torch.dtype = torch.float32,
+        tensor_parallelism: int = 1,
+        *args,
+        **kwargs,
+    ) -> None:
+        self.device = device
+        self.dtype = dtype
+
+        # hack to make the cache be the right size if we use tensor parallelism
+        _set_sharded_attention_config(config, tensor_parallelism)
+
         super().__init__(*args, **kwargs)
+        self.max_batch_size = max_batch_size
+
+        # Some model define a custom `head_dim` != config.hidden_size // config.num_attention_heads
+        self.head_dim = (
+            getattr(config, "head_dim", None)
+            or config.hidden_size // config.num_attention_heads
+        )
+
+        self._dtype = dtype
+        self.num_key_value_heads = (
+            config.num_attention_heads
+            if getattr(config, "num_key_value_heads", None) is None
+            else config.num_key_value_heads
+        )
+
+        self.key_cache: List[torch.Tensor] = []
+        self.value_cache: List[torch.Tensor] = []
+
+        initial_cache_len = 0
+        initial_cache_shape = (
+            self.max_batch_size,
+            self.num_key_value_heads,
+            initial_cache_len,
+            self.head_dim,
+        )
+
+        # create all caches with empty tensors
+        for idx in range(config.num_hidden_layers):
+            self.key_cache.append(
+                torch.zeros(size=initial_cache_shape, device=device, dtype=dtype)
+            )
+            self.value_cache.append(
+                torch.zeros(size=initial_cache_shape, device=device, dtype=dtype)
+            )
+
+        # set back the right values in the config
+        _reset_sharded_attention_config(config, tensor_parallelism)
 
         self.engine_config = engine_config
         self.cpp_engine = engine_config.cpp_engine
 
         self.cpp_module = None
 
-        # TODO: create all layer tensors with empty tensors?
-
         self._seen_tokens = 0
 
         # create the cpp module
         self.finalize_init()
 
+    def _check_dispatchable(self):
+        dispatchable_type = (self.dtype == torch.float16) or (
+            self.dtype == torch.bfloat16
+        )
+        self.dispatchable = dispatchable_type
+
     def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
         if self.cpp_module is not None:
             muillm_ext.muillm_dynamic_kvcache_module_deinit(self.cpp_module)
 
@@ -94,6 +273,61 @@ class MuiDynamicCache(DynamicCache, MuiCache):
         )
         self._sync_seen_tokens()
 
+    def rope_update(
+        self,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        position_embeds: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+        complex_rope: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.dispatchable:
+            cache_position = cache_kwargs.get("cache_position")
+
+            if layer_idx == 0:
+                # update the seen counter (only for layer 0 to avoid double counting)
+                # the C++ side increments it too, so no need to sync
+                self._seen_tokens += key_states.shape[-2]
+
+            # Use the C++ module to do the update
+            if complex_rope:
+                q_out, k_out, v_out = _MuiDynamicCacheComplexRopeUpdate.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    position_embeds,
+                    cache_position,
+                    layer_idx,
+                )
+            else:
+                q_out, k_out, v_out = _MuiDynamicCacheRopeUpdate.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    position_embeds,
+                    cache_position,
+                    layer_idx,
+                )
+
+            self.key_cache[layer_idx] = k_out
+            self.value_cache[layer_idx] = v_out
+
+            return q_out, k_out, v_out
+        else:
+            return super().rope_update(
+                query_states=query_states,
+                key_states=key_states,
+                value_states=value_states,
+                position_embeds=position_embeds,
+                layer_idx=layer_idx,
+                complex_rope=complex_rope,
+                cache_kwargs=cache_kwargs,
+            )
+
     def update(
         self,
         key_states: torch.Tensor,
@@ -101,18 +335,126 @@ class MuiDynamicCache(DynamicCache, MuiCache):
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # the HF dynamic cache might have its own counter
-        # this helps decouple a bit and not rely on knowing their logic
-        prev_seen_tokens = self._seen_tokens
+        if self.dispatchable:
+            cache_position = cache_kwargs.get("cache_position")
 
-        k_out, v_out = super().update(key_states, value_states, layer_idx, cache_kwargs)
+            if layer_idx == 0:
+                # update the seen counter (only for layer 0 to avoid double counting)
+                # the C++ side increments it too, so no need to sync
+                self._seen_tokens += key_states.shape[-2]
 
-        if layer_idx == 0:
-            # and update the seen counter (only for layer 0 to avoid double counting)
-            self._seen_tokens = prev_seen_tokens + key_states.shape[-2]
-            self._sync_seen_tokens()
+            # Use the C++ module to do the update
+            k_out, v_out = _MuiDynamicCacheUpdate.apply(
+                self.cpp_module,
+                key_states,
+                value_states,
+                cache_position,
+                layer_idx,
+            )
+
+            self.key_cache[layer_idx] = k_out
+            self.value_cache[layer_idx] = v_out
+
+            return k_out, v_out
+        else:
+            if layer_idx == 0:
+                # update the seen counter (only for layer 0 to avoid double counting)
+                self._seen_tokens += key_states.shape[-2]
+                self._sync_seen_tokens()
+
+            k_out, v_out = super().update(
+                key_states, value_states, layer_idx, cache_kwargs
+            )
 
         return k_out, v_out
+
+
+class _MuiStaticCacheUpdate(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        cpp_module,
+        key_states,
+        value_states,
+        cache_position,
+        layer_index,
+    ):
+        output = muillm_ext.muillm_static_kvcache_module_update(
+            cpp_module,
+            key_states,
+            value_states,
+            cache_position,
+            layer_index,
+        )
+        ctx.save_for_backward(key_states, value_states)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("Static cache backward not implemented")
+
+
+class _MuiStaticCacheRopeUpdate(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        cpp_module,
+        query_states,
+        key_states,
+        value_states,
+        position_embeds,
+        cache_position,
+        layer_index,
+    ):
+        output = muillm_ext.muillm_static_kvcache_module_rope_update(
+            cpp_module,
+            query_states,
+            key_states,
+            value_states,
+            position_embeds,
+            cache_position,
+            layer_index,
+        )
+        ctx.save_for_backward(key_states, value_states)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError("Static cache rope update backward not implemented")
+
+
+class _MuiStaticCacheComplexRopeUpdate(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        cpp_module,
+        query_states,
+        key_states,
+        value_states,
+        position_embeds,
+        cache_position,
+        layer_index,
+    ):
+        output = muillm_ext.muillm_static_kvcache_module_complex_rope_update(
+            cpp_module,
+            query_states,
+            key_states,
+            value_states,
+            position_embeds,
+            cache_position,
+            layer_index,
+        )
+        ctx.save_for_backward(key_states, value_states)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError(
+            "Static cache complex rope update backward not implemented"
+        )
 
 
 class MuiStaticCache(StaticCache, MuiCache):
@@ -144,6 +486,9 @@ class MuiStaticCache(StaticCache, MuiCache):
         narrow_output: bool = True,
     ) -> None:
 
+        self.device = device
+        self.dtype = dtype
+
         # hack to make the cache be the right size if we use tensor parallelism
         _set_sharded_attention_config(config, tensor_parallelism)
 
@@ -170,7 +515,16 @@ class MuiStaticCache(StaticCache, MuiCache):
         # create the cpp module
         self.finalize_init()
 
+    def _check_dispatchable(self):
+        dispatchable_type = (self.dtype == torch.float16) or (
+            self.dtype == torch.bfloat16
+        )
+        self.dispatchable = dispatchable_type and self.key_cache[0].is_cuda
+
     def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
         if self.cpp_module is not None:
             muillm_ext.muillm_static_kvcache_module_deinit(self.cpp_module)
 
@@ -190,6 +544,56 @@ class MuiStaticCache(StaticCache, MuiCache):
         )
         self._sync_seen_tokens()
 
+    def rope_update(
+        self,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        position_embeds: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+        complex_rope: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.dispatchable:
+            cache_position = cache_kwargs.get("cache_position")
+
+            if layer_idx == 0:
+                # update the seen counter (only for layer 0 to avoid double counting)
+                # the C++ side increments it too, so no need to sync
+                self._seen_tokens += key_states.shape[-2]
+
+            # Use the C++ module to do the update
+            if complex_rope:
+                return _MuiStaticCacheComplexRopeUpdate.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    position_embeds,
+                    cache_position,
+                    layer_idx,
+                )
+            else:
+                return _MuiStaticCacheRopeUpdate.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    position_embeds,
+                    cache_position,
+                    layer_idx,
+                )
+        else:
+            return super().rope_update(
+                query_states=query_states,
+                key_states=key_states,
+                value_states=value_states,
+                position_embeds=position_embeds,
+                layer_idx=layer_idx,
+                cache_kwargs=cache_kwargs,
+                complex_rope=complex_rope,
+            )
+
     def update(
         self,
         key_states: torch.Tensor,
@@ -197,20 +601,36 @@ class MuiStaticCache(StaticCache, MuiCache):
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # update like usual
-        k_out, v_out = super().update(key_states, value_states, layer_idx, cache_kwargs)
+        cache_position = cache_kwargs.get("cache_position")
 
-        if layer_idx == 0:
-            # and update the seen counter (only for layer 0 to avoid double counting)
-            self._seen_tokens += key_states.shape[-2]
-            self._sync_seen_tokens()
+        if self.dispatchable:
+            if layer_idx == 0:
+                # update the seen counter (only for layer 0 to avoid double counting)
+                # the C++ side increments it too, so no need to sync
+                self._seen_tokens += key_states.shape[-2]
 
-        if self.narrow_output:
-            # return the minimal slice of cache
-            k_out = torch.narrow(k_out, 2, 0, self._seen_tokens)
-            v_out = torch.narrow(v_out, 2, 0, self._seen_tokens)
+            # Use the C++ module to do the update
+            k_out, v_out = _MuiStaticCacheUpdate.apply(
+                self.cpp_module, key_states, value_states, cache_position, layer_idx
+            )
+            return k_out, v_out
+        else:
+            if layer_idx == 0:
+                # update the seen counter (only for layer 0 to avoid double counting)
+                self._seen_tokens += key_states.shape[-2]
+                self._sync_seen_tokens()
 
-        return k_out, v_out
+            # update like usual
+            k_out, v_out = super().update(
+                key_states, value_states, layer_idx, cache_kwargs
+            )
+
+            if self.narrow_output:
+                # return the minimal slice of cache
+                k_out = torch.narrow(k_out, 2, 0, self._seen_tokens)
+                v_out = torch.narrow(v_out, 2, 0, self._seen_tokens)
+
+            return k_out, v_out
 
     def grow_cache(self, capacity: int, max_capacity: int) -> None:
         required_capacity = _next_pow2(capacity)
@@ -296,224 +716,6 @@ class MuiStaticCache(StaticCache, MuiCache):
         self._seen_tokens = 0
 
 
-# TODO: remove
-class MuiHybridCache(HybridCache, MuiCache):
-    def __init__(
-        self,
-        engine_config: MuiEngineConfig,
-        config: PretrainedConfig,
-        max_batch_size: int,
-        max_cache_len: Optional[int] = None,
-        device: Union[torch.device, str, None] = None,
-        dtype: torch.dtype = torch.float32,
-        tensor_parallelism: int = 1,
-        narrow_output: bool = True,
-    ):
-        # hack to make the cache be the right size if we use tensor parallelism
-        _set_sharded_attention_config(config, tensor_parallelism)
-
-        super().__init__(
-            config=config,
-            max_batch_size=max_batch_size,
-            max_cache_len=max_cache_len,
-            device=device,
-            dtype=dtype,
-        )
-
-        # set back the right values in the config
-        _reset_sharded_attention_config(config, tensor_parallelism)
-
-        self._seen_tokens = 0
-
-        self.narrow_output = narrow_output
-
-        self.engine_config = engine_config
-        self.cpp_engine = engine_config.cpp_engine
-
-        self.cpp_module = None
-
-        # create the cpp module
-        self.finalize_init()
-
-    def finalize_init(self):
-        pass
-
-    @staticmethod
-    def copy_cache(
-        cache: HybridCache,
-        engine_config: MuiEngineConfig,
-        config: PretrainedConfig,
-        device: Union[torch.device, str, None] = None,
-        dtype: torch.dtype = torch.float32,
-    ) -> "MuiHybridCache":
-        new_cache = MuiHybridCache(
-            engine_config=engine_config,
-            config=config,
-            max_batch_size=cache.max_batch_size,
-            max_cache_len=cache.max_cache_len,
-            device=device,
-            dtype=dtype,
-        )
-
-        print(
-            f"max_cache_len: {cache.max_cache_len}, max_batch_size: {cache.max_batch_size}"
-        )
-
-        # copy the layers
-        for layer_idx in range(len(cache.key_cache)):
-            new_cache.key_cache[layer_idx] = cache.key_cache[layer_idx].to(
-                device=device, dtype=dtype
-            )
-            new_cache.value_cache[layer_idx] = cache.value_cache[layer_idx].to(
-                device=device, dtype=dtype
-            )
-
-        return new_cache
-
-    def _sync_seen_tokens(self):
-        pass
-
-    def sync_back(self):
-        pass
-
-    def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # the HF cache might have its own counter
-        # this helps decouple a bit and not rely on knowing their logic
-        prev_seen_tokens = self._seen_tokens
-
-        k_out, v_out = super().update(key_states, value_states, layer_idx, cache_kwargs)
-
-        if layer_idx == 0:
-            # and update the seen counter (only for layer 0 to avoid double counting)
-            self._seen_tokens = prev_seen_tokens + key_states.shape[-2]
-
-        if self.narrow_output:
-            # return the minimal slice of cache
-            k_out = torch.narrow(k_out, 2, 0, self._seen_tokens)
-            v_out = torch.narrow(v_out, 2, 0, self._seen_tokens)
-
-        return k_out, v_out
-
-    def get_seq_length(self, layer_idx: Optional[int] = 0):
-        if len(self.key_cache) == 0:
-            return 0
-
-        return self._seen_tokens
-
-    def reset(self):
-        super().reset()
-
-        self._seen_tokens = 0
-
-    def grow_cache(self, capacity: int, max_capacity: int) -> None:
-
-        required_capacity = _next_pow2(capacity)
-        # models have a max supported sequence length, no need to go past that
-        required_capacity = min(required_capacity, max_capacity)
-
-        if self.max_cache_len >= required_capacity:
-            # already good
-            return self
-
-        # print(f"MuiHybridCache.grow_cache to {capacity} (max {max_capacity})")
-
-        # we need to grow the cache
-        prev_k_cache = self.key_cache[0]
-
-        dtype = prev_k_cache.dtype
-        device = prev_k_cache.device
-
-        num_key_value_heads = prev_k_cache.shape[1]
-
-        prev_max_global_cache_len = self.max_cache_len
-        prev_max_sliding_cache_len = self.sliding_window_len
-
-        # by how much we need to increase the cache size
-        diff_global_cache_len = required_capacity - prev_max_global_cache_len
-        diff_sliding_cache_len = required_capacity - prev_max_sliding_cache_len
-
-        diff_global_cache_shape = (
-            self.max_batch_size,
-            num_key_value_heads,
-            diff_global_cache_len,
-            self.head_dim,
-        )
-
-        diff_sliding_cache_shape = (
-            self.max_batch_size,
-            num_key_value_heads,
-            diff_sliding_cache_len,
-            self.head_dim,
-        )
-
-        # print(f"  diff_cache_shape: {diff_global_cache_shape}")
-
-        num_hidden_layers = len(self.key_cache)
-        for layer_idx in range(num_hidden_layers):
-            if self.is_sliding_list[layer_idx]:
-                # sliding cache
-                # Check if we need to grow the layer
-                if diff_sliding_cache_len <= 0:
-                    continue
-
-                diff_cache_shape = diff_sliding_cache_shape
-            else:
-                # global cache
-                diff_cache_shape = diff_global_cache_shape
-
-            # global attention cache need to grow
-            prev_key_cache = self.key_cache[layer_idx]
-            prev_value_cache = self.value_cache[layer_idx]
-
-            diff_layer_key_cache = torch.zeros(
-                diff_cache_shape, dtype=dtype, device=device
-            )
-            diff_layer_value_cache = torch.zeros(
-                diff_cache_shape, dtype=dtype, device=device
-            )
-
-            new_layer_key_cache = torch.cat(
-                [prev_key_cache, diff_layer_key_cache], dim=-2
-            )
-            new_layer_value_cache = torch.cat(
-                [prev_value_cache, diff_layer_value_cache], dim=-2
-            )
-
-            # Note: `mark_static_address` is used to tag the cache as an fixed data pointer, preventing cuda graph
-            # breaks when updating the cache.
-
-            # TODO: maybe unmark the previous cache?
-            torch._dynamo.mark_static_address(new_layer_key_cache)
-            torch._dynamo.mark_static_address(new_layer_value_cache)
-
-            self.key_cache[layer_idx] = new_layer_key_cache
-            self.value_cache[layer_idx] = new_layer_value_cache
-
-            # print(f" key_cache[{layer_idx}] shape: {new_layer_key_cache.shape}")
-            # print(f" value_cache[{layer_idx}] shape: {new_layer_value_cache.shape}")
-
-            # delete now
-            del prev_key_cache
-            del prev_value_cache
-
-        # update the capacities
-        self.max_cache_len = required_capacity
-        self.sliding_window_len = max(self.sliding_window_len, required_capacity)
-
-        # print(
-        #     f"  new max_cache_len: {self.max_cache_len} new sliding_window_len {self.sliding_window_len}"
-        # )
-
-        # we need to reinitialize the cpp module as the tensors changed
-        self.finalize_init()
-
-
 class _MuiHybridChunkedCacheUpdate(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -538,6 +740,70 @@ class _MuiHybridChunkedCacheUpdate(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         raise NotImplementedError("Hybrid Chunked cache backward not implemented")
+
+
+class _MuiHybridChunkedCacheRopeUpdate(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        cpp_module,
+        query_states,
+        key_states,
+        value_states,
+        position_embeds,
+        cache_position,
+        layer_index,
+    ):
+        output = muillm_ext.muillm_hybrid_chunked_kvcache_module_rope_update(
+            cpp_module,
+            query_states,
+            key_states,
+            value_states,
+            position_embeds,
+            cache_position,
+            layer_index,
+        )
+        ctx.save_for_backward(key_states, value_states)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError(
+            "Hybrid chunked cache rope update backward not implemented"
+        )
+
+
+class _MuiHybridChunkedCacheComplexRopeUpdate(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        cpp_module,
+        query_states,
+        key_states,
+        value_states,
+        position_embeds,
+        cache_position,
+        layer_index,
+    ):
+        output = muillm_ext.muillm_hybrid_chunked_kvcache_module_complex_rope_update(
+            cpp_module,
+            query_states,
+            key_states,
+            value_states,
+            position_embeds,
+            cache_position,
+            layer_index,
+        )
+        ctx.save_for_backward(key_states, value_states)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError(
+            "Hybrid chunked cache complex rope update backward not implemented"
+        )
 
 
 class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
@@ -754,6 +1020,56 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
 
             return k_out, v_out
 
+    def rope_update(
+        self,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        position_embeds: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+        complex_rope: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.dispatchable:
+            cache_position = cache_kwargs.get("cache_position")
+
+            if layer_idx == 0:
+                # update the seen counter (only for layer 0 to avoid double counting)
+                # the C++ side increments it too, so no need to sync
+                self._seen_tokens += key_states.shape[-2]
+
+            # Use the C++ module to do the update
+            if complex_rope:
+                return _MuiHybridChunkedCacheComplexRopeUpdate.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    position_embeds,
+                    cache_position,
+                    layer_idx,
+                )
+            else:
+                return _MuiHybridChunkedCacheRopeUpdate.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    position_embeds,
+                    cache_position,
+                    layer_idx,
+                )
+        else:
+            return super().rope_update(
+                query_states=query_states,
+                key_states=key_states,
+                value_states=value_states,
+                position_embeds=position_embeds,
+                layer_idx=layer_idx,
+                cache_kwargs=cache_kwargs,
+                complex_rope=complex_rope,
+            )
+
     def update(
         self,
         key_states: torch.Tensor,
@@ -949,36 +1265,6 @@ def create_static_cache(
 def grow_static_cache_if_needed(
     cache: MuiStaticCache, capacity: int, max_capacity: int
 ) -> MuiStaticCache:
-    cache.grow_cache(capacity=capacity, max_capacity=max_capacity)
-    return cache
-
-
-def create_hybrid_cache(
-    engine_config: MuiEngineConfig,
-    config: PretrainedConfig,
-    max_batch_size,
-    seq_len,
-    device,
-    dtype,
-) -> MuiHybridCache:
-    # to avoid frequent re-allocations of the cache, we use a power of 2 schedule
-    max_cache_len = _next_pow2(seq_len)
-    tensor_parallelism = engine_config.tensor_parallelism
-
-    return MuiHybridCache(
-        engine_config=engine_config,
-        config=config,
-        max_cache_len=max_cache_len,
-        device=device,
-        dtype=dtype,
-        tensor_parallelism=tensor_parallelism,
-        max_batch_size=max_batch_size,
-    )
-
-
-def grow_hybrid_cache_if_needed(
-    cache: MuiHybridCache, capacity: int, max_capacity: int
-) -> MuiHybridCache:
     cache.grow_cache(capacity=capacity, max_capacity=max_capacity)
     return cache
 

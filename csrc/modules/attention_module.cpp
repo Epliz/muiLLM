@@ -11,15 +11,19 @@ MuiLLMAttention::MuiLLMAttention(
   MuiLLMLinear* o_proj,
   int num_heads,
   int num_key_value_heads,
-  int head_dim
+  int head_dim,
+  int layer_index
 ) {
   this->engine = engine;
+
   this->rotary = rotary;
   this->o_proj = o_proj;
 
   this->num_heads = num_heads;
   this->num_key_value_heads = num_key_value_heads;
   this->head_dim = head_dim;
+
+  this->layer_index = layer_index;
 }
 
 torch::Tensor MuiLLMAttention::forward(
@@ -73,14 +77,18 @@ torch::Tensor MuiLLMAttention::rope_forward(
   }
 
   // rotary
-  auto [q_rot, k_rot, v_rot] = this->rotary->forward(
-    cache,
+  if (!cos_sin.has_value()) {
+    TORCH_CHECK(false, "need position embeddings to be passed");
+  }
+  auto cos_sin_tuple = cos_sin.value();
+
+  auto [q_rot, k_rot, v_rot] = cache->rope_update(
     q_res,
     k_res,
     v_res,
-    position_ids,
-    cos_sin,
-    cache_positions
+    cos_sin_tuple,
+    cache_positions,
+    this->layer_index
   );
 
   // attention
@@ -98,7 +106,8 @@ muillm_attention_module_ptr muillm_attention_module_init_trampoline(
   muillm_linear_module_ptr_t o_proj,
   int num_heads,
   int num_key_value_heads,
-  int head_dim
+  int head_dim,
+  int layer_index
 ) {
 
   MuiLLMAttention* m = new MuiLLMAttention(
@@ -107,7 +116,8 @@ muillm_attention_module_ptr muillm_attention_module_init_trampoline(
     o_proj.ptr,
     num_heads,
     num_key_value_heads,
-    head_dim
+    head_dim,
+    layer_index
   );
 
   muillm_attention_module_ptr_t ret;

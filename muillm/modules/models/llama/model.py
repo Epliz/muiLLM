@@ -21,7 +21,7 @@ from typing import List, Optional, Tuple, Union
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.memorymanagement.gc import trigger_gc
-from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
+from muillm.modules.rope.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.attention.sdpaattention import _ignore_causal_mask_sdpa
 from muillm.modules.decoder.decoder import MuiDecoderLayer
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
@@ -117,6 +117,15 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             self.post_init()
 
     def finalize_init(self):
+        # finalize initializations
+        self.embed_tokens.finalize_init()
+        self.rotary_emb.finalize_init()
+
+        for layer in self.layers:
+            layer.finalize_init()
+
+        # create the cpp module if possible
+
         if self.comms == None:
             # in the single GPU case we don't have comms, and we can't use the parallel decoder stack
             self.cpp_module = None

@@ -23,6 +23,8 @@ struct MuiLLMAttention: torch::nn::Module {
   int num_key_value_heads;
   int head_dim;
 
+  int layer_index;
+
   // methods
   MuiLLMAttention(
     muillm_engine_t* engine,
@@ -30,7 +32,8 @@ struct MuiLLMAttention: torch::nn::Module {
     MuiLLMLinear* o_proj,
     int num_heads,
     int num_key_value_heads,
-    int head_dim
+    int head_dim,
+    int layer_index
   );
 
   torch::Tensor rope_forward(
@@ -67,7 +70,8 @@ muillm_attention_module_ptr muillm_attention_module_init_trampoline(
   muillm_linear_module_ptr_t o_proj,
   int num_heads,
   int num_key_value_heads,
-  int head_dim
+  int head_dim,
+  int layer_index
 );
 
 // deinit

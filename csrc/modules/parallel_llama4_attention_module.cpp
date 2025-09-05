@@ -1,6 +1,5 @@
 #include "parallel_llama4_attention_module.h"
 
-#include "../rope/rotary.h"
 #include "../norm/qkl2norm.cuh"
 #include "../temperaturetuning/temperature_tuning.cuh"
 #include "hybrid_chunked_kvcache.h"
@@ -94,17 +93,6 @@ torch::Tensor MuiLLMParallelLlama4Attention::rope_forward(
     v_res = v.view({bsz, q_len, this->num_tp_key_value_heads, this->head_dim}).transpose(1, 2);
   }
 
-  if (this->use_rope) {
-    auto [q_rot, k_rot] = muillm_complex_rope_forward_no_cache(
-      q_res,
-      k_res,
-      position_embeds
-    );
-
-    q_res = q_rot;
-    k_res = k_rot;
-  }
-
   if (this->use_qk_norm) {
     auto [q_normalized, k_normalized] = muillm_qkl2norm_forward(
       q_res,
@@ -125,21 +113,35 @@ torch::Tensor MuiLLMParallelLlama4Attention::rope_forward(
     );
   }
 
-  // store in cache
-  if (cache->type != MUILLM_HYBRID_CHUNKED_KVCACHE) {
-    TORCH_CHECK(false, "expected a hybrid chunked cache");
+  if (this->use_rope) {
+    auto qkv_tuple = cache->complex_rope_update(
+      q_res,
+      k_res,
+      v_res,
+      position_embeds,
+      cache_positions,
+      this->layer_index
+    );
+    q_res = std::get<0>(qkv_tuple);
+    k_res = std::get<1>(qkv_tuple);
+    v_res = std::get<2>(qkv_tuple);
+  } else {
+    // store in cache
+    if (cache->type != MUILLM_HYBRID_CHUNKED_KVCACHE) {
+      TORCH_CHECK(false, "expected a hybrid chunked cache");
+    }
+
+    MuillmHybridChunkedKVCache* hybrid_cache = (MuillmHybridChunkedKVCache*) cache;
+    auto [k_out, v_out] = hybrid_cache->update(
+      k_res,
+      v_res,
+      cache_positions,
+      this->layer_index
+    );
+
+    k_res = k_out;
+    v_res = v_out;
   }
-
-  MuillmHybridChunkedKVCache* hybrid_cache = (MuillmHybridChunkedKVCache*) cache;
-  auto [k_out, v_out] = hybrid_cache->update(
-    k_res,
-    v_res,
-    cache_positions,
-    this->layer_index
-  );
-
-  k_res = k_out;
-  v_res = v_out;
 
 
   // attention

@@ -1,4 +1,4 @@
-from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
+from muillm.modules.rope.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.decoder.gemma3decoder import MuiGemma3DecoderLayer
 from muillm.modules.decoder.llama4decoder import MuiLlama4TextDecoderLayer
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer

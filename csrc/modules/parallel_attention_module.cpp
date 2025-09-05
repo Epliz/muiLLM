@@ -12,7 +12,8 @@ MuiLLMParallelAttention::MuiLLMParallelAttention(
   MuiLLMParallelLinear* o_proj,
   int num_tp_heads,
   int num_tp_key_value_heads,
-  int head_dim
+  int head_dim,
+  int layer_index
 ) {
   this->engine = engine;
   this->comm = comm;
@@ -22,6 +23,8 @@ MuiLLMParallelAttention::MuiLLMParallelAttention(
   this->num_tp_heads = num_tp_heads;
   this->num_tp_key_value_heads = num_tp_key_value_heads;
   this->head_dim = head_dim;
+
+  this->layer_index = layer_index;
 }
 
 torch::Tensor MuiLLMParallelAttention::forward(
@@ -75,14 +78,18 @@ torch::Tensor MuiLLMParallelAttention::rope_forward(
   }
 
   // rotary
-  auto [q_rot, k_rot, v_rot] = this->rotary->forward(
-    cache,
+  if (!cos_sin.has_value()) {
+    TORCH_CHECK(false, "need position embeddings to be passed");
+  }
+  auto cos_sin_tuple = cos_sin.value();
+
+  auto [q_rot, k_rot, v_rot] = cache->rope_update(
     q_res,
     k_res,
     v_res,
-    position_ids,
-    cos_sin,
-    cache_positions
+    cos_sin_tuple,
+    cache_positions,
+    this->layer_index
   );
 
   // attention
@@ -101,7 +108,8 @@ muillm_parallel_attention_module_ptr muillm_parallel_attention_module_init_tramp
   muillm_parallel_linear_module_ptr_t o_proj,
   int num_tp_heads,
   int num_tp_key_value_heads,
-  int head_dim
+  int head_dim,
+  int layer_index
 ) {
 
   MuiLLMParallelAttention* m = new MuiLLMParallelAttention(
@@ -111,7 +119,8 @@ muillm_parallel_attention_module_ptr muillm_parallel_attention_module_init_tramp
     o_proj.ptr,
     num_tp_heads,
     num_tp_key_value_heads,
-    head_dim
+    head_dim,
+    layer_index
   );
 
   muillm_parallel_attention_module_ptr_t ret;

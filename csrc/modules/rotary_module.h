@@ -29,17 +29,6 @@ struct MuillmRotaryEmbedding {
 
   ~MuillmRotaryEmbedding();
 
-  // output: q, k, v
-  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> forward(
-    MuillmKVCache* cache,
-    torch::Tensor& q_in,
-    torch::Tensor& k_in,
-    torch::Tensor& v_in,
-    torch::Tensor& position_ids,
-    std::optional<std::tuple<torch::Tensor, torch::Tensor>>& cos_sin,
-    torch::Tensor& cache_positions
-  );
-
   // output: cos, sin 
   std::tuple<torch::Tensor, torch::Tensor> compute_rotary_pos_emb(
     torch::Tensor& x,
@@ -63,18 +52,6 @@ muillm_rotary_embedding_module_ptr_t muillm_rotary_embedding_module_init_trampol
 // deinit
 void muillm_rotary_embedding_module_deinit_trampoline(
   muillm_rotary_embedding_module_ptr_t module_ptr
-);
-
-// forward
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> muillm_rotary_embedding_module_forward_trampoline(
-  muillm_rotary_embedding_module_ptr_t module_ptr,
-  muillm_kvcache_module_ptr_t cache,
-  torch::Tensor& q_in,
-  torch::Tensor& k_in,
-  torch::Tensor& v_in,
-  torch::Tensor& position_ids,
-  std::optional<std::tuple<torch::Tensor, torch::Tensor>>& cos_sin,
-  torch::Tensor& cache_positions
 );
 
 #endif /* __MUILLM_ROTARY_MODULE_H__ */

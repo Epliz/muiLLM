@@ -25,6 +25,8 @@ struct MuiLLMParallelAttention: torch::nn::Module {
   int num_tp_key_value_heads;
   int head_dim;
 
+  int layer_index;
+
   // methods
   MuiLLMParallelAttention(
     muillm_engine_t* engine,
@@ -33,7 +35,8 @@ struct MuiLLMParallelAttention: torch::nn::Module {
     MuiLLMParallelLinear* o_proj,
     int num_tp_heads,
     int num_tp_key_value_heads,
-    int head_dim
+    int head_dim,
+    int layer_index
   );
 
   torch::Tensor rope_forward(
@@ -71,7 +74,8 @@ muillm_parallel_attention_module_ptr muillm_parallel_attention_module_init_tramp
   muillm_parallel_linear_module_ptr_t o_proj,
   int num_tp_heads,
   int num_tp_key_value_heads,
-  int head_dim
+  int head_dim,
+  int layer_index
 );
 
 // deinit

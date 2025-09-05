@@ -3,8 +3,7 @@ import torch.nn as nn
 from typing import Callable, Optional, Tuple, Union
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.attention.rotaryembedding import apply_rotary_pos_emb
-from muillm.modules.kvcache.cache_utils import MuiHybridChunkedCache
+from muillm.modules.kvcache.cache_utils import MuiCache, MuiHybridChunkedCache
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
 from muillm.modules.norm.qkrmsnorm import MuiQKRMSNorm
@@ -16,6 +15,7 @@ from transformers.models.gemma3.modeling_gemma3 import (
     Gemma3Attention,
 )
 
+from muillm.modules.rope.ropeops import apply_rotary_pos_emb
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
 import muillm_ext
@@ -280,21 +280,33 @@ class MuiGemma3Attention(MuiModule):
 
                 query_states, key_states = self.qk_norm(query_states, key_states)
 
-                query_states, key_states = apply_rotary_pos_emb(
-                    query_states, key_states, cos, sin
-                )
+                cache_kwargs = {
+                    "sin": sin,
+                    "cos": cos,
+                    "cache_position": cache_position,
+                    "sliding_window": self.sliding_window,
+                }
 
-                if past_key_value is not None:
+                if isinstance(past_key_value, MuiCache):
                     # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                    cache_kwargs = {
-                        "sin": sin,
-                        "cos": cos,
-                        "cache_position": cache_position,
-                        "sliding_window": self.sliding_window,
-                    }
-                    key_states, value_states = past_key_value.update(
-                        key_states, value_states, self.layer_idx, cache_kwargs
+                    query_states, key_states, value_states = past_key_value.rope_update(
+                        query_states,
+                        key_states,
+                        value_states,
+                        position_embeddings,
+                        self.layer_idx,
+                        cache_kwargs,
                     )
+                else:
+                    query_states, key_states = apply_rotary_pos_emb(
+                        query_states, key_states, cos, sin
+                    )
+
+                    if past_key_value is not None:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        key_states, value_states = past_key_value.update(
+                            key_states, value_states, self.layer_idx, cache_kwargs
+                        )
 
                 attn_output = _MuiGemma3Attention.apply(
                     self.cpp_module,
@@ -319,32 +331,45 @@ class MuiGemma3Attention(MuiModule):
             query_states, key_states = self.qk_norm(query_states, key_states)
 
             cos, sin = position_embeddings
-            query_states, key_states = apply_rotary_pos_emb(
-                query_states, key_states, cos, sin
-            )
 
-            if past_key_value is not None:
+            cache_kwargs = {
+                "sin": sin,
+                "cos": cos,
+                "cache_position": cache_position,
+                "sliding_window": self.sliding_window,
+            }
+
+            if isinstance(past_key_value, MuiCache):
                 # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                cache_kwargs = {
-                    "sin": sin,
-                    "cos": cos,
-                    "cache_position": cache_position,
-                    "sliding_window": self.sliding_window,
-                }
-                key_states, value_states = past_key_value.update(
-                    key_states, value_states, self.layer_idx, cache_kwargs
+                query_states, key_states, value_states = past_key_value.rope_update(
+                    query_states,
+                    key_states,
+                    value_states,
+                    position_embeddings,
+                    self.layer_idx,
+                    cache_kwargs,
+                )
+            else:
+                query_states, key_states = apply_rotary_pos_emb(
+                    query_states, key_states, cos, sin
                 )
 
-                # Here we need to slice as we use a static cache by default, but FA2 does not support it
-                if (
-                    attention_mask is not None
-                    and self.config._attn_implementation == "flash_attention_2"
-                ):
-                    seq_len = attention_mask.shape[-1]
-                    key_states, value_states = (
-                        key_states[:, :, :seq_len, :],
-                        value_states[:, :, :seq_len, :],
+                if past_key_value is not None:
+                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                    key_states, value_states = past_key_value.update(
+                        key_states, value_states, self.layer_idx, cache_kwargs
                     )
+
+            # Here we need to slice as we use a static cache by default, but FA2 does not support it
+            if (
+                attention_mask is not None
+                and self.config._attn_implementation == "flash_attention_2"
+            ):
+                seq_len = attention_mask.shape[-1]
+                key_states, value_states = (
+                    key_states[:, :, :seq_len, :],
+                    value_states[:, :, :seq_len, :],
+                )
 
             attention_interface: Callable = eager_attention_forward
             if self.config._attn_implementation != "eager":
@@ -363,13 +388,6 @@ class MuiGemma3Attention(MuiModule):
             if attention_mask is not None:
                 # backwards compatibility
                 attention_mask = attention_mask.to(query_states)
-
-            # if self.layer_idx == 0:
-            #     print(f"query_states shape: {query_states.shape}")
-            #     print(f"key_states shape: {key_states.shape}")
-            #     print(f"value_states shape: {value_states.shape}")
-            #     if attention_mask is not None:
-            #         print(f"attention_mask shape: {attention_mask.shape}")
 
             attn_output, attn_weights = attention_interface(
                 self,

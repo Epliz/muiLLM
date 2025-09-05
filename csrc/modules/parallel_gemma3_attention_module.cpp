@@ -1,6 +1,5 @@
 #include "parallel_gemma3_attention_module.h"
 
-#include "../rope/rotary.h"
 #include "../norm/qkrmsnorm.cuh"
 #include "../temperaturetuning/temperature_tuning.cuh"
 #include "hybrid_chunked_kvcache.h"
@@ -104,35 +103,19 @@ torch::Tensor MuiLLMParallelGemma3Attention::rope_forward(
     k_res = k_normalized;
   }
 
-  {
-    auto [q_rot, k_rot] = muillm_rope_forward_no_cache(
-      undef_tensor, // no position ids
-      cos,
-      sin,
-      q_res,
-      k_res
-    );
+  auto cos_sin_tuple = std::make_tuple(cos, sin);
 
-    q_res = q_rot;
-    k_res = k_rot;
-  }
-
-  // store in cache
-  if (cache->type != MUILLM_HYBRID_CHUNKED_KVCACHE) {
-    TORCH_CHECK(false, "expected a hybrid chunked cache");
-  }
-
-  MuillmHybridChunkedKVCache* hybrid_cache = (MuillmHybridChunkedKVCache*) cache;
-  auto [k_out, v_out] = hybrid_cache->update(
+  auto qkv_tuple = cache->rope_update(
+    q_res,
     k_res,
     v_res,
+    cos_sin_tuple,
     cache_positions,
     this->layer_index
   );
-
-  k_res = k_out;
-  v_res = v_out;
-
+  q_res = std::get<0>(qkv_tuple);
+  k_res = std::get<1>(qkv_tuple);
+  v_res = std::get<2>(qkv_tuple);
 
   // attention
   return this->forward(q_res, k_res, v_res, m);

@@ -1,6 +1,8 @@
 #ifndef __MUILLM_SLIDING_KVCACHE_KERNELS_H__
 #define __MUILLM_SLIDING_KVCACHE_KERNELS_H__
 
+#include "../rope/rotary_position_layout.h"
+
 #include <torch/extension.h>
 #include <tuple>
 #include <stdint.h>
@@ -10,6 +12,31 @@
 // (in some cases the returned tensors might be bigger than the window size
 // e.g. large extra tokens coming in)
 std::tuple<at::Tensor, at::Tensor> muillm_sliding_kvcache_update(
+    torch::Tensor& k_in,
+    torch::Tensor& v_in,
+    torch::Tensor& k_cache,
+    torch::Tensor& v_cache,
+    torch::Tensor& cache_position,
+    uint64_t seen_tokens
+);
+
+// out: query, (narrowed) key, (narrowed) value
+std::tuple<at::Tensor, at::Tensor, at::Tensor> muillm_rope_forward_sliding_cache(
+    torch::Tensor& cos_cached,
+    torch::Tensor& sin_cached,
+    torch::Tensor& q_in,
+    torch::Tensor& k_in,
+    torch::Tensor& v_in,
+    torch::Tensor& k_cache,
+    torch::Tensor& v_cache,
+    torch::Tensor& cache_position,
+    uint64_t seen_tokens
+);
+
+// out: query, (narrowed) key, (narrowed) value
+std::tuple<at::Tensor, at::Tensor, at::Tensor> muillm_complex_rope_forward_sliding_cache(
+    torch::Tensor& position_embeds, // shape [B, T, embed_dim / 2, (2)] dtype complex float
+    torch::Tensor& q_in,
     torch::Tensor& k_in,
     torch::Tensor& v_in,
     torch::Tensor& k_cache,

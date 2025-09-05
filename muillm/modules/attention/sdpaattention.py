@@ -10,7 +10,7 @@ from transformers.models.mistral.modeling_mistral import MistralAttention
 from transformers.models.llama.modeling_llama import LlamaAttention
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.attention.rotaryembedding import apply_rotary_pos_emb
+from muillm.modules.rope.ropeops import apply_rotary_pos_emb
 from muillm.modules.attention.causaltransformerdecoding import (
     mui_causally_decode,
     mui_causally_decode_masked,
@@ -206,18 +206,33 @@ class MuiSdpaAttention(MuiBaseAttention):
                     bsz, self.num_key_value_heads, q_len, self.head_dim
                 )
 
-                # TODO: make sure it is restricted to seen tokens?
-                query_states, key_states, value_states = (
-                    self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+                cos, sin = position_embeddings
+                cache_kwargs = {
+                    "sin": sin,
+                    "cos": cos,
+                    "cache_position": cache_position,
+                }
+                if isinstance(past_key_value, MuiCache):
+                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                    query_states, key_states, value_states = past_key_value.rope_update(
                         query_states,
                         key_states,
-                        position_ids,
-                        position_embeddings,
                         value_states,
-                        past_key_value,
-                        cache_position,
+                        position_embeddings,
+                        self.layer_idx,
+                        cache_kwargs,
                     )
-                )
+                else:
+                    query_states, key_states = apply_rotary_pos_emb(
+                        query_states, key_states, cos, sin
+                    )
+
+                    if past_key_value is not None:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        key_states, value_states = past_key_value.update(
+                            key_states, value_states, self.layer_idx, cache_kwargs
+                        )
+
                 attn_output = _MuiAttention.apply(
                     self.cpp_module,
                     query_states,
@@ -237,18 +252,32 @@ class MuiSdpaAttention(MuiBaseAttention):
                 bsz, q_len, self.num_key_value_heads, self.head_dim
             ).transpose(1, 2)
 
-            # TODO: make sure it is restricted to seen tokens?
-            query_states, key_states, value_states = (
-                self.rotary_emb.apply_rotary_pos_emb_write_kv_cache(
+            cos, sin = position_embeddings
+            cache_kwargs = {
+                "sin": sin,
+                "cos": cos,
+                "cache_position": cache_position,
+            }
+            if isinstance(past_key_value, MuiCache):
+                # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                query_states, key_states, value_states = past_key_value.rope_update(
                     query_states,
                     key_states,
-                    position_ids,
-                    position_embeddings,
                     value_states,
-                    past_key_value,
-                    cache_position,
+                    position_embeddings,
+                    self.layer_idx,
+                    cache_kwargs,
                 )
-            )
+            else:
+                query_states, key_states = apply_rotary_pos_emb(
+                    query_states, key_states, cos, sin
+                )
+
+                if past_key_value is not None:
+                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                    key_states, value_states = past_key_value.update(
+                        key_states, value_states, self.layer_idx, cache_kwargs
+                    )
 
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)

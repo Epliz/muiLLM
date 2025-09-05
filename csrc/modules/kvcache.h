@@ -3,6 +3,8 @@
 
 #include "../engine.h"
 
+#include <torch/torch.h>
+
 typedef enum muillm_kvcache_type {
   MUILLM_NO_KVCACHE = 0,
   MUILLM_STATIC_KVCACHE,
@@ -40,6 +42,30 @@ struct MuillmKVCache {
     this->_seen_tokens = seen_tokens;
   }
 
+  virtual std::tuple<torch::Tensor, torch::Tensor> update(
+    torch::Tensor& key_states,
+    torch::Tensor& value_states,
+    torch::Tensor& cache_positions,
+    int layer_index
+  ) = 0;
+
+  virtual std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rope_update(
+    torch::Tensor& query_states,
+    torch::Tensor& key_states,
+    torch::Tensor& value_states,
+    std::tuple<torch::Tensor, torch::Tensor>& position_embeddings,
+    torch::Tensor& cache_positions,
+    int layer_index
+  ) = 0;
+
+  virtual std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> complex_rope_update(
+    torch::Tensor& query_states,
+    torch::Tensor& key_states,
+    torch::Tensor& value_states,
+    torch::Tensor& position_embeddings,
+    torch::Tensor& cache_positions,
+    int layer_index
+  ) = 0;
 };
 
 // needed because Pybind11 can't seem to be able to deal with opaque pointers
