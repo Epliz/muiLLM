@@ -6,7 +6,8 @@
 typedef enum muillm_gpu_family {
   MUILLM_GPU_FAMILY_UNKNOWN = 0,
   MUILLM_GPU_FAMILY_RDNA,
-  MUILLM_GPU_FAMILY_CDNA
+  MUILLM_GPU_FAMILY_CDNA,
+  MUILLM_GPU_FAMILY_UDNA
 } muillm_gpu_family_t;
 
 typedef enum muillm_gpu_arch {
@@ -18,6 +19,7 @@ typedef enum muillm_gpu_arch {
   MUILLM_GPU_ARCH_MI100,
   MUILLM_GPU_ARCH_MI200,
   MUILLM_GPU_ARCH_MI300,
+  MUILLM_GPU_ARCH_MI350,
   MUILLM_GPU_ARCH_MI400
 } muillm_gpu_arch_t;
 
