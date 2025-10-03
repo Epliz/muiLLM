@@ -3574,6 +3574,10 @@ class PyTorchAllToAll:
         )
         return expert_num_tokens, expert_x, expert_meta
 
+    def compute(self, expert_num_tokens: torch.Tensor, expert_x: torch.Tensor):
+        expert_y = self.comms.compute(expert_num_tokens, expert_x)
+        return expert_y
+
     def _combine_comms(
         self,
         out_tokens: torch.Tensor,  # output, (max num tokens, token dim)
@@ -3600,7 +3604,13 @@ def custom_kernel(data: input_t) -> output_t:
     ata = PyTorchAllToAll(cfg, rank, world_size)
 
     expert_num, expert_x, expert_meta = ata.dispatch(rank_data.x, rank_data.indices)
-    expert_y = expert_x.to(cfg.out_dtype) * (1 + rank)
+
+    if ata.comms is not None:
+        # use the custom kernel
+        expert_y = ata.compute(expert_num, expert_x)
+    else:
+        expert_y = expert_x.to(cfg.out_dtype) * (1 + rank)
+
     y = torch.zeros(
         cfg.max_num_tokens,
         cfg.hidden_dim,
