@@ -3399,7 +3399,16 @@ class PyTorchAllToAll:
         self.comms = get_global_all2all_comm(rank, world_size)
 
     # ---------- dispatch ----------
+
     def dispatch(self, dp_x: torch.Tensor, indices: torch.Tensor):
+        if self.comms is not None:
+            return self.comms.dispatch(
+                dp_x, indices, self.num_local_experts, self.max_recv
+            )
+        else:
+            return self._dispatch_no_comms(dp_x, indices)
+
+    def _dispatch_no_comms(self, dp_x: torch.Tensor, indices: torch.Tensor):
         device = dp_x.device
         cfg = self.cfg
 
