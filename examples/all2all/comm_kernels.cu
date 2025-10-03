@@ -178,12 +178,16 @@ void __global__ all2all_dispatch_compute_send_counts_kernel(
   // counters for the different ranks
   uint32_t* counters,
   // local counter to clear for next use
-  uint32_t* next_local_counters,
+  uint32_t* next_counters,
   int num_local_experts,
   int total_send,
   int local_size,
   int local_rank
 ) {
+  if (local_rank == 0 && threadIdx.x < local_size) {
+    // clear the counters for the next use
+    next_counters[threadIdx.x] = 0;
+  }
 
   // each thread handles one token expert
   for (int i = threadIdx.x; i < total_send; i += THREADS_PER_BLOCK) {
@@ -191,11 +195,6 @@ void __global__ all2all_dispatch_compute_send_counts_kernel(
     int32_t dst_expert = indices[i];
     int32_t dst_rank = dst_expert / num_local_experts;
     atomicAdd((uint32_t*)&send_counts[dst_rank], 1);
-  }
-
-  if (local_rank == 0 && threadIdx.x < local_size) {
-    // clear the counters for the next use
-    next_local_counters[threadIdx.x] = 0;
   }
 
   __syncthreads();
@@ -217,7 +216,7 @@ void all2all_dispatch_compute_send_counts(
     // counters for the different ranks
     uint32_t* counters,
     // local counter to clear for next use
-    uint32_t* next_local_counters,
+    uint32_t* next_counters,
     int num_local_experts,
     int num_tokens,
     int num_experts_per_token,
@@ -235,7 +234,7 @@ void all2all_dispatch_compute_send_counts(
     send_counts,
     send_offsets,
     counters,
-    next_local_counters,
+    next_counters,
     num_local_experts,
     total_send,
     local_size,
@@ -776,12 +775,16 @@ void __global__ all2all_combine_compute_send_counts_kernel(
     // counters for the different ranks
     uint32_t* counters,
     // local counter to clear for next use
-    uint32_t* next_local_counters,
+    uint32_t* next_counters,
     int num_local_experts,
     int max_recv,
     int local_size,
     int local_rank
 ) {
+  if (local_rank == 0 && threadIdx.x < local_size) {
+    // clear the counters for the next use
+    next_counters[threadIdx.x] = 0;
+  }
 
   // each thread handles one token expert
   for (int local_expert_idx = 0; local_expert_idx < num_local_experts; local_expert_idx++) {
@@ -794,11 +797,6 @@ void __global__ all2all_combine_compute_send_counts_kernel(
       int32_t dst_rank = local_expert_meta[i * META_DIM]; // dst_rank
       atomicAdd((uint32_t*)&send_counts[dst_rank], 1);
     }
-  }
-
-  if (local_rank == 0 && threadIdx.x < local_size) {
-    // clear the counters for the next use
-    next_local_counters[threadIdx.x] = 0;
   }
 
   __syncthreads();
@@ -821,7 +819,7 @@ void all2all_combine_compute_send_counts(
     // counters for the different ranks
     uint32_t* counters,
     // local counter to clear for next use
-    uint32_t* next_local_counters,
+    uint32_t* next_counters,
     int num_local_experts,
     int max_recv,
     int local_size,
@@ -838,7 +836,7 @@ void all2all_combine_compute_send_counts(
     send_counts,
     send_offsets,
     counters,
-    next_local_counters,
+    next_counters,
     num_local_experts,
     max_recv,
     local_size,

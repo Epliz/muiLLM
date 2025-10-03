@@ -813,7 +813,7 @@ static muillm_comm_error_t __mui_gpu_barrier(
   hipStream_t stream
 );
 
-#define MUILLM_COMM_INITIAL_BUFFER_CAPACITY (1024 * 1024) // 1MiB
+#define MUILLM_COMM_INITIAL_BUFFER_CAPACITY (256 * 1024 * 1024) // 256MiB
 
 static muillm_comm_error_t __free_buffer_set(
   muillm_comm_p2p_t* comm,
@@ -942,6 +942,8 @@ static muillm_comm_error_t __ensure_buffer_set_capacity(
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
 
+  std::cout<<"rank "<<local_rank<<" reallocating buffers for capacity "<<capacity<<"..."<<std::endl;
+
   muillm_comm_error_t error;
 
   // we will import the memory mappings for that specific GPU
@@ -954,16 +956,9 @@ static muillm_comm_error_t __ensure_buffer_set_capacity(
     return error;
   }
 
-  // allocate new buffers
-  capacity = __next_power_of_2(capacity);
-
-  if ((error = __allocate_shared_gpu_mem(comm, capacity, (void**)buffer_set->buffers)) != MUILLM_COMM_SUCCESS) {
-    return error;
-  }
-
-    // allocate counters memory
-    // we need it to be on the CPU side so that there is no coherency issues between GPUs
-    // (need correct fine-grained atomic operations)
+  // allocate counters memory
+  // we need it to be on the CPU side so that there is no coherency issues between GPUs
+  // (need correct fine-grained atomic operations)
   __allocate_locked_shared_cpu_mem(
     comm,
     sizeof(uint64_t) * MUILLM_MAX_GPUS, // alloc 8 bytes even though we use only 4
@@ -971,12 +966,24 @@ static muillm_comm_error_t __ensure_buffer_set_capacity(
     (void**) &buffer_set->counters
   );
 
-  if ((error = __allocate_shared_gpu_mem(comm, sizeof(uint32_t), (void**)buffer_set->counters)) != MUILLM_COMM_SUCCESS) {
+  // initialize the counters to 0
+  if (local_rank == 0) {
+    // the counters are shared, so only one rank needs to initialize them
+    // __allocate_shared_gpu_mem after will guarantee all ranks see the updated value
+    if (hipMemset(buffer_set->counters, 0, sizeof(uint64_t) * MUILLM_MAX_GPUS) != hipSuccess) {
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  }
+
+  // allocate new buffers
+  capacity = __next_power_of_2(capacity);
+
+  if ((error = __allocate_shared_gpu_mem(comm, capacity, (void**)buffer_set->buffers)) != MUILLM_COMM_SUCCESS) {
     return error;
   }
 
-  // initialize the counter to 0
-  if (hipMemset(buffer_set->counters, 0, sizeof(uint32_t) * MUILLM_MAX_GPUS) != hipSuccess) {
+  // synchronize the device
+  if (hipDeviceSynchronize() != hipSuccess) {
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
@@ -1180,7 +1187,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
 
   // by default, do not skip the cache flush
   // but MI300 and successors don't need it apparently
-  comm->cant_skip_cache_flush_event = true; // comm->gpu_info->arch < MUILLM_GPU_ARCH_MI300;
+  comm->cant_skip_cache_flush_event = comm->gpu_info->arch < MUILLM_GPU_ARCH_MI300;
 
   // allocate cache flush event
   if (hipEventCreateWithFlags(&comm->cache_flush_event, hipEventDisableTiming | hipEventReleaseToSystem) != hipSuccess) {
@@ -1489,8 +1496,15 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
     TORCH_CHECK(false, "an error happened when getting buffer set");
   }
 
+  //
+  // We wait for all the GPUs to be done with sending data
+  //
+  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when doing barrier");
+  }
+
   uint32_t* counters = (uint32_t*)buffer_set->counters;
-  uint32_t* next_local_counters = (uint32_t*) next_buffer_set->counters;
+  uint32_t* next_counters = (uint32_t*) next_buffer_set->counters;
 
   all2all_dispatch_compute_send_counts(
     stream,
@@ -1498,7 +1512,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
     (uint32_t*)send_counts.data_ptr(),
     (uint32_t*)send_offsets.data_ptr(),
     counters,
-    next_local_counters,
+    next_counters,
     num_local_experts,
     num_tokens,
     num_experts_per_token,
@@ -1721,7 +1735,7 @@ void all2all_combine_compute_send_counts(
     // counters for the different ranks
     uint32_t* counters,
     // local counter to clear for next use
-    uint32_t* next_local_counters,
+    uint32_t* next_counters,
     int num_local_experts,
     int max_recv,
     int local_size,
@@ -1795,7 +1809,7 @@ void all2all_combine_unpack_fp16(
 );
 
 // combine
-torch::Tensor all2all_comm_combine(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_combine(
   void* comms,
   torch::Tensor& weights, // shape [num_tokens, experts_per_token]
   torch::Tensor& expert_meta, // shape [num_local_experts, max_recv, meta_dim] (expert_id, src_rank, src_token_id, topk_offset)
@@ -1895,8 +1909,15 @@ torch::Tensor all2all_comm_combine(
     TORCH_CHECK(false, "an error happened when getting buffer set");
   }
 
+  //
+  // We wait for all the GPUs to be done with sending data
+  //
+  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when doing barrier");
+  }
+
   uint32_t* counters = (uint32_t*)buffer_set->counters;
-  uint32_t* next_local_counters = (uint32_t*) next_buffer_set->counters;
+  uint32_t* next_counters = (uint32_t*) next_buffer_set->counters;
   
   all2all_combine_compute_send_counts(
     stream,
@@ -1905,7 +1926,7 @@ torch::Tensor all2all_comm_combine(
     (uint32_t*) send_counts.data_ptr(),
     (uint32_t*) send_offsets.data_ptr(),
     counters,
-    next_local_counters,
+    next_counters,
     num_local_experts,
     max_recv,
     local_size,
@@ -2017,7 +2038,8 @@ torch::Tensor all2all_comm_combine(
     TORCH_CHECK(false, "Unsupported data type");
   }
 
-  return out_tokens;
+  // return tuple with send_counts, send_offsets, out_tokens
+  return std::make_tuple(send_counts, send_offsets, out_tokens);
 }
 """
 
@@ -2202,12 +2224,16 @@ void __global__ all2all_dispatch_compute_send_counts_kernel(
   // counters for the different ranks
   uint32_t* counters,
   // local counter to clear for next use
-  uint32_t* next_local_counters,
+  uint32_t* next_counters,
   int num_local_experts,
   int total_send,
   int local_size,
   int local_rank
 ) {
+  if (local_rank == 0 && threadIdx.x < local_size) {
+    // clear the counters for the next use
+    next_counters[threadIdx.x] = 0;
+  }
 
   // each thread handles one token expert
   for (int i = threadIdx.x; i < total_send; i += THREADS_PER_BLOCK) {
@@ -2215,11 +2241,6 @@ void __global__ all2all_dispatch_compute_send_counts_kernel(
     int32_t dst_expert = indices[i];
     int32_t dst_rank = dst_expert / num_local_experts;
     atomicAdd((uint32_t*)&send_counts[dst_rank], 1);
-  }
-
-  if (local_rank == 0 && threadIdx.x < local_size) {
-    // clear the counters for the next use
-    next_local_counters[threadIdx.x] = 0;
   }
 
   __syncthreads();
@@ -2241,7 +2262,7 @@ void all2all_dispatch_compute_send_counts(
     // counters for the different ranks
     uint32_t* counters,
     // local counter to clear for next use
-    uint32_t* next_local_counters,
+    uint32_t* next_counters,
     int num_local_experts,
     int num_tokens,
     int num_experts_per_token,
@@ -2259,7 +2280,7 @@ void all2all_dispatch_compute_send_counts(
     send_counts,
     send_offsets,
     counters,
-    next_local_counters,
+    next_counters,
     num_local_experts,
     total_send,
     local_size,
@@ -2800,12 +2821,16 @@ void __global__ all2all_combine_compute_send_counts_kernel(
     // counters for the different ranks
     uint32_t* counters,
     // local counter to clear for next use
-    uint32_t* next_local_counters,
+    uint32_t* next_counters,
     int num_local_experts,
     int max_recv,
     int local_size,
     int local_rank
 ) {
+  if (local_rank == 0 && threadIdx.x < local_size) {
+    // clear the counters for the next use
+    next_counters[threadIdx.x] = 0;
+  }
 
   // each thread handles one token expert
   for (int local_expert_idx = 0; local_expert_idx < num_local_experts; local_expert_idx++) {
@@ -2818,11 +2843,6 @@ void __global__ all2all_combine_compute_send_counts_kernel(
       int32_t dst_rank = local_expert_meta[i * META_DIM]; // dst_rank
       atomicAdd((uint32_t*)&send_counts[dst_rank], 1);
     }
-  }
-
-  if (local_rank == 0 && threadIdx.x < local_size) {
-    // clear the counters for the next use
-    next_local_counters[threadIdx.x] = 0;
   }
 
   __syncthreads();
@@ -2845,7 +2865,7 @@ void all2all_combine_compute_send_counts(
     // counters for the different ranks
     uint32_t* counters,
     // local counter to clear for next use
-    uint32_t* next_local_counters,
+    uint32_t* next_counters,
     int num_local_experts,
     int max_recv,
     int local_size,
@@ -2862,7 +2882,7 @@ void all2all_combine_compute_send_counts(
     send_counts,
     send_offsets,
     counters,
-    next_local_counters,
+    next_counters,
     num_local_experts,
     max_recv,
     local_size,
@@ -3344,13 +3364,17 @@ class All2AllComm:
         torch.Tensor,
     ]:
         # returns (expert_num_tokens, expert_x, expert_meta)
-        return self.comm_kernels.all2all_comm_dispatch(
-            self.comms,
-            dp_x,
-            indices,
-            num_local_experts,
-            max_recv,
+        expert_num_tokens, expert_x, expert_meta = (
+            self.comm_kernels.all2all_comm_dispatch(
+                self.comms,
+                dp_x,
+                indices,
+                num_local_experts,
+                max_recv,
+            )
         )
+
+        return expert_num_tokens, expert_x, expert_meta
 
     def compute(self, expert_num_tokens: torch.Tensor, expert_x: torch.Tensor):
         return self.comm_kernels.all2all_compute(expert_num_tokens, expert_x, self.rank)
@@ -3498,6 +3522,33 @@ class PyTorchAllToAll:
         expert_meta: torch.Tensor,  # input
         expert_y: torch.Tensor,  # input, (num_local_experts, max_num_tokens * num_dp, token_dim)
         expert_num_tokens: torch.Tensor,
+    ):
+        if self.comms is not None:
+            send_counts, send_offsets, out_tokens = self._combine_comms(
+                out_tokens=out_tokens,
+                weights=weights,
+                expert_meta=expert_meta,
+                expert_y=expert_y,
+                expert_num_tokens=expert_num_tokens,
+            )
+
+            return out_tokens
+        else:
+            return self._combine_no_comms(
+                out_tokens=out_tokens,
+                weights=weights,
+                expert_meta=expert_meta,
+                expert_y=expert_y,
+                expert_num_tokens=expert_num_tokens,
+            )
+
+    def _combine_no_comms(
+        self,
+        out_tokens: torch.Tensor,  # output, (max num tokens, token dim)
+        weights: torch.Tensor,  # topk weight
+        expert_meta: torch.Tensor,  # input
+        expert_y: torch.Tensor,  # input, (num_local_experts, max_num_tokens * num_dp, token_dim)
+        expert_num_tokens: torch.Tensor,
     ):  # input
         device = out_tokens.device
         cfg = self.cfg
@@ -3612,11 +3663,18 @@ def custom_kernel(data: input_t) -> output_t:
 
     ata = PyTorchAllToAll(cfg, rank, world_size)
 
-    expert_num, expert_x, expert_meta = ata.dispatch(rank_data.x, rank_data.indices)
+    # Dispatch seems to work with kernels
+    expert_num_tokens, expert_x, expert_meta = ata.dispatch(
+        dp_x=rank_data.x, indices=rank_data.indices
+    )
 
     if ata.comms is not None:
         # use the custom kernel
-        expert_y = ata.compute(expert_num, expert_x)
+        # Compute seems to work with kernels
+        expert_y = ata.compute(
+            expert_num_tokens=expert_num_tokens,
+            expert_x=expert_x,
+        )
     else:
         expert_y = expert_x.to(cfg.out_dtype) * (1 + rank)
 
@@ -3627,6 +3685,13 @@ def custom_kernel(data: input_t) -> output_t:
         device=rank_data.x.device,
     )
 
-    ata.combine(y, rank_data.weights, expert_meta, expert_y, expert_num)
+    # Combine doesn't work with kernels
+    y = ata.combine(
+        out_tokens=y,
+        weights=rank_data.weights,
+        expert_meta=expert_meta,
+        expert_y=expert_y,
+        expert_num_tokens=expert_num_tokens,
+    )
 
     return y[: rank_data.num_tokens]
