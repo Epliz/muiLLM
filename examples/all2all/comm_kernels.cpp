@@ -1147,7 +1147,6 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   if (muillm_detect_gpu_properties(local_rank, gpu_info) != MUILLM_SUCCESS) {
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
-  std::cout<<"rank "<<local_rank<<" detected gpu properties"<<std::endl;
 
   comm->gpu_info = gpu_info;
 
@@ -1166,7 +1165,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
 
   // by default, do not skip the cache flush
   // but MI300 and successors don't need it apparently
-  comm->cant_skip_cache_flush_event = comm->gpu_info->arch < MUILLM_GPU_ARCH_MI300;
+  comm->cant_skip_cache_flush_event = true; // comm->gpu_info->arch < MUILLM_GPU_ARCH_MI300;
 
   // allocate cache flush event
   if (hipEventCreateWithFlags(&comm->cache_flush_event, hipEventDisableTiming | hipEventReleaseToSystem) != hipSuccess) {
@@ -1182,15 +1181,12 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   );
 
   if (comm->signal_host == nullptr || comm->signal == nullptr) {
-    std::cout<<"rank "<<local_rank<<" failed to allocate shared CPU memory"<<std::endl;
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
   // initialize to 0
   if (hipMemset(comm->signal, 0, sizeof(uint64_t)) != hipSuccess) {
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
-
-  std::cout<<"rank "<<local_rank<<" allocated shared CPU mem"<<std::endl;
 
   // initialize buffer sets
   if ((muillm_error = __init_buffer_set(comm, &comm->first_buffers, stream)) != MUILLM_COMM_SUCCESS) {
@@ -1200,7 +1196,6 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   if ((muillm_error = __init_buffer_set(comm, &comm->second_buffers, stream)) != MUILLM_COMM_SUCCESS) {
     return muillm_error;
   }
-  std::cout<<"rank "<<local_rank<<" initialized buffers"<<std::endl;
 
   // set the device
   if (hipSetDevice(local_rank) != hipSuccess) {
@@ -1211,12 +1206,10 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
-  std::cout<<"rank "<<local_rank<<" synced"<<std::endl;
   // make sure every GPU has opened the memory before returning
   if ((muillm_error =__local_socket_barrier(comm)) != MUILLM_COMM_SUCCESS) {
     return muillm_error;
   }
-  std::cout<<"rank "<<local_rank<<" barrier passed"<<std::endl;
 
   // return the comm object
   *comm_ptr = comm;
@@ -1288,7 +1281,6 @@ void* all2all_comm_init(int world_size, int rank) {
     TORCH_CHECK(false, "an error happened when opening local socket");
     return (void*) nullptr;
   }
-  std::cout<<"rank "<<local_rank<<" local socket established"<<std::endl;
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -1303,10 +1295,7 @@ void* all2all_comm_init(int world_size, int rank) {
     stream
   );
 
-  std::cout<<"rank "<<local_rank<<" p2p comm initialized"<<std::endl;
   TORCH_CHECK(muillm_error == MUILLM_COMM_SUCCESS, "an error happened when initializing mui comm");
-
-  std::cout<<"rank "<<local_rank<<" mui comm initialized"<<std::endl;
 
   return (void*) comm_ptr;
 }
