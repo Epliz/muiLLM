@@ -196,6 +196,7 @@ def run(rank, world_size, shape, run_type):
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
             for _ in range(num_runs):
                 output = custom_kernel(data)
+            torch.cuda.synchronize()
 
         prof.export_chrome_trace(
             f"trace_all2all_rank{rank}_num_experts{shape['num_experts']}_experts_per_token{shape['experts_per_token']}_hidden_dim{shape['hidden_dim']}_max_num_tokens{shape['max_num_tokens']}_world_size{shape['world_size']}.json"
@@ -228,6 +229,8 @@ def init_process(rank, size, shape, run_type, fn, backend="nccl"):
         fn(rank, size, shape, run_type)
         torch.cuda.synchronize()
         print("completed", flush=True)
+    except Exception as e:
+        print(f"(rank {rank}) Caught exception: {e}", flush=True)
     finally:
         dist.destroy_process_group()
 

@@ -1303,6 +1303,10 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
 
   // we need to synchronize the ranks and block the  CPU so that we can deallocate
   // the previous receive buffers
+  // synchronize to make sure no GPU is going to reference the previous memory
+  if (hipDeviceSynchronize() != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
 
   // gpu barrier
   if ((error = __mui_gpu_barrier(comm, /*stream*/ 0)) != MUILLM_COMM_SUCCESS) {
