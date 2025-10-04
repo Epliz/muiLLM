@@ -173,7 +173,7 @@ def run(rank, world_size, shape, run_type):
             _ = custom_kernel(data)
 
         # benchmark
-        elapsed_time = time_func(
+        _, elapsed_time = time_func(
             lambda: benchmark(custom_kernel, data, num_runs=num_runs)
         )
 

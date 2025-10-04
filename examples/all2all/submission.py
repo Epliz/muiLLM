@@ -3594,6 +3594,36 @@ def destroy_global_all2all_comm():
         _global_all2all_comm = None
 
 
+_monkey_patched = False
+
+
+def apply_monkey_patch():
+    # For some reason our comms get corrupted due to the way the benchmarking/testing
+    # harness is written (probably destroy_process_group closes a lot of HIP resources including the events we use)
+    # so we hook into destroy_process_group to close our comms
+
+    global _monkey_patched
+
+    if _monkey_patched:
+        return
+
+    import torch.distributed as dist
+
+    # Save the original function
+    _original_destroy = dist.destroy_process_group
+
+    def custom_destroy_process_group(*args, **kwargs):
+        print("destroying comms")
+        destroy_global_all2all_comm()
+
+        # Call the original destroy
+        _original_destroy(*args, **kwargs)
+
+    # Monkey-patch it
+    dist.destroy_process_group = custom_destroy_process_group
+    _monkey_patched = True
+
+
 # ---------------- All2All pytorch impl ----------------
 class PyTorchAllToAll:
     META_DIM = 4  # global_exp, src_rank, src_token, src_k
@@ -3608,6 +3638,8 @@ class PyTorchAllToAll:
         self.max_recv = cfg.max_num_tokens * world_size
 
         self.comms = get_global_all2all_comm(rank, world_size)
+
+        apply_monkey_patch()
 
     # ---------- dispatch ----------
 
@@ -3880,7 +3912,5 @@ def custom_kernel(data: input_t) -> output_t:
         expert_y=expert_y,
         expert_num_tokens=expert_num_tokens,
     )
-
-    destroy_global_all2all_comm()
 
     return y[: rank_data.num_tokens]
