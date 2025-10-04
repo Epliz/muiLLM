@@ -251,6 +251,10 @@ muillm_comm_error_t __open_local_socket(
     muillm_comm_local_socket_t* local_socket
 );
 
+muillm_comm_error_t __close_local_socket(
+    muillm_comm_local_socket_t* local_socket
+);
+
 muillm_comm_error_t __local_socket_barrier(
     muillm_comm_t* comm
 );
@@ -450,6 +454,45 @@ muillm_comm_error_t __open_local_socket(
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t __close_local_socket(
+    muillm_comm_local_socket_t* local_socket
+) {
+/* 
+  if (local_socket->client_to_server_fd != -1) {
+    struct linger ling = {0, 0};
+    setsockopt(local_socket->client_to_server_fd, SOL_SOCKET, SO_LINGER, &ling, sizeof(ling));
+
+    close(local_socket->client_to_server_fd);
+    local_socket->client_to_server_fd = -1;
+  }
+  std::cout<<"closed client to server fd"<<std::endl;
+
+  if (local_socket->server_to_client_fds != nullptr) {
+    for (int r = 0; r < MUILLM_COMM_MAX_GPUS; r++) {
+      if (local_socket->server_to_client_fds[r] != -1) {
+        struct linger ling = {0, 0};
+        setsockopt(local_socket->server_to_client_fds[r], SOL_SOCKET, SO_LINGER, &ling, sizeof(ling));
+
+        close(local_socket->server_to_client_fds[r]);
+        local_socket->server_to_client_fds[r] = -1;
+      }
+    }
+    delete[] local_socket->server_to_client_fds;
+    local_socket->server_to_client_fds = nullptr;
+  }
+  std::cout<<"closed server to client fds"<<std::endl;
+
+  if (local_socket->server_fd != -1) {
+    struct linger ling = {0, 0};
+    setsockopt(local_socket->server_fd, SOL_SOCKET, SO_LINGER, &ling, sizeof(ling));
+
+    close(local_socket->server_fd);
+    local_socket->server_fd = -1;
+  }
+  std::cout<<"closed server fd"<<std::endl;
+ */
+  return MUILLM_COMM_SUCCESS;
+}
 
 // do a barrier using the local socket
 muillm_comm_error_t __local_socket_barrier(
@@ -767,6 +810,10 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
     hipStream_t stream
 );
 
+muillm_comm_error_t muillm_comm_p2p_destroy_comm(
+    muillm_comm_p2p_t* comm
+);
+
 muillm_comm_error_t muillm_comm_p2p_get_buffers(
   muillm_comm_p2p_t* comm,
   size_t count,
@@ -802,7 +849,8 @@ static muillm_comm_error_t __mui_gpu_barrier(
 
 static muillm_comm_error_t __free_buffer_set(
   muillm_comm_p2p_t* comm,
-  muillm_comm_p2p_buffer_set_t* buffer_set
+  muillm_comm_p2p_buffer_set_t* buffer_set,
+  bool sync = true
 ) {
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
@@ -818,9 +866,11 @@ static muillm_comm_error_t __free_buffer_set(
   }
 
   // make sure all CPUs have synchronized their GPUs
-  if ((error =__local_socket_barrier(comm)) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when doing barrier");
-    return error;
+  if (sync) {
+    if ((error =__local_socket_barrier(comm)) != MUILLM_COMM_SUCCESS) {
+      TORCH_CHECK(false, "an error happened when doing barrier");
+      return error;
+    }
   }
 
   // close all the previous mappings
@@ -836,9 +886,11 @@ static muillm_comm_error_t __free_buffer_set(
   }
 
   // make sure all memory mappings are closed before we free the memory
-  if ((error =__local_socket_barrier(comm)) != MUILLM_COMM_SUCCESS) {
-    return error;
-  }
+  if (sync) {
+    if ((error =__local_socket_barrier(comm)) != MUILLM_COMM_SUCCESS) {
+      return error;
+    }
+}
 
   // deallocate the previous memory
   if (buffer_set->buffers[local_rank] != nullptr) {
@@ -1224,6 +1276,90 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t muillm_comm_p2p_destroy_comm(
+    muillm_comm_p2p_t* comm
+) {
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  std::cout<<"rank "<<local_rank<<" destroying comm..."<<std::endl;
+
+  muillm_comm_error_t error;
+
+  // we need to synchronize the ranks and block the  CPU so that we can deallocate
+  // the previous receive buffers
+
+  // gpu barrier
+  if ((error = __mui_gpu_barrier(comm, /*stream*/ 0)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to do gpu barrier"<<std::endl;
+    return error;
+  }
+
+  // synchronize to make sure no GPU is going to reference the previous memory
+  if (hipDeviceSynchronize() != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  std::cout<<"rank "<<local_rank<<" socket barrier ..."<<std::endl;
+
+  // make sure all CPUs have synchronized their GPUs
+  if ((error =__local_socket_barrier(comm)) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when doing barrier");
+    return error;
+  }
+
+  std::cout<<"rank "<<local_rank<<" freeing buffers..."<<std::endl;
+  // free buffer sets
+  if ((error = __free_buffer_set(comm, comm->first_buffers, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free first buffer set"<<std::endl;
+    return error;
+  }
+  delete comm->first_buffers;
+
+  if ((error = __free_buffer_set(comm, comm->second_buffers, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free second buffer set"<<std::endl;
+    return error;
+  }
+  delete comm->second_buffers;
+
+  // free signal memory
+  std::cout<<"rank "<<local_rank<<" freeing signal memory..."<<std::endl;
+  if (comm->signal_host != nullptr) {
+    __deallocate_locked_shared_cpu_mem(
+      comm,
+      comm->signal_host
+    );
+    comm->signal_host = nullptr;
+    comm->signal = nullptr;
+  }
+
+  // destroy cache flush event
+  if (hipEventDestroy(comm->cache_flush_event) != hipSuccess) {
+    std::cout<<"rank "<<local_rank<<" failed to destroy cache flush event"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // close local socket
+  std::cout<<"rank "<<local_rank<<" closing local socket..."<<std::endl;
+  if (__close_local_socket((muillm_comm_local_socket_t*) comm) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to close local socket"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // delete gpu info
+  if (comm->gpu_info != nullptr) {
+    delete comm->gpu_info;
+    comm->gpu_info = nullptr;
+  }
+
+  std::cout<<"rank "<<local_rank<<" done destroying comm."<<std::endl;
+
+  // delete the comm object
+  delete comm;
+
+  return MUILLM_COMM_SUCCESS;
+}
+
 muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal);
 
 muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no);
@@ -1235,6 +1371,14 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
   hipError_t hip_error;
   muillm_comm_error_t muillm_error;
 
+  if (hipDeviceSynchronize() != hipSuccess) {
+    std::cout<<"rank "<<local_rank<<" gpu barrier failed because hipDeviceSynchronize failed"<<std::endl;
+    hipError_t err = hipGetLastError();
+    const char* errStr = hipGetErrorString(err);
+    std::cout<<"Last HIP error: "<<errStr<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
   if (comm->signal != nullptr) {
     comm->signal_seq_no += local_size;
     uint64_t seq_no = comm->signal_seq_no;
@@ -1244,15 +1388,21 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
       // on MI100, we get a crash if not putting this event here
       // record an event to flush caches
       if (hipEventRecord(comm->cache_flush_event, stream) != hipSuccess) {
+        std::cout<<"rank "<<local_rank<<" gpu barrier failed because hipEventRecord failed"<<std::endl;
+        hipError_t err = hipGetLastError();
+        const char* errStr = hipGetErrorString(err);
+        std::cout<<"Last HIP error: "<<errStr<<std::endl;
         return MUILLM_COMM_UNKNOWN_ERROR;
       }
     }
 
     // write the values
     if ((muillm_error = __mui_stream_inc_wait_value(stream, comm->signal, seq_no)) != MUILLM_COMM_SUCCESS) {
+      std::cout<<"rank "<<local_rank<<" gpu barrier failed because __mui_stream_inc_wait_value failed"<<std::endl;
       return muillm_error;
     }
   } else {
+    std::cout<<"rank "<<local_rank<<" gpu barrier failed because there is no signal memory"<<std::endl;
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
@@ -1305,6 +1455,15 @@ void* all2all_comm_init(int world_size, int rank) {
   TORCH_CHECK(muillm_error == MUILLM_COMM_SUCCESS, "an error happened when initializing mui comm");
 
   return (void*) comm_ptr;
+}
+
+void all2all_comm_destroy(void* comms) {
+  muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms;
+
+  muillm_comm_error_t muillm_error = muillm_comm_p2p_destroy_comm(comm);
+
+  TORCH_CHECK(muillm_error == MUILLM_COMM_SUCCESS, "an error happened when destroying mui comm");
+  std::cout<<"destroyed mui comm"<<std::endl;
 }
 
 void all2all_dispatch_compute_send_counts(
@@ -2035,7 +2194,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_combine(
   // to avoid errors where some ranks are already done and closed their memory mappins
   //
   if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when doing combine barrier 2");
+    TORCH_CHECK(false, "an error happened when doing combine barrier 3");
   }
 
   // return tuple with send_counts, send_offsets, out_tokens
