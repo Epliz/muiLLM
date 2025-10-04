@@ -144,65 +144,67 @@ class RunType(IntEnum):
     PROFILE = 2
 
 
-def run(rank, world_size, shapes, run_type):
-    for shape in shapes:
-        data = generate_input(rank=rank, **shape)
+def run(rank, world_size, shape, run_type):
+    data = generate_input(rank=rank, **shape)
 
-        if run_type == RunType.TEST:
-            output, elapsed_time = time_func(lambda: custom_kernel(data))
+    if run_type == RunType.TEST:
+        output = custom_kernel(data)
 
-            elapsed_time_usec = elapsed_time * 1e6
+        result, message = check_implementation(data, output)
 
-            result, message = check_implementation(data, output)
-
-            if not result:
-                print(
-                    f"(rank {rank}) Test failed for shape: {shape}, message: {message}"
-                )
-                raise ValueError("Test failed")
-
-        elif run_type == RunType.BENCHMARK:
-            # warmup
-            num_warmups = 10
-            num_runs = 1
-
-            for _ in range(num_warmups):
-                _ = custom_kernel(data)
-
-            # benchmark
-            for _ in range(num_runs):
-                _, elapsed_time = time_func(lambda: custom_kernel(data))
-
-            elapsed_time_usec = (elapsed_time * 1e6) / num_runs
-
-            if rank == 0:
-                print(f"shape: {shape}, avg time: {elapsed_time_usec:.6f} usec")
-        elif run_type == RunType.PROFILE:
-            import torch.autograd.profiler as profiler
-
-            num_warmups = 10
-            num_runs = 10
-
-            # warmup
-            for _ in range(num_warmups):
-                _ = custom_kernel(data)
-
-            from torch.profiler import profile, ProfilerActivity
-
-            with profile(
-                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
-            ) as prof:
-                for _ in range(num_runs):
-                    output = custom_kernel(data)
-
-            prof.export_chrome_trace(
-                f"trace_all2all_rank{rank}_num_experts{shape['num_experts']}_experts_per_token{shape['experts_per_token']}_hidden_dim{shape['hidden_dim']}_max_num_tokens{shape['max_num_tokens']}_world_size{shape['world_size']}.json"
-            )
+        if not result:
+            print(f"(rank {rank}) Test failed for shape: {shape}, message: {message}")
+            raise ValueError("Test failed")
         else:
-            raise ValueError("Invalid run type")
+            print(f"(rank {rank}) Test passed for shape: {shape}")
+
+    elif run_type == RunType.BENCHMARK:
+        # warmup
+        num_warmups = 10
+        num_runs = 1
+
+        def benchmark(f, data, num_runs=10):
+            for _ in range(num_runs):
+                ret = f(data)
+            torch.cuda.synchronize()
+            return ret
+
+        for _ in range(num_warmups):
+            _ = custom_kernel(data)
+
+        # benchmark
+        elapsed_time = time_func(
+            lambda: benchmark(custom_kernel, data, num_runs=num_runs)
+        )
+
+        elapsed_time_usec = (elapsed_time * 1e6) / num_runs
+
+        if rank == 0:
+            print(f"shape: {shape}, avg time: {elapsed_time_usec:.6f} usec")
+    elif run_type == RunType.PROFILE:
+        import torch.autograd.profiler as profiler
+
+        num_warmups = 10
+        num_runs = 10
+
+        # warmup
+        for _ in range(num_warmups):
+            _ = custom_kernel(data)
+
+        from torch.profiler import profile, ProfilerActivity
+
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            for _ in range(num_runs):
+                output = custom_kernel(data)
+
+        prof.export_chrome_trace(
+            f"trace_all2all_rank{rank}_num_experts{shape['num_experts']}_experts_per_token{shape['experts_per_token']}_hidden_dim{shape['hidden_dim']}_max_num_tokens{shape['max_num_tokens']}_world_size{shape['world_size']}.json"
+        )
+    else:
+        raise ValueError("Invalid run type")
 
 
-def init_process(rank, size, shapes, run_type, fn, backend="nccl"):
+def init_process(rank, size, shape, run_type, fn, backend="nccl"):
     """Initialize the distributed environment."""
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = "29500"
@@ -211,9 +213,9 @@ def init_process(rank, size, shapes, run_type, fn, backend="nccl"):
     os.environ["RANK"] = str(rank)
     os.environ["LOCAL_RANK"] = str(rank)
 
-    # if rank == 0:
-    #     os.environ["HSA_TOOLS_LIB"] = "/opt/rocm/lib/librocm-debug-agent.so.2"
-    #     os.environ["HSA_ENABLE_DEBUG"] = "1"
+    if rank == 0:
+        os.environ["HSA_TOOLS_LIB"] = "/opt/rocm/lib/librocm-debug-agent.so.2"
+        os.environ["HSA_ENABLE_DEBUG"] = "1"
 
     local_size = torch.cuda.device_count()
     print(f"(rank {rank}) local_size = {local_size}")
@@ -221,9 +223,13 @@ def init_process(rank, size, shapes, run_type, fn, backend="nccl"):
     # set the current device to the GPU we need
     torch.cuda.set_device(rank)
 
-    dist.init_process_group(backend, rank=rank, world_size=size)
-
-    fn(rank, size, shapes, run_type)
+    try:
+        dist.init_process_group(backend, rank=rank, world_size=size, device_id=rank)
+        fn(rank, size, shape, run_type)
+        torch.cuda.synchronize()
+        print("completed", flush=True)
+    finally:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
@@ -254,13 +260,18 @@ if __name__ == "__main__":
 
     print(f"{size} GPUs available.")
 
-    # Spawn one subprocess per GPU
-    processes = []
-    mp.set_start_method("spawn")
-    for rank in range(size):
-        p = mp.Process(target=init_process, args=(rank, size, shapes, run_type, run))
-        p.start()
-        processes.append(p)
+    mp_context = mp.get_context("spawn")
+    with mp_context.Pool(size) as pool:
 
-    for p in processes:
-        p.join()
+        for shape in shapes:
+            print(f"shape: {shape}")
+
+            # Spawn one subprocess per GPU
+            rets = []
+            for rank in range(size):
+                p = pool.apply_async(
+                    func=init_process, args=(rank, size, shape, run_type, run)
+                )
+                rets.append(p)
+
+            rets = [el.get(60) for el in rets]
