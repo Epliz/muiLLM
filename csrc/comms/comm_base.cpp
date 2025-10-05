@@ -188,54 +188,37 @@ muillm_comm_error_t __local_socket_broadcast(
     void* ptr,
     size_t byte_count
 ) {
-  bool is_server = comm->server_fd != -1;
-  int local_size = comm->local_size;
-  int local_rank = comm->local_rank;
+  // allocate a tensor of the right size on CPU
+  auto tensor_options = at::TensorOptions()
+                            .dtype(torch::kInt8) // int8
+                            .layout(at::kStrided)
+                            .device(torch::kCPU)
+                            .requires_grad(false);
+  torch::Tensor cpu_tensor = torch::empty({byte_count}, tensor_options);
 
-  if (src_local_rank == local_rank) {
-    // we are the sender
-    // we need to share the value with the other ranks
-    if (is_server) {
-      // just send to all other ranks
-      for (int r = 0; r < local_size; r++) {
-        if (r == local_rank) continue;
-        if (full_write(comm->server_to_client_fds[r], ptr, byte_count) < 0) {
-          printf("(rank %d) partial write\n", local_rank);
-          return MUILLM_COMM_SOCKET_WRITE_ERROR;
-        }
-      }
-    } else {
-      // need to send to the server, the server will broadcast
-      if (full_write(comm->client_to_server_fd, ptr, byte_count) < 0) {
-        printf("(rank %d) partial write\n", local_rank);
-        return MUILLM_COMM_SOCKET_WRITE_ERROR;
-      }
-    }
-  } else {
-    // we are a receiver
-    // we need to receive the value from the src rank
-    if (is_server) {
-      // we need to receive it from the src rank first
-      if (full_read(comm->server_to_client_fds[src_local_rank], ptr, byte_count) < 0) {
-        printf("(rank %d) partial read\n", local_rank);
-        return MUILLM_COMM_SOCKET_READ_ERROR;
-      }
-      // then broadcast to the others
-      for (int r = 0; r < local_size; r++) {
-        if (r == local_rank || r == src_local_rank) continue;
-        if (full_write(comm->server_to_client_fds[r], ptr, byte_count) < 0) {
-          printf("(rank %d) partial write\n", local_rank);
-          return MUILLM_COMM_SOCKET_WRITE_ERROR;
-        }
-      }
-    } else {
-      // we need to receive from the server
-      if (full_read(comm->client_to_server_fd, ptr, byte_count) < 0) {
-        printf("(rank %d) partial read\n", local_rank);
-        return MUILLM_COMM_SOCKET_READ_ERROR;
-      }
-    }
+  // copy the data into the tensor
+  if (comm->local_rank == src_local_rank) {
+    memcpy(cpu_tensor.data_ptr(), ptr, byte_count);
   }
+
+  // make a tensor on the device required for comms
+  auto device = comm->process_group->getDeviceTypes()[0];
+  torch::Tensor device_tensor = cpu_tensor.to(device);
+
+  // do a broadcast using the process group
+  auto broadcast_options = c10d::BroadcastOptions();
+  broadcast_options.rootRank = src_local_rank;
+  broadcast_options.rootTensor = 0;
+
+  // create a std::vector with device_tensor inside
+  auto tensor_vector = std::vector<torch::Tensor>{device_tensor};
+  comm->process_group->broadcast(tensor_vector, broadcast_options)->wait();
+
+  // copy back to the cpu tensor
+  auto back_tensor = device_tensor.to(torch::kCPU);
+
+  // copy the data back
+  memcpy(ptr, back_tensor.data_ptr(), byte_count);
 
   return MUILLM_COMM_SUCCESS;
 }
