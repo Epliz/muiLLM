@@ -145,6 +145,8 @@ muillm_error_t muillm_detect_gpu_properties(
 #include <stdint.h>
 #include <stddef.h>
 
+#include <distributed/c10d/ProcessGroup.hpp>
+
 typedef enum muillm_comm_error {
   MUILLM_COMM_SUCCESS = 0,
 
@@ -239,10 +241,7 @@ typedef enum muillm_comm_method {
 } muillm_comm_method_t;
 
 typedef struct muillm_comm_local_socket {
-  // local sockets for server side exchanges
-  int server_fd; // socket to accept new connections, only one rank will have it
-  int* server_to_client_fds; // socket to communicate from the main server to all other ranks
-  int client_to_server_fd; // socket for all other ranks to communicate to the server
+  std::shared_ptr<c10d::ProcessGroup> process_group;
 } muillm_comm_local_socket_t;
 
 // base structure
@@ -254,15 +253,13 @@ typedef struct muillm_comm {
   int rank;
   int local_rank;
 
-  // local sockets for server side exchanges
-  int server_fd; // socket to accept new connections, only one rank will have it
-  int* server_to_client_fds; // socket to communicate from the main server to all other ranks
-  int client_to_server_fd; // socket for all other ranks to communicate to the server
+  std::shared_ptr<c10d::ProcessGroup> process_group;
 } muillm_comm_t;
 
 muillm_comm_error_t __open_local_socket(
     int local_size,
     int local_rank,
+    std::shared_ptr<c10d::ProcessGroup>& process_group,
     muillm_comm_local_socket_t* local_socket
 );
 
@@ -305,7 +302,6 @@ void __deallocate_locked_shared_cpu_mem(
 #include <hip/hip_runtime.h>
 
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <sys/ipc.h>
@@ -314,259 +310,29 @@ void __deallocate_locked_shared_cpu_mem(
 #include <errno.h>
 #include <poll.h>
 
-#define MUILLM_COMM_SOCKET_PATH "/tmp/muillm_comm_socket"
+#include <torch/torch.h>
+#include <distributed/c10d/ProcessGroup.hpp>
 
-static int full_read(int fd, void* ptr, size_t byte_count) {
-  size_t to_read_count = byte_count;
-
-  uint8_t* byte_ptr = (uint8_t*) ptr;
-  while (to_read_count > 0) {
-    int read_status = read(fd, byte_ptr, to_read_count);
-
-    if (read_status < 0) {
-      TORCH_CHECK(false, "an error happened when reading from socket");
-      return -1;
-    }
-
-    byte_ptr += read_status;
-    to_read_count -= read_status;
-  }
-
-  return byte_count;
-}
-
-static int full_write(int fd, const void* ptr, size_t byte_count) {
-  size_t to_write_count = byte_count;
-
-  const uint8_t* byte_ptr = (const uint8_t*) ptr;
-  while (to_write_count > 0) {
-    int write_status = write(fd, byte_ptr, to_write_count);
-
-    if (write_status < 0) {
-      TORCH_CHECK(false, "an error happened when writing to socket");
-      return -1;
-    }
-
-    byte_ptr += write_status;
-    to_write_count -= write_status;
-  }
-
-  return byte_count;
-}
-
-// creates the domain sockets used to do cpu side exchanges
-// (e.g. to exchange memory IPC handles)
 muillm_comm_error_t __open_local_socket(
     int local_size,
     int local_rank,
+    std::shared_ptr<c10d::ProcessGroup>& process_group,
     muillm_comm_local_socket_t* local_socket
 ) {
-  local_socket->server_fd = -1;
-  local_socket->client_to_server_fd = -1;
-  local_socket->server_to_client_fds = nullptr;
-
-  bool is_server;
-
-  // try to become the server
-  struct sockaddr_un server_addr;
-
-  // Create socket
-  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (fd < 0) {
-    TORCH_CHECK(false, "an error happened when creating socket");
-    return MUILLM_COMM_SOCKET_CREATION_FAILED;
-  }
-
-  // Try bindnig socket to address
-  memset(&server_addr, 0, sizeof(struct sockaddr_un));
-  server_addr.sun_family = AF_UNIX;
-  strncpy(server_addr.sun_path, MUILLM_COMM_SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
-
-  // the server is always the rank 0
-  is_server = local_rank == 0;
-
-  if (is_server) {
-    bool correctly_bound = bind(fd, (struct sockaddr *)&server_addr, sizeof(struct sockaddr_un)) == 0;
-
-    if (!correctly_bound) {
-      TORCH_CHECK(false, "an error happened when binding socket");
-      return MUILLM_COMM_SOCKET_BIND_FAILED;
-    }
-
-    // if we managed to bind, we should connect to all other ranks and they will be the socket
-    // clients
-    local_socket->server_fd = fd;
-
-    int num_clients = local_size -1;
-
-    local_socket->server_to_client_fds = new int[local_size];
-    local_socket->server_to_client_fds[local_rank] = -1;
-
-    // Listen for connections
-    if (listen(local_socket->server_fd, num_clients) == -1) {
-      TORCH_CHECK(false, "an error happened when listening on socket");
-      return MUILLM_COMM_SOCKET_LISTEN_FAILED;
-    }
-
-    struct pollfd poll_fd;
-    poll_fd.fd = local_socket->server_fd;
-    poll_fd.events = POLLIN;
-
-    for (int c = 0; c < num_clients; c++) {
-
-      int poll_count = poll(&poll_fd, 1, -1);
-      if (poll_count < 0) {
-        TORCH_CHECK(false, "an error happened when polling socket");
-        return MUILLM_COMM_SOCKET_ACCEPT_FAILED;
-      }
-
-      if (poll_fd.revents & POLLIN) {
-        int client_fd = accept(local_socket->server_fd, NULL, NULL);
-        if (client_fd == -1) {
-          TORCH_CHECK(false, "an error happened when accepting socket connection");
-          return MUILLM_COMM_SOCKET_ACCEPT_FAILED;
-        }
-      
-        // now read what rank this client corresponds to
-        int client_rank = 0;
-
-        if (full_read(client_fd, &client_rank, sizeof(int)) < 0) {
-          TORCH_CHECK(false, "an error happened when reading from socket");
-          return MUILLM_COMM_SOCKET_READ_ERROR;
-        }
-
-        local_socket->server_to_client_fds[client_rank] = client_fd;
-      }
-    }
-
-    // we can already unlink as everyone has connected
-    unlink(MUILLM_COMM_SOCKET_PATH);
-
-  } else {
-    // if we didn't manage to bind, we are a mere client
-    // we just need to connect to the server
-    local_socket->client_to_server_fd = fd;
-
-    bool connected = false;
-
-    while (!connected) {
-      if (connect(local_socket->client_to_server_fd, (struct sockaddr *)&server_addr, sizeof(struct sockaddr_un)) == -1) {
-        sleep(1); // wait before trying to connect again
-        std::cout<<"rank "<<local_rank<<" retrying to connect to local socket..."<<std::endl;
-        continue;
-      }
-
-      connected = true;
-    }
-
-    // send to the server our rank
-    if (full_write(local_socket->client_to_server_fd, &local_rank, sizeof(int)) < 0) {
-      TORCH_CHECK(false, "an error happened when writing to socket");
-      return MUILLM_COMM_SOCKET_WRITE_ERROR;
-    }
-  }
-
+  local_socket->process_group = process_group;
   return MUILLM_COMM_SUCCESS;
 }
 
 muillm_comm_error_t __close_local_socket(
     muillm_comm_local_socket_t* local_socket
 ) {
-/* 
-  if (local_socket->client_to_server_fd != -1) {
-    struct linger ling = {0, 0};
-    setsockopt(local_socket->client_to_server_fd, SOL_SOCKET, SO_LINGER, &ling, sizeof(ling));
-
-    close(local_socket->client_to_server_fd);
-    local_socket->client_to_server_fd = -1;
-  }
-  std::cout<<"closed client to server fd"<<std::endl;
-
-  if (local_socket->server_to_client_fds != nullptr) {
-    for (int r = 0; r < MUILLM_COMM_MAX_GPUS; r++) {
-      if (local_socket->server_to_client_fds[r] != -1) {
-        struct linger ling = {0, 0};
-        setsockopt(local_socket->server_to_client_fds[r], SOL_SOCKET, SO_LINGER, &ling, sizeof(ling));
-
-        close(local_socket->server_to_client_fds[r]);
-        local_socket->server_to_client_fds[r] = -1;
-      }
-    }
-    delete[] local_socket->server_to_client_fds;
-    local_socket->server_to_client_fds = nullptr;
-  }
-  std::cout<<"closed server to client fds"<<std::endl;
-
-  if (local_socket->server_fd != -1) {
-    struct linger ling = {0, 0};
-    setsockopt(local_socket->server_fd, SOL_SOCKET, SO_LINGER, &ling, sizeof(ling));
-
-    close(local_socket->server_fd);
-    local_socket->server_fd = -1;
-  }
-  std::cout<<"closed server fd"<<std::endl;
- */
   return MUILLM_COMM_SUCCESS;
 }
-
 // do a barrier using the local socket
 muillm_comm_error_t __local_socket_barrier(
     muillm_comm_t* comm
 ) {
-  bool is_server = comm->server_fd != -1;
-  int local_size = comm->local_size;
-  int local_rank = comm->local_rank;
-
-  int client_to_server_val = 1;
-  int server_to_client_val = 2;
-
-  // the server waits for all other ranks to send a value
-  // then sends all ranks something
-    if (is_server) {
-      // read from all the other ranks
-      for (int r = 0; r < local_size; r++) {
-        if (r == local_rank) continue;
-
-        int v = 0;
-        if (full_read(comm->server_to_client_fds[r], &v, sizeof(int)) < 0) {
-          TORCH_CHECK(false, "an error happened when reading from socket during barrier");
-          return MUILLM_COMM_SOCKET_READ_ERROR;
-        }
-
-        if (v != client_to_server_val) {
-          TORCH_CHECK(false, "an error happened when reading from socket during barrier");
-          return MUILLM_COMM_SOCKET_READ_ERROR;
-        }
-      }
-
-      // then send something to all other ranks
-      for (int r = 0; r < local_size; r++) {
-        if (r == local_rank) continue;
-
-        int v = server_to_client_val;
-        if (full_write(comm->server_to_client_fds[r], &v, sizeof(int)) < 0) {
-          TORCH_CHECK(false, "an error happened when writing to socket during barrier");
-          return MUILLM_COMM_SOCKET_WRITE_ERROR;
-        }
-      }
-    } else {
-      // need to send to the server, the server will wait for all
-      int v = client_to_server_val;
-      if (full_write(comm->client_to_server_fd, &v, sizeof(int)) < 0) {
-        TORCH_CHECK(false, "an error happened when writing to socket during barrier");
-        return MUILLM_COMM_SOCKET_WRITE_ERROR;
-      }
-
-      // wait for the reply from the server
-      if (full_read(comm->client_to_server_fd, &v, sizeof(int)) < 0) {
-        TORCH_CHECK(false, "an error happened when reading from socket during barrier");
-        return MUILLM_COMM_SOCKET_READ_ERROR;
-      }
-
-      if (v != server_to_client_val) {
-        return MUILLM_COMM_SOCKET_READ_ERROR;
-      }
-    }
+  comm->process_group->barrier()->wait();
   
   return MUILLM_COMM_SUCCESS;
 }
@@ -578,54 +344,37 @@ muillm_comm_error_t __local_socket_broadcast(
     void* ptr,
     size_t byte_count
 ) {
-  bool is_server = comm->server_fd != -1;
-  int local_size = comm->local_size;
-  int local_rank = comm->local_rank;
+  // allocate a tensor of the right size on CPU
+  auto tensor_options = at::TensorOptions()
+                            .dtype(torch::kInt8) // int8
+                            .layout(at::kStrided)
+                            .device(torch::kCPU)
+                            .requires_grad(false);
+  torch::Tensor cpu_tensor = torch::empty({(int) byte_count}, tensor_options);
 
-  if (src_local_rank == local_rank) {
-    // we are the sender
-    // we need to share the value with the other ranks
-    if (is_server) {
-      // just send to all other ranks
-      for (int r = 0; r < local_size; r++) {
-        if (r == local_rank) continue;
-        if (full_write(comm->server_to_client_fds[r], ptr, byte_count) < 0) {
-          TORCH_CHECK(false, "an error happened when writing to socket during broadcast");
-          return MUILLM_COMM_SOCKET_WRITE_ERROR;
-        }
-      }
-    } else {
-      // need to send to the server, the server will broadcast
-      if (full_write(comm->client_to_server_fd, ptr, byte_count) < 0) {
-        TORCH_CHECK(false, "an error happened when writing to socket during broadcast");
-        return MUILLM_COMM_SOCKET_WRITE_ERROR;
-      }
-    }
-  } else {
-    // we are a receiver
-    // we need to receive the value from the src rank
-    if (is_server) {
-      // we need to receive it from the src rank first
-      if (full_read(comm->server_to_client_fds[src_local_rank], ptr, byte_count) < 0) {
-        TORCH_CHECK(false, "an error happened when reading from socket during broadcast");
-        return MUILLM_COMM_SOCKET_READ_ERROR;
-      }
-      // then broadcast to the others
-      for (int r = 0; r < local_size; r++) {
-        if (r == local_rank || r == src_local_rank) continue;
-        if (full_write(comm->server_to_client_fds[r], ptr, byte_count) < 0) {
-          TORCH_CHECK(false, "an error happened when writing to socket during broadcast");
-          return MUILLM_COMM_SOCKET_WRITE_ERROR;
-        }
-      }
-    } else {
-      // we need to receive from the server
-      if (full_read(comm->client_to_server_fd, ptr, byte_count) < 0) {
-        TORCH_CHECK(false, "an error happened when reading from socket during broadcast");
-        return MUILLM_COMM_SOCKET_READ_ERROR;
-      }
-    }
+  // copy the data into the tensor
+  if (comm->local_rank == src_local_rank) {
+    memcpy(cpu_tensor.data_ptr(), ptr, byte_count);
   }
+
+  // make a tensor on the device required for comms
+  auto device = comm->process_group->getDeviceTypes()[0];
+  torch::Tensor device_tensor = cpu_tensor.to(device);
+
+  // do a broadcast using the process group
+  auto broadcast_options = c10d::BroadcastOptions();
+  broadcast_options.rootRank = src_local_rank;
+  broadcast_options.rootTensor = 0;
+
+  // create a std::vector with device_tensor inside
+  auto tensor_vector = std::vector<torch::Tensor>{device_tensor};
+  comm->process_group->broadcast(tensor_vector, broadcast_options)->wait();
+
+  // copy back to the cpu tensor
+  auto back_tensor = device_tensor.to(torch::kCPU);
+
+  // copy the data back
+  memcpy(ptr, back_tensor.data_ptr(), byte_count);
 
   return MUILLM_COMM_SUCCESS;
 }
@@ -638,46 +387,46 @@ muillm_comm_error_t __local_socket_all_gather(
     size_t byte_count,
     void* out_ptr
 ) {
-  bool is_server = comm->server_fd != -1;
   int local_size = comm->local_size;
-  int local_rank = comm->local_rank;
+  // allocate a tensor of the right size on CPU
+  auto tensor_options = at::TensorOptions()
+                            .dtype(torch::kInt8) // int8
+                            .layout(at::kStrided)
+                            .device(torch::kCPU)
+                            .requires_grad(false);
+  torch::Tensor cpu_tensor = torch::empty({(int) byte_count}, tensor_options);
 
-  if (is_server) {
-    // receive from all ranks
-    for (int r = 0; r < local_size; r++) {
-      size_t offset = byte_count * r;
-      if (r == local_rank) {
-        // copy as well from ourself to put the content in in_ptr into out_ptr
-        memcpy((int8_t*)out_ptr + offset, in_ptr, byte_count);
-      } else {
-        // copy the content from the remote rank into out_ptr
-        if (full_read(comm->server_to_client_fds[r], (int8_t*)out_ptr + offset, byte_count) < 0) {
-          TORCH_CHECK(false, "an error happened when reading from socket during all_gather");
-          return MUILLM_COMM_SOCKET_READ_ERROR;
-        }
-      }
-    }
+  // copy the data into the tensor
+  memcpy(cpu_tensor.data_ptr(), in_ptr, byte_count);
 
-    // send to all other ranks
-    for (int r = 0; r < local_size; r++) {
-      if (r == local_rank) continue;
-      if (full_write(comm->server_to_client_fds[r], out_ptr, byte_count * local_size) < 0) {
-        TORCH_CHECK(false, "an error happened when writing to socket during all_gather");
-        return MUILLM_COMM_SOCKET_WRITE_ERROR;
-      }
-    }
-  } else {
-    // need to send to the server
-    if (full_write(comm->client_to_server_fd, in_ptr, byte_count) < 0) {
-      TORCH_CHECK(false, "an error happened when writing to socket during all_gather");
-      return MUILLM_COMM_SOCKET_WRITE_ERROR;
-    }
+  // make a tensor on the device required for comms
+  auto device = comm->process_group->getDeviceTypes()[0];
+  torch::Tensor device_tensor = cpu_tensor.to(device);
 
-    // need to receive from the server
-    if (full_read(comm->client_to_server_fd, out_ptr, byte_count * local_size) < 0) {
-      TORCH_CHECK(false, "an error happened when reading from socket during all_gather");
-      return MUILLM_COMM_SOCKET_READ_ERROR;
-    }
+  // create the output tensors as well
+  auto out_tensor_options = at::TensorOptions()
+                            .dtype(torch::kInt8) // int8
+                            .layout(at::kStrided)
+                            .device(device) // on the device for communications
+                            .requires_grad(false);
+
+  std::vector<torch::Tensor> out_tensor_vector;
+  for (int r = 0; r < local_size; r++) {
+    auto out_tensor = torch::empty({(int) byte_count}, out_tensor_options);
+    out_tensor_vector.push_back(out_tensor);
+  }
+
+  // create the vectors of tensors for inputs/outputs
+  auto in_tensor_vector = std::vector<torch::Tensor>{device_tensor};
+  auto out_tensor_vectors = std::vector<std::vector<torch::Tensor>>{out_tensor_vector};
+
+  // do the all gather
+  comm->process_group->allgather(out_tensor_vectors, in_tensor_vector)->wait();
+
+  // copy back to the CPU memory
+  for (int r = 0; r < local_size; r++) {
+    auto out_tensor_cpu = out_tensor_vector[r].to(torch::kCPU);
+    memcpy(static_cast<char*>(out_ptr) + r * byte_count, out_tensor_cpu.data_ptr(), byte_count);
   }
 
   return MUILLM_COMM_SUCCESS;
@@ -1165,9 +914,16 @@ static muillm_comm_error_t __init_p2p_recv(
 
   for (int d = 0; d < local_size; d++) {
     if (d == local_rank) continue;
-    if (hipDeviceEnablePeerAccess(d, 0) != hipSuccess) {
+    int can_access = 0;
+    if (hipDeviceCanAccessPeer(&can_access, local_rank, d) != hipSuccess) {
       // TODO: return error
       return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+    if (!can_access) {
+      if (hipDeviceEnablePeerAccess(d, 0) != hipSuccess) {
+        // TODO: return error
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
     }
   }
 
@@ -1206,10 +962,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   comm->signal = nullptr;
   comm->signal_seq_no = 0;
 
-  // merge in local socket
-  comm->server_fd = local_socket->server_fd;
-  comm->client_to_server_fd = local_socket->client_to_server_fd;
-  comm->server_to_client_fds = local_socket->server_to_client_fds;
+  comm->process_group = local_socket->process_group;
 
   // set the device
   if (hipSetDevice(local_rank) != hipSuccess) {
@@ -1444,7 +1197,11 @@ muillm_comm_error_t __muillm_gpu_copy(void* dst, const void* src, size_t count, 
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-void* all2all_comm_init(int world_size, int rank) {
+void* all2all_comm_init(
+  int world_size,
+  int rank,
+  std::shared_ptr<c10d::ProcessGroup>& process_group
+) {
   // assumme local_size == world_size for now
   int local_size = world_size;
   int local_rank = rank;
@@ -1453,7 +1210,7 @@ void* all2all_comm_init(int world_size, int rank) {
 
   // establish the local socket connection
   muillm_comm_local_socket_t local_socket;
-  if ((muillm_error = __open_local_socket(local_size, local_rank, &local_socket)) != MUILLM_COMM_SUCCESS) {
+  if ((muillm_error = __open_local_socket(local_size, local_rank, process_group, &local_socket)) != MUILLM_COMM_SUCCESS) {
     TORCH_CHECK(false, "an error happened when opening local socket");
     return (void*) nullptr;
   }
@@ -3458,7 +3215,7 @@ void all2all_combine_unpack_fp16(
 
 class All2AllCommKernels:
     def __init__(self):
-        from torch.utils.cpp_extension import load_inline
+        from torch.utils.cpp_extension import load_inline, _TORCH_PATH
 
         # limit the architectures to avoid long compile time
         os.environ["PYTORCH_ROCM_ARCH"] = "gfx908,gfx942"
@@ -3469,20 +3226,30 @@ class All2AllCommKernels:
         start_time = time.time()
         print("Loading All2All comm kernels...")
 
-        self.comm_kernels = load_inline(
-            name="all2all_comm_kernels",
-            cpp_sources=[COMM_KERNELS_CPP_CODE],
-            cuda_sources=[COMM_KERNELS_CUDA_CODE],
-            functions=[
-                "all2all_comm_init",
-                "all2all_comm_destroy",
-                "all2all_comm_dispatch",
-                "all2all_compute",
-                "all2all_comm_combine",
-            ],
-            with_cuda=True,
-            no_implicit_headers=True,
-        )
+        try:
+            self.comm_kernels = load_inline(
+                name="all2all_comm_kernels",
+                cpp_sources=[COMM_KERNELS_CPP_CODE],
+                cuda_sources=[COMM_KERNELS_CUDA_CODE],
+                functions=[
+                    "all2all_comm_init",
+                    "all2all_comm_destroy",
+                    "all2all_comm_dispatch",
+                    "all2all_compute",
+                    "all2all_comm_combine",
+                ],
+                extra_include_paths=[
+                    os.path.join(_TORCH_PATH, "include", "torch", "csrc")
+                ],
+                with_cuda=True,
+                no_implicit_headers=True,
+            )
+        except Exception as e:
+            print(
+                "Failed to load All2All comm kernels, falling back to PyTorch implementation."
+            )
+            print(e)
+            self.comm_kernels = None
         end_time = time.time()
         print(
             f"All2All comm kernels loaded in {end_time - start_time:.2f} seconds.",
@@ -3514,10 +3281,14 @@ class All2AllComm:
         self.comm_kernels = get_global_comm_kernels()
 
         if self.comm_kernels is not None:
+            import torch.distributed as dist
+
             # use custom kernel
             self.comms = self.comm_kernels.all2all_comm_init(
                 world_size,
                 rank,
+                # we use the torch distributed comms to bootstrap our comms
+                dist.group.WORLD,
             )
         else:
             self.comms = None

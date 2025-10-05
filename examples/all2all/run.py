@@ -201,6 +201,9 @@ def run(rank, world_size, shape, run_type):
         prof.export_chrome_trace(
             f"trace_all2all_rank{rank}_num_experts{shape['num_experts']}_experts_per_token{shape['experts_per_token']}_hidden_dim{shape['hidden_dim']}_max_num_tokens{shape['max_num_tokens']}_world_size{shape['world_size']}.json"
         )
+
+        torch.distributed.barrier()
+
     else:
         raise ValueError("Invalid run type")
 
@@ -214,9 +217,9 @@ def init_process(rank, size, shape, run_type, fn, backend="nccl"):
     os.environ["RANK"] = str(rank)
     os.environ["LOCAL_RANK"] = str(rank)
 
-    if rank == 0:
-        os.environ["HSA_TOOLS_LIB"] = "/opt/rocm/lib/librocm-debug-agent.so.2"
-        os.environ["HSA_ENABLE_DEBUG"] = "1"
+    # if rank == 0:
+    #     os.environ["HSA_TOOLS_LIB"] = "/opt/rocm/lib/librocm-debug-agent.so.2"
+    #     os.environ["HSA_ENABLE_DEBUG"] = "1"
 
     local_size = torch.cuda.device_count()
     print(f"(rank {rank}) local_size = {local_size}")
