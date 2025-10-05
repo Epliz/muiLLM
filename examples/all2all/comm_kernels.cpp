@@ -1344,6 +1344,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
     TORCH_CHECK(false, "datatype must be float16, bfloat16 or float32");
   }
 
+  // TODO: an approach where we place the data in the buffers, sync GPUs, then read from the buffers
+  // would probably be better due to less GPU syncs
+
   //
   // First we compute the send offsets for each rank
   //
@@ -1381,13 +1384,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   // this call flips the buffer sets
   if ((muillm_error = muillm_comm_p2p_get_buffer_set(comm, capacity, &buffer_set, stream)) != MUILLM_COMM_SUCCESS) {
     TORCH_CHECK(false, "an error happened when getting buffer set");
-  }
-
-  //
-  // We wait for all the GPUs to be done with sending data
-  //
-  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when doing dispatch barrier 1");
   }
 
   uint32_t* counters = (uint32_t*)buffer_set->counters;
@@ -1536,7 +1532,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   // We wait for all the GPUs to be done with sending data
   //
   if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when doing dispatch barrier 3");
+    TORCH_CHECK(false, "an error happened when doing combine barrier 2");
   }
 
   // return expert_num_tokens, expert_x, expert_meta
@@ -1764,6 +1760,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_combine(
     TORCH_CHECK(false, "datatype must be float16, bfloat16 or float32");
   }
 
+  // TODO: an approach where we place the data in the buffers, sync GPUs, then read from the buffers
+  // would probably be better due to less GPU syncs
+
   //
   // First we compute the send offsets for each rank
   //
@@ -1801,13 +1800,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_combine(
   // this call flips the buffer sets
   if ((muillm_error = muillm_comm_p2p_get_buffer_set(comm, capacity, &buffer_set, stream)) != MUILLM_COMM_SUCCESS) {
     TORCH_CHECK(false, "an error happened when getting buffer set");
-  }
-
-  //
-  // We wait for all the GPUs to be done with sending data
-  //
-  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when doing combine barrier 1");
   }
 
   uint32_t* counters = (uint32_t*)buffer_set->counters;
@@ -1933,11 +1925,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_combine(
   }
 
   //
-  // We wait for all the GPUs to be done with reading data
-  // to avoid errors where some ranks are already done and closed their memory mappins
+  // We wait for all the GPUs to be done with sending data
   //
   if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when doing combine barrier 3");
+    TORCH_CHECK(false, "an error happened when doing combine barrier 2");
   }
 
   // return tuple with send_counts, send_offsets, out_tokens
