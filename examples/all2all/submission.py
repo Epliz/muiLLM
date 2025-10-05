@@ -1050,8 +1050,6 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
 
-  std::cout<<"rank "<<local_rank<<" destroying comm..."<<std::endl;
-
   muillm_comm_error_t error;
 
   // we need to synchronize the ranks and block the  CPU so that we can deallocate
@@ -1072,15 +1070,12 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
-  std::cout<<"rank "<<local_rank<<" socket barrier ..."<<std::endl;
-
   // make sure all CPUs have synchronized their GPUs
   if ((error =__local_socket_barrier(comm)) != MUILLM_COMM_SUCCESS) {
     TORCH_CHECK(false, "an error happened when doing barrier");
     return error;
   }
 
-  std::cout<<"rank "<<local_rank<<" freeing buffers..."<<std::endl;
   // free buffer sets
   if ((error = __free_buffer_set(comm, comm->first_buffers, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
     std::cout<<"rank "<<local_rank<<" failed to free first buffer set"<<std::endl;
@@ -1095,7 +1090,6 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
   delete comm->second_buffers;
 
   // free signal memory
-  std::cout<<"rank "<<local_rank<<" freeing signal memory..."<<std::endl;
   if (comm->signal_host != nullptr) {
     __deallocate_locked_shared_cpu_mem(
       comm,
@@ -1112,7 +1106,6 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
   }
 
   // close local socket
-  std::cout<<"rank "<<local_rank<<" closing local socket..."<<std::endl;
   if (__close_local_socket((muillm_comm_local_socket_t*) comm) != MUILLM_COMM_SUCCESS) {
     std::cout<<"rank "<<local_rank<<" failed to close local socket"<<std::endl;
     return MUILLM_COMM_UNKNOWN_ERROR;
@@ -1123,8 +1116,6 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
     delete comm->gpu_info;
     comm->gpu_info = nullptr;
   }
-
-  std::cout<<"rank "<<local_rank<<" done destroying comm."<<std::endl;
 
   // delete the comm object
   delete comm;
@@ -1142,14 +1133,6 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
 
   hipError_t hip_error;
   muillm_comm_error_t muillm_error;
-
-  if (hipDeviceSynchronize() != hipSuccess) {
-    std::cout<<"rank "<<local_rank<<" gpu barrier failed because hipDeviceSynchronize failed"<<std::endl;
-    hipError_t err = hipGetLastError();
-    const char* errStr = hipGetErrorString(err);
-    std::cout<<"Last HIP error: "<<errStr<<std::endl;
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
 
   if (comm->signal != nullptr) {
     comm->signal_seq_no += local_size;
@@ -1239,7 +1222,6 @@ void all2all_comm_destroy(void* comms) {
   muillm_comm_error_t muillm_error = muillm_comm_p2p_destroy_comm(comm);
 
   TORCH_CHECK(muillm_error == MUILLM_COMM_SUCCESS, "an error happened when destroying mui comm");
-  std::cout<<"destroyed mui comm"<<std::endl;
 }
 
 void all2all_dispatch_compute_send_counts(
@@ -3388,7 +3370,6 @@ def apply_monkey_patch():
     _original_destroy = dist.destroy_process_group
 
     def custom_destroy_process_group(*args, **kwargs):
-        print("destroying comms")
         destroy_global_all2all_comm()
 
         # Call the original destroy

@@ -181,31 +181,41 @@ def run(rank, world_size, shape, run_type):
 
         if rank == 0:
             print(f"shape: {shape}, avg time: {elapsed_time_usec:.6f} usec")
-    elif run_type == RunType.PROFILE:
-        import torch.autograd.profiler as profiler
-
-        num_warmups = 10
-        num_runs = 10
-
-        # warmup
-        for _ in range(num_warmups):
-            _ = custom_kernel(data)
-
-        from torch.profiler import profile, ProfilerActivity
-
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-            for _ in range(num_runs):
-                output = custom_kernel(data)
-            torch.cuda.synchronize()
-
-        prof.export_chrome_trace(
-            f"trace_all2all_rank{rank}_num_experts{shape['num_experts']}_experts_per_token{shape['experts_per_token']}_hidden_dim{shape['hidden_dim']}_max_num_tokens{shape['max_num_tokens']}_world_size{shape['world_size']}.json"
-        )
-
-        torch.distributed.barrier()
-
     else:
         raise ValueError("Invalid run type")
+
+
+def run_profile(rank, world_size, shapes, run_type):
+    for shape in shapes:
+        data = generate_input(rank=rank, **shape)
+
+        if run_type == RunType.PROFILE:
+            import torch.autograd.profiler as profiler
+
+            num_warmups = 10
+            num_runs = 10
+
+            # warmup
+            for _ in range(num_warmups):
+                _ = custom_kernel(data)
+
+            from torch.profiler import profile, ProfilerActivity
+
+            with profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
+            ) as prof:
+                for _ in range(num_runs):
+                    output = custom_kernel(data)
+                torch.cuda.synchronize()
+
+            prof.export_chrome_trace(
+                f"trace_all2all_rank{rank}_num_experts{shape['num_experts']}_experts_per_token{shape['experts_per_token']}_hidden_dim{shape['hidden_dim']}_max_num_tokens{shape['max_num_tokens']}_world_size{shape['world_size']}.json"
+            )
+
+            torch.distributed.barrier()
+
+        else:
+            raise ValueError("Invalid run type")
 
 
 def init_process(rank, size, shape, run_type, fn, backend="nccl"):
@@ -266,18 +276,31 @@ if __name__ == "__main__":
 
     print(f"{size} GPUs available.")
 
-    mp_context = mp.get_context("spawn")
-    with mp_context.Pool(size) as pool:
+    if run_type == RunType.PROFILE:
+        # Spawn one subprocess per GPU
+        processes = []
+        mp.set_start_method("spawn")
+        for rank in range(size):
+            p = mp.Process(
+                target=init_process, args=(rank, size, shapes, run_type, run_profile)
+            )
+            p.start()
+            processes.append(p)
 
-        for shape in shapes:
-            print(f"shape: {shape}")
+        for p in processes:
+            p.join()
+    else:
+        mp_context = mp.get_context("spawn")
+        with mp_context.Pool(size) as pool:
+            for shape in shapes:
+                print(f"shape: {shape}")
 
-            # Spawn one subprocess per GPU
-            rets = []
-            for rank in range(size):
-                p = pool.apply_async(
-                    func=init_process, args=(rank, size, shape, run_type, run)
-                )
-                rets.append(p)
+                # Spawn one subprocess per GPU
+                rets = []
+                for rank in range(size):
+                    p = pool.apply_async(
+                        func=init_process, args=(rank, size, shape, run_type, run)
+                    )
+                    rets.append(p)
 
-            rets = [el.get(60) for el in rets]
+                rets = [el.get(60) for el in rets]
