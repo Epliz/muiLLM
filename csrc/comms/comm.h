@@ -7,10 +7,13 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include <distributed/c10d/ProcessGroup.hpp>
+
 typedef struct muillm_comm muillm_comm_t;
 
 muillm_comm_error_t muillm_comm_init(
     muillm_engine_t* engine,
+    std::shared_ptr<c10d::ProcessGroup>& process_group,
     int world_size,
     int local_size,
     int rank,

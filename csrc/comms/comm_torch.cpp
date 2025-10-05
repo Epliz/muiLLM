@@ -12,6 +12,7 @@
 
 muillm_comm_ptr muillm_comm_init_trampoline(
   muillm_engine_ptr engine,
+  std::shared_ptr<c10d::ProcessGroup>& process_group,
   int world_size,
   int local_size,
   int rank,
@@ -20,7 +21,16 @@ muillm_comm_ptr muillm_comm_init_trampoline(
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   muillm_comm_t* ptr = nullptr;
-  muillm_comm_error_t error = muillm_comm_init(engine.engine_ptr, world_size, local_size, rank, local_rank, &ptr, stream);
+  muillm_comm_error_t error = muillm_comm_init(
+    engine.engine_ptr,
+    process_group,
+    world_size,
+    local_size,
+    rank,
+    local_rank,
+    &ptr,
+    stream
+  );
 
   TORCH_CHECK(error == MUILLM_COMM_SUCCESS, "an error happened when initializing mui comm");
 

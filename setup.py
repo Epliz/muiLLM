@@ -1,7 +1,7 @@
 import codecs
 import os.path
 from setuptools import setup, Extension, find_packages
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension, _TORCH_PATH
 
 
 def read(rel_path):
@@ -151,6 +151,7 @@ setup(
                 "cxx": ["-g"],  # Add debug symbols for C++ code
                 "hipcc": ["-g"],  # Add debug symbols for HIP code
             },
+            include_dirs=[os.path.join(_TORCH_PATH, "include", "torch", "csrc")],
         )
     ],
     cmdclass={"build_ext": NinjaBuildExtension},

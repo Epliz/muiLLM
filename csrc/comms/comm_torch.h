@@ -5,6 +5,8 @@
 
 #include "comm.h"
 
+#include <distributed/c10d/ProcessGroup.hpp>
+
 muillm_comm_error_t muillm_all_reduce_sum(
     muillm_comm_t* comm,
     torch::Tensor& tensor
@@ -24,6 +26,7 @@ typedef struct muillm_comm_ptr {
   
 muillm_comm_ptr muillm_comm_init_trampoline(
     muillm_engine_ptr engine,
+    std::shared_ptr<c10d::ProcessGroup>& process_group,
     int world_size,
     int local_size,
     int rank,

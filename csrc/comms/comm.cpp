@@ -17,6 +17,7 @@ void handler(int signo)
 
 muillm_comm_error_t muillm_comm_init(
   muillm_engine_t* engine,
+  std::shared_ptr<c10d::ProcessGroup>& process_group,
   int world_size,
   int local_size,
   int rank,
@@ -45,7 +46,7 @@ muillm_comm_error_t muillm_comm_init(
   // establish the local socket connection
   printf("(rank %d) Opening local socket...\n", local_rank);
   muillm_comm_local_socket_t local_socket;
-  if ((muillm_error = __open_local_socket(local_size, local_rank, &local_socket)) != MUILLM_COMM_SUCCESS) {
+  if ((muillm_error = __open_local_socket(local_size, local_rank, process_group, &local_socket)) != MUILLM_COMM_SUCCESS) {
     return muillm_error;
   }
   printf("(rank %d) Opened local socket\n", local_rank);

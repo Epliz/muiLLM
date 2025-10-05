@@ -15,6 +15,9 @@
 
 #include <stdio.h>
 
+#include <torch/torch.h>
+#include <distributed/c10d/ProcessGroup.hpp>
+
 #define MUILLM_COMM_SOCKET_PATH "/tmp/muillm_comm_socket"
 
 static int full_read(int fd, void* ptr, size_t byte_count) {
@@ -58,11 +61,13 @@ static int full_write(int fd, const void* ptr, size_t byte_count) {
 muillm_comm_error_t __open_local_socket(
     int local_size,
     int local_rank,
+    std::shared_ptr<c10d::ProcessGroup>& process_group,
     muillm_comm_local_socket_t* local_socket
 ) {
   local_socket->server_fd = -1;
   local_socket->client_to_server_fd = -1;
   local_socket->server_to_client_fds = nullptr;
+  local_socket->process_group = process_group;
 
   bool is_server;
 
