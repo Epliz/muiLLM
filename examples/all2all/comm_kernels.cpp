@@ -1212,7 +1212,6 @@ void all2all_comm_destroy(void* comms) {
 void all2all_dispatch_compute_send_counts(
     hipStream_t stream,
     const int32_t* __restrict__ indices,
-    uint32_t* __restrict__ send_counts,
     uint32_t* __restrict__ send_offsets,
     // counters for the different ranks
     uint32_t* counters,
@@ -1351,16 +1350,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   // First we compute the send offsets for each rank
   //
 
-  auto send_counts_options = at::TensorOptions()
+  auto send_offsets_options = at::TensorOptions()
                             .dtype(torch::kInt32)
                             .layout(at::kStrided)
                             .device(device) // same output device as inputs
                             .requires_grad(false);
 
-  // TODO: do not allocate send_counts, we can just use shared memory in the kernel
-  // send_counts: shape [local_size]
-  auto send_counts = torch::zeros({local_size}, send_counts_options);
-  auto send_offsets = torch::empty({local_size}, send_counts_options);
+  auto send_offsets = torch::empty({local_size}, send_offsets_options);
 
   // we align the metadata pointer to 4k for better performance
   // so we align up the data size as such as the metadata pointer will be right after the data pointer
@@ -1392,7 +1388,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   all2all_dispatch_compute_send_counts(
     stream,
     (const int32_t*)indices.data_ptr(),
-    (uint32_t*)send_counts.data_ptr(),
     (uint32_t*)send_offsets.data_ptr(),
     counters,
     next_counters,
@@ -1620,7 +1615,6 @@ void all2all_combine_compute_send_counts(
     hipStream_t stream,
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
-    uint32_t* __restrict__ send_counts, // shape [world_size]
     uint32_t* __restrict__ send_offsets, // shape [world_size]
     // counters for the different ranks
     uint32_t* counters,
@@ -1699,7 +1693,7 @@ void all2all_combine_unpack_fp16(
 );
 
 // combine
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_combine(
+torch::Tensor all2all_comm_combine(
   void* comms,
   torch::Tensor& weights, // shape [num_tokens, experts_per_token]
   torch::Tensor& expert_meta, // shape [num_local_experts, max_recv, meta_dim] (expert_id, src_rank, src_token_id, topk_offset)
@@ -1767,16 +1761,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_combine(
   // First we compute the send offsets for each rank
   //
 
-  auto send_counts_options = at::TensorOptions()
+  auto send_offsets_options = at::TensorOptions()
                             .dtype(torch::kInt32)
                             .layout(at::kStrided)
                             .device(device) // same output device as inputs
                             .requires_grad(false);
 
-  // TODO: do not allocate send_counts, we can just use shared memory in the kernel
-  // send_counts: shape [local_size]
-  auto send_counts = torch::zeros({local_size}, send_counts_options);
-  auto send_offsets = torch::empty({local_size}, send_counts_options);
+  auto send_offsets = torch::empty({local_size}, send_offsets_options);
 
   // we align the metadata pointer to 4k for better performance
   // so we align up the data size as such as the metadata pointer will be right after the data pointer
@@ -1809,7 +1800,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_combine(
     stream,
     (const int32_t*) expert_num_tokens.data_ptr(),
     (const int32_t*) expert_meta.data_ptr(),
-    (uint32_t*) send_counts.data_ptr(),
     (uint32_t*) send_offsets.data_ptr(),
     counters,
     next_counters,
@@ -1931,6 +1921,5 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_combine(
     TORCH_CHECK(false, "an error happened when doing combine barrier 2");
   }
 
-  // return tuple with send_counts, send_offsets, out_tokens
-  return std::make_tuple(send_counts, send_offsets, out_tokens);
+  return out_tokens;
 }
