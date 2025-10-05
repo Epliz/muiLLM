@@ -122,6 +122,8 @@ typedef struct muillm_comm {
   int server_fd; // socket to accept new connections, only one rank will have it
   int* server_to_client_fds; // socket to communicate from the main server to all other ranks
   int client_to_server_fd; // socket for all other ranks to communicate to the server
+
+  std::shared_ptr<c10d::ProcessGroup> process_group;
 } muillm_comm_t;
 
 muillm_comm_error_t __open_local_socket(

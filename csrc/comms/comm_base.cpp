@@ -176,61 +176,7 @@ muillm_comm_error_t __open_local_socket(
 muillm_comm_error_t __local_socket_barrier(
     muillm_comm_t* comm
 ) {
-  bool is_server = comm->server_fd != -1;
-  int local_size = comm->local_size;
-  int local_rank = comm->local_rank;
-
-  int client_to_server_val = 1;
-  int server_to_client_val = 2;
-
-  // the server waits for all other ranks to send a value
-  // then sends all ranks something
-    if (is_server) {
-      // read from all the other ranks
-      for (int r = 0; r < local_size; r++) {
-        if (r == local_rank) continue;
-
-        int v = 0;
-        if (full_read(comm->server_to_client_fds[r], &v, sizeof(int)) < 0) {
-          printf("(rank %d) partial read\n", local_rank);
-          return MUILLM_COMM_SOCKET_READ_ERROR;
-        }
-
-        if (v != client_to_server_val) {
-          printf("server read wrong barrier value\n");
-          return MUILLM_COMM_SOCKET_READ_ERROR;
-        }
-      }
-
-      // then send something to all other ranks
-      for (int r = 0; r < local_size; r++) {
-        if (r == local_rank) continue;
-
-        int v = server_to_client_val;
-        if (full_write(comm->server_to_client_fds[r], &v, sizeof(int)) < 0) {
-          printf("(rank %d) partial write\n", local_rank);
-          return MUILLM_COMM_SOCKET_WRITE_ERROR;
-        }
-      }
-    } else {
-      // need to send to the server, the server will wait for all
-      int v = client_to_server_val;
-      if (full_write(comm->client_to_server_fd, &v, sizeof(int)) < 0) {
-        printf("(rank %d) partial write\n", local_rank);
-        return MUILLM_COMM_SOCKET_WRITE_ERROR;
-      }
-
-      // wait for the reply from the server
-      if (full_read(comm->client_to_server_fd, &v, sizeof(int)) < 0) {
-        printf("(rank %d) partial write\n", local_rank);
-        return MUILLM_COMM_SOCKET_READ_ERROR;
-      }
-
-      if (v != server_to_client_val) {
-        printf("(rank %d) read wrong barrier value\n", local_rank);
-        return MUILLM_COMM_SOCKET_READ_ERROR;
-      }
-    }
+  comm->process_group->barrier()->wait();
   
   return MUILLM_COMM_SUCCESS;
 }

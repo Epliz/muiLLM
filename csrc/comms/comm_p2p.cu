@@ -327,6 +327,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   comm->server_fd = local_socket->server_fd;
   comm->client_to_server_fd = local_socket->client_to_server_fd;
   comm->server_to_client_fds = local_socket->server_to_client_fds;
+  comm->process_group = local_socket->process_group;
 
   // set the device
   if (hipSetDevice(local_rank) != hipSuccess) {
