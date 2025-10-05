@@ -91,6 +91,7 @@ And install the library (creating a virtual environment beforehand is recommende
 
 ```shell
 pip install --upgrade build
+pip install setuptools-scm
 pip install wheel
 
 python -m build --no-isolation && pip install ./dist/muillm-0.0.1-cp310-cp310-linux_x86_64.whl
