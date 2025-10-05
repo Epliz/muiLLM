@@ -231,46 +231,46 @@ muillm_comm_error_t __local_socket_all_gather(
     size_t byte_count,
     void* out_ptr
 ) {
-  bool is_server = comm->server_fd != -1;
   int local_size = comm->local_size;
-  int local_rank = comm->local_rank;
+  // allocate a tensor of the right size on CPU
+  auto tensor_options = at::TensorOptions()
+                            .dtype(torch::kInt8) // int8
+                            .layout(at::kStrided)
+                            .device(torch::kCPU)
+                            .requires_grad(false);
+  torch::Tensor cpu_tensor = torch::empty({byte_count}, tensor_options);
 
-  if (is_server) {
-    // receive from all ranks
-    for (int r = 0; r < local_size; r++) {
-      size_t offset = byte_count * r;
-      if (r == local_rank) {
-        // copy as well from ourself to put the content in in_ptr into out_ptr
-        memcpy((int8_t*)out_ptr + offset, in_ptr, byte_count);
-      } else {
-        // copy the content from the remote rank into out_ptr
-        if (full_read(comm->server_to_client_fds[r], (int8_t*)out_ptr + offset, byte_count) < 0) {
-          printf("(rank %d) partial read\n", local_rank);
-          return MUILLM_COMM_SOCKET_READ_ERROR;
-        }
-      }
-    }
+  // copy the data into the tensor
+  memcpy(cpu_tensor.data_ptr(), in_ptr, byte_count);
 
-    // send to all other ranks
-    for (int r = 0; r < local_size; r++) {
-      if (r == local_rank) continue;
-      if (full_write(comm->server_to_client_fds[r], out_ptr, byte_count * local_size) < 0) {
-        printf("(rank %d) partial write\n", local_rank);
-        return MUILLM_COMM_SOCKET_WRITE_ERROR;
-      }
-    }
-  } else {
-    // need to send to the server
-    if (full_write(comm->client_to_server_fd, in_ptr, byte_count) < 0) {
-      printf("(rank %d) partial write\n", local_rank);
-      return MUILLM_COMM_SOCKET_WRITE_ERROR;
-    }
+  // make a tensor on the device required for comms
+  auto device = comm->process_group->getDeviceTypes()[0];
+  torch::Tensor device_tensor = cpu_tensor.to(device);
 
-    // need to receive from the server
-    if (full_read(comm->client_to_server_fd, out_ptr, byte_count * local_size) < 0) {
-      printf("(rank %d) partial read\n", local_rank);
-      return MUILLM_COMM_SOCKET_READ_ERROR;
-    }
+  // create the output tensors as well
+  auto out_tensor_options = at::TensorOptions()
+                            .dtype(torch::kInt8) // int8
+                            .layout(at::kStrided)
+                            .device(device) // on the device for communications
+                            .requires_grad(false);
+
+  std::vector<torch::Tensor> out_tensor_vector;
+  for (int r = 0; r < local_size; r++) {
+    auto out_tensor = torch::empty({byte_count}, out_tensor_options);
+    out_tensor_vector.push_back(out_tensor);
+  }
+
+  // create the vectors of tensors for inputs/outputs
+  auto in_tensor_vector = std::vector<torch::Tensor>{device_tensor};
+  auto out_tensor_vectors = std::vector<std::vector<torch::Tensor>>{out_tensor_vector};
+
+  // do the all gather
+  comm->process_group->allgather(out_tensor_vectors, in_tensor_vector)->wait();
+
+  // copy back to the CPU memory
+  for (int r = 0; r < local_size; r++) {
+    auto out_tensor_cpu = out_tensor_vector[r].to(torch::kCPU);
+    memcpy(static_cast<char*>(out_ptr) + r * byte_count, out_tensor_cpu.data_ptr(), byte_count);
   }
 
   return MUILLM_COMM_SUCCESS;
