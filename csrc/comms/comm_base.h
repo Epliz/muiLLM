@@ -102,10 +102,6 @@ typedef enum muillm_comm_method {
 } muillm_comm_method_t;
 
 typedef struct muillm_comm_local_socket {
-  // local sockets for server side exchanges
-  int server_fd; // socket to accept new connections, only one rank will have it
-  int* server_to_client_fds; // socket to communicate from the main server to all other ranks
-  int client_to_server_fd; // socket for all other ranks to communicate to the server
   std::shared_ptr<c10d::ProcessGroup> process_group;
 } muillm_comm_local_socket_t;
 
@@ -117,11 +113,6 @@ typedef struct muillm_comm {
   int local_size;
   int rank;
   int local_rank;
-
-  // local sockets for server side exchanges
-  int server_fd; // socket to accept new connections, only one rank will have it
-  int* server_to_client_fds; // socket to communicate from the main server to all other ranks
-  int client_to_server_fd; // socket for all other ranks to communicate to the server
 
   std::shared_ptr<c10d::ProcessGroup> process_group;
 } muillm_comm_t;
