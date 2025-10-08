@@ -1151,13 +1151,113 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
 
 muillm_comm_error_t __muillm_gpu_copy(void* dst, const void* src, size_t count, hipStream_t stream);
 
+muillm_comm_error_t __muillm_scatter_all(
+  hipStream_t stream,
+  // inputs
+  const void* src,
+  int scattered_size_bytes,
+  int local_size,
+  int local_rank,
+  // outputs
+  void* dst0,
+  void* dst1,
+  void* dst2,
+  void* dst3,
+  void* dst4,
+  void* dst5,
+  void* dst6,
+  void* dst7
+);
+
+muillm_comm_error_t __muillm_reduce(
+  hipStream_t stream,
+  // inputs
+  const void* src, // shape [local_size, scattered_M, N]
+  int scattered_count,
+  int local_size,
+  muillm_comm_datatype_t datatype,
+  // outputs
+  void* dst
+);
+
+muillm_comm_error_t muillm_comm_reduce_scatter_ll(
+  muillm_comm_p2p_t* comm,
+  hipStream_t stream,
+  void* input_buffer,
+  int M,
+  int scattered_M,
+  int N,
+  muillm_comm_datatype_t datatype,
+  void* output_buffer
+) {
+  muillm_comm_error_t error;
+
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  int scattered_count = scattered_M * N;
+  int scattered_size = __comm_size(datatype, scattered_count);
+
+  //
+  // First make sure we have enough buffer space
+  //
+  int capacity = scattered_size * local_size;
+
+  muillm_comm_p2p_buffer_set_t* buffer_set;
+  if ((error = muillm_comm_p2p_get_buffer_set(comm, capacity, &buffer_set, stream)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to get buffer set"<<std::endl;
+    return error;
+  }
+
+  // Copy our data to the other GPUs buffers
+  if ((error = __muillm_scatter_all(
+    stream,
+    input_buffer,
+    scattered_size,
+    local_size,
+    local_rank,
+    buffer_set->buffers[0],
+    buffer_set->buffers[1],
+    buffer_set->buffers[2],
+    buffer_set->buffers[3],
+    buffer_set->buffers[4],
+    buffer_set->buffers[5],
+    buffer_set->buffers[6],
+    buffer_set->buffers[7]
+  )) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to scatter data to other GPUs"<<std::endl;
+    return error;
+  }
+
+  // Synchronize GPUs
+  if (__mui_gpu_barrier(comm, stream) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when doing gpu barrier");
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // Finally reduce the data on each GPU
+  if ((error = __muillm_reduce(
+    stream,
+    buffer_set->buffers[local_rank],
+    scattered_count,
+    local_size,
+    datatype,
+    output_buffer
+  )) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to reduce data"<<std::endl;
+    return error;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+#define MUILLM_REDUCE_SCATTER_LL_TRESHOLD (16 * 1024 * 1024) // 16M elements
+
 // torch extension
 
 #include <tuple>
 
 #include <ATen/cuda/CUDAContext.h>
-
-#include <hip/hip_fp16.h>
 
 #define META_DIM 4
 
@@ -1231,9 +1331,21 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
   int N = weights.size(0);
   int K = input.size(1);
 
+  int scattered_M = M / local_size;
+
   auto dtype = input.dtype();
 
-  torch::Tensor output = torch::linear(input, weights, bias);
+  muillm_comm_datatype_t datatype;
+  if (dtype == torch::kFloat16) {
+    datatype = MUILLM_COMM_FP16;
+  } else if (dtype == torch::kBFloat16) {
+    datatype = MUILLM_COMM_BF16;
+  } else {
+    TORCH_CHECK(false, "unsupported data type");
+    return torch::Tensor();
+  }
+
+  torch::Tensor output = torch::linear(input, weights, bias); // shape [M, N]
 
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
@@ -1241,15 +1353,33 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
                             .device(device) // same output device as inputs
                             .requires_grad(false);
 
-  auto rs_output = torch::empty({M / local_size, N}, output_options);
+        
+  auto rs_output = torch::empty({scattered_M, N}, output_options);
 
-  std::vector<torch::Tensor> rs_output_vector = {rs_output};
-  std::vector<torch::Tensor> input_vector = {output};
-  comm->process_group->reduce_scatter_tensor_coalesced(
-    rs_output_vector,
-    input_vector,
-    c10d::ReduceScatterOptions()
-  );
+  int total_size = scattered_M * N;
+  if (total_size <= MUILLM_REDUCE_SCATTER_LL_TRESHOLD) {
+    // use our custom reduce-scatter implementation
+    if (muillm_comm_reduce_scatter_ll(
+      comm,
+      stream,
+      output.data_ptr(),
+      M,
+      scattered_M,
+      N,
+      datatype,
+      rs_output.data_ptr()
+    ) != MUILLM_COMM_SUCCESS) {
+      TORCH_CHECK(false, "an error happened when doing reduce-scatter");
+    }
+  } else {
+    std::vector<torch::Tensor> rs_output_vector = {rs_output};
+    std::vector<torch::Tensor> input_vector = {output};
+    comm->process_group->reduce_scatter_tensor_coalesced(
+      rs_output_vector,
+      input_vector,
+      c10d::ReduceScatterOptions()
+    );
+  }
 
   return rs_output;
 }
