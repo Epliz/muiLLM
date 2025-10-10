@@ -1357,7 +1357,7 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
   auto rs_output = torch::empty({scattered_M, N}, output_options);
 
   int total_size = scattered_M * N;
-  if (total_size <= MUILLM_REDUCE_SCATTER_LL_TRESHOLD) {
+  if (true) { // total_size <= MUILLM_REDUCE_SCATTER_LL_TRESHOLD) {
     // use our custom reduce-scatter implementation
     if (muillm_comm_reduce_scatter_ll(
       comm,

@@ -1364,7 +1364,7 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
   auto rs_output = torch::empty({scattered_M, N}, output_options);
 
   int total_size = scattered_M * N;
-  if (total_size <= MUILLM_REDUCE_SCATTER_LL_TRESHOLD) {
+  if (true) { // total_size <= MUILLM_REDUCE_SCATTER_LL_TRESHOLD) {
     // use our custom reduce-scatter implementation
     if (muillm_comm_reduce_scatter_ll(
       comm,
@@ -1400,6 +1400,7 @@ COMM_KERNELS_CUDA_CODE = """
 #include <hip/hip_bf16.h>
 
 #include <iostream>
+#include <algorithm>
 
 #define MUILLM_MAX_GPUS 8
 
@@ -1516,6 +1517,7 @@ __inline__ __device__ int __block_broadcast(int val, int threads_per_block=THREA
 }
 
 #define DIV_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
+#define ALIGN_UP(a, b) (DIV_ROUND_UP(a, b) * (b))
 
 typedef struct half8 {
   half x, y, z, w, a, b, c, d;
@@ -1582,7 +1584,7 @@ muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* si
 
 // each threads can copy 16 bytes
 #define BYTES_PER_THREAD 16
-#define BYTES_PER_BLOCK (THREADS_PER_BLOCK * BYTES_PER_THREAD)
+#define BYTES_PER_BLOCK_LOOP (THREADS_PER_BLOCK * BYTES_PER_THREAD)
 
 typedef struct uint32x4{
 uint32_t x, y, z, w;
@@ -1593,7 +1595,7 @@ __global__ void __muillm_copy_p2p_kernel(
   uint8_t* dst_ptr,
   unsigned N
 ) {
-  unsigned i = blockIdx.x * BYTES_PER_BLOCK + (threadIdx.x * BYTES_PER_THREAD);
+  unsigned i = blockIdx.x * BYTES_PER_BLOCK_LOOP + (threadIdx.x * BYTES_PER_THREAD);
   if (i + (BYTES_PER_THREAD - 1) < N) {
     // can copy 16 bytes
 
@@ -1601,7 +1603,7 @@ __global__ void __muillm_copy_p2p_kernel(
     uint32x4_t* dst_x16_ptr = (uint32x4_t*)(&dst_ptr[i]);
     *dst_x16_ptr = *src_x16_ptr;
 
-    i += BYTES_PER_THREAD;
+    i += BYTES_PER_BLOCK_LOOP;
   } else {
     // non vectorized copy
     for (unsigned b = 0; b < BYTES_PER_THREAD; b++) {
@@ -1615,7 +1617,7 @@ __global__ void __muillm_copy_p2p_kernel(
 
 muillm_comm_error_t __muillm_gpu_copy(void* dst, const void* src, size_t count, hipStream_t stream) {
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(count, BYTES_PER_BLOCK);
+  const int num_blocks = DIV_ROUND_UP(count, BYTES_PER_BLOCK_LOOP);
 
   // a copy kernel is faster than a hipMemcpyAsync
   __muillm_copy_p2p_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
@@ -1641,12 +1643,15 @@ void __global__ scatter_all_tp8_kernel(
   uint8_t* dst5,
   uint8_t* dst6,
   uint8_t* dst7,
+  int bytes_per_block,
   int N,
   int local_rank
 ) {
   unsigned block_idx = blockIdx.y;
 
-  unsigned i = blockIdx.x * BYTES_PER_BLOCK + (threadIdx.x * BYTES_PER_THREAD);
+  unsigned block_start = blockIdx.x * bytes_per_block;
+  unsigned block_end = std::min(block_start + bytes_per_block, N);
+  unsigned i = block_start + (threadIdx.x * BYTES_PER_THREAD);
 
   uint8_t* dsts[8] = {dst0, dst1, dst2, dst3, dst4, dst5, dst6, dst7};
   uint8_t* dst = dsts[block_idx];
@@ -1655,19 +1660,22 @@ void __global__ scatter_all_tp8_kernel(
   src += block_idx * N;
   dst += local_rank * N;
 
-  if (i + (BYTES_PER_THREAD - 1) < N) {
-    // can copy 16 bytes
+  // TODO: unroll more, e.g. 4x more
+  for (; i + (BYTES_PER_THREAD - 1) < block_end; i += BYTES_PER_BLOCK_LOOP) {
+    // can copy 16 bytes, which is 4kB per iteration
     const uint32x4_t* src_x16_ptr = (const uint32x4_t*)(&src[i]);
     uint32x4_t* dst_x16_ptr = (uint32x4_t*)(&dst[i]);
 
     uint32x4_t v = *src_x16_ptr;
     *dst_x16_ptr = v;
-
-    i += BYTES_PER_THREAD;
-  } else {
+  }
+  
+  // loop remainder
+  if (i < block_end) {
+    // only one thread will execute this at max
     // non vectorized copy
     for (unsigned b = 0; b < BYTES_PER_THREAD; b++) {
-      if (i < N) {
+      if (i < block_end) {
         uint8_t v = src[i];
         dst[i] = v;
         i++;
@@ -1675,6 +1683,8 @@ void __global__ scatter_all_tp8_kernel(
     }
   }
 }
+
+#define MAX_REDUCE_X_BLOCKS 8
 
 muillm_comm_error_t __muillm_scatter_all(
   hipStream_t stream,
@@ -1695,7 +1705,14 @@ muillm_comm_error_t __muillm_scatter_all(
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const dim3 num_blocks = dim3(DIV_ROUND_UP(scattered_size_bytes, BYTES_PER_BLOCK), local_size);
+  // we want to avoid spawning too many blocks to copy the data and want instead
+  // to make blocks process more data when we have more than MAX_REDUCE_X_BLOCKS
+  //
+  int num_small_x_blocks = DIV_ROUND_UP(scattered_size_bytes, BYTES_PER_BLOCK_LOOP);
+  int num_x_blocks = std::min(num_small_x_blocks, MAX_REDUCE_X_BLOCKS);
+  const dim3 num_blocks = dim3(num_x_blocks, local_size);
+
+  int bytes_per_block = ALIGN_UP(DIV_ROUND_UP(scattered_size_bytes, num_x_blocks), 4096);
 
   scatter_all_tp8_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
     (const uint8_t*) src,
@@ -1707,6 +1724,7 @@ muillm_comm_error_t __muillm_scatter_all(
     (uint8_t*) dst5,
     (uint8_t*) dst6,
     (uint8_t*) dst7,
+    bytes_per_block,
     scattered_size_bytes,
     local_rank
   );
@@ -1896,7 +1914,7 @@ muillm_comm_error_t __muillm_reduce_fp16(
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(scattered_count, threads_per_blocks);
+  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
 
   if (local_size == 8) {
     // compute the src pointers by applying the offsets
@@ -2133,6 +2151,9 @@ muillm_comm_error_t __muillm_reduce_bf16(
   __hip_bfloat16* dst
 ) {
 
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
+
   if (local_size == 8) {
     // compute the src pointers by applying the offsets
     const __hip_bfloat16* src0 = src + (0 * scattered_count);
@@ -2143,9 +2164,6 @@ muillm_comm_error_t __muillm_reduce_bf16(
     const __hip_bfloat16* src5 = src + (5 * scattered_count);
     const __hip_bfloat16* src6 = src + (6 * scattered_count);
     const __hip_bfloat16* src7 = src + (7 * scattered_count);
-
-    const int threads_per_blocks = THREADS_PER_BLOCK;
-    const int num_blocks = DIV_ROUND_UP(scattered_count, threads_per_blocks);
 
     reduce_x8_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -2166,9 +2184,6 @@ muillm_comm_error_t __muillm_reduce_bf16(
     const __hip_bfloat16* src2 = src + (2 * scattered_count);
     const __hip_bfloat16* src3 = src + (3 * scattered_count);
 
-    const int threads_per_blocks = THREADS_PER_BLOCK;
-    const int num_blocks = DIV_ROUND_UP(scattered_count, threads_per_blocks);
-
     reduce_x4_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
@@ -2181,9 +2196,6 @@ muillm_comm_error_t __muillm_reduce_bf16(
     // compute the src pointers by applying the offsets
     const __hip_bfloat16* src0 = src + (0 * scattered_count);
     const __hip_bfloat16* src1 = src + (1 * scattered_count);
-
-    const int threads_per_blocks = THREADS_PER_BLOCK;
-    const int num_blocks = DIV_ROUND_UP(scattered_count, threads_per_blocks);
 
     reduce_x2_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
