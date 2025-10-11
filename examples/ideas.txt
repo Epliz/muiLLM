@@ -1,0 +1,34 @@
+General ideas:
+--------------
+
+- try push vs pulll
+- splitting kernels to start next one
+- fusing kernels to avoid dispatch overhead
+
+
+GEMM-RS:
+--------
+
+- try splitting for large matrices
+- improving further reduction kernels
+- use pull approach to be able to do reduction during data transfers
+    - potentially use shared memory, pulling from one GPU at a time and accumulating in there
+    - start from different GPUs
+    - reduction for large transferes is 10%
+    - could fuse wait in transfer kernel as well
+
+All2All:
+--------
+
+- reduce gpu syncs:
+   maybe the issue we overwrite counters?
+   use more counter sets
+
+- fuse gpu syncs
+- avoid global atomics in as many kernels as possible
+- reduce CPU overhead:
+  - all in C++
+  - remove torch::zeros
+  - remove torch::slice
+  - monkey patch distributed barrier
+  - re-use torch tensors
