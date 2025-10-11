@@ -1,4 +1,6 @@
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+
 #include <iostream>
 
 #ifndef __MUILLM_BASE_HPP__
@@ -417,6 +419,39 @@ muillm_comm_error_t __local_socket_all_gather(
   return MUILLM_COMM_SUCCESS;
 }
 
+void __allocate_locked_cpu_mem(
+    size_t size,
+    void** host_addr_ptr,
+    void** device_ptr_ptr
+  ) {
+  *host_addr_ptr = nullptr;
+  *device_ptr_ptr = nullptr;
+
+  void *host_addr = malloc(size);
+
+  if (mlock(host_addr, size) != 0) {
+    // TODO: return error code
+    host_addr = nullptr;
+  }
+
+  // register the memory for use with HIP
+  if (hipHostRegister(host_addr, size, hipHostRegisterPortable | hipHostRegisterMapped) != hipSuccess) {
+    // TODO: return error code
+    TORCH_CHECK(false, "an error happened when registering shared memory with HIP");
+    return;
+  }
+
+  // get the device pointer after registration
+  if (hipHostGetDevicePointer((void**)device_ptr_ptr, host_addr, 0) != hipSuccess) {
+    // TODO: return error code
+    TORCH_CHECK(false, "an error happened when getting device pointer for shared memory");
+    return;
+  }
+
+  // return
+  *host_addr_ptr = host_addr;
+}
+
 void __allocate_locked_shared_cpu_mem(
     muillm_comm_t* comm,
     size_t size,
@@ -499,6 +534,19 @@ void __allocate_locked_shared_cpu_mem(
   *shm_addr_ptr = shm_addr;
 }
 
+void __deallocate_locked_cpu_mem(
+    muillm_comm_t* comm,
+    void* host_addr
+  ) {
+  int local_rank = comm->local_rank;
+
+  if (hipHostUnregister(host_addr) != hipSuccess) {
+    // TODO: return error code
+    TORCH_CHECK(false, "an error happened when unregistering shared memory from HIP");
+    return;
+  }
+}
+
 void __deallocate_locked_shared_cpu_mem(
     muillm_comm_t* comm,
     void* host_addr
@@ -522,13 +570,15 @@ void __deallocate_locked_shared_cpu_mem(
 
 typedef struct muillm_comm_p2p_buffer_set {
   void* buffers[MUILLM_COMM_MAX_GPUS];
-  uint32_t* counters_host;
-  uint32_t* counters;
   size_t capacity;
 } muillm_comm_p2p_buffer_set_t;
 
 
 typedef struct muillm_comm_p2p: muillm_comm {
+
+  muillm_comm_p2p(at::cuda::CUDAStream second_stream): second_stream(second_stream) {
+
+  }
 
   // reduction buffer sets
   muillm_comm_p2p_buffer_set_t* first_buffers;
@@ -538,7 +588,14 @@ typedef struct muillm_comm_p2p: muillm_comm {
   uint32_t* signal_host;
   uint32_t* signal;
 
+  at::cuda::CUDAStream second_stream;
+
+  // local stream signal memory to synchronize GPUs
+  uint32_t* stream_signal_host;
+  uint32_t* stream_signal;
+
   uint32_t signal_seq_no;
+  uint32_t stream_signal_seq_no;
 
   // event to flush the caches
   hipEvent_t cache_flush_event;
@@ -649,14 +706,6 @@ static muillm_comm_error_t __free_buffer_set(
     }
   }
 
-  // free the counters memory as well
-  if (buffer_set->counters_host != nullptr) {
-    __deallocate_locked_shared_cpu_mem(
-      comm,
-      buffer_set->counters_host
-    );
-  }
-
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -740,25 +789,6 @@ static muillm_comm_error_t __ensure_buffer_set_capacity(
   // free the memory mappings and so on
   if ((error =__free_buffer_set(comm, buffer_set)) != MUILLM_COMM_SUCCESS) {
     return error;
-  }
-
-  // allocate counters memory
-  // we need it to be on the CPU side so that there is no coherency issues between GPUs
-  // (need correct fine-grained atomic operations)
-  __allocate_locked_shared_cpu_mem(
-    comm,
-    sizeof(uint64_t) * MUILLM_MAX_GPUS, // alloc 8 bytes even though we use only 4
-    (void**) &buffer_set->counters_host,
-    (void**) &buffer_set->counters
-  );
-
-  // initialize the counters to 0
-  if (local_rank == 0) {
-    // the counters are shared, so only one rank needs to initialize them
-    // __allocate_shared_gpu_mem after will guarantee all ranks see the updated value
-    if (hipMemset(buffer_set->counters, 0, sizeof(uint64_t) * MUILLM_MAX_GPUS) != hipSuccess) {
-      return MUILLM_COMM_UNKNOWN_ERROR;
-    }
   }
 
   // allocate new buffers
@@ -868,8 +898,6 @@ static muillm_comm_error_t __init_buffer_set(
   for (int i = 0; i < MUILLM_COMM_MAX_GPUS; i++) {
     buffer_set->buffers[i] = nullptr;
   }
-  buffer_set->counters_host = nullptr;
-  buffer_set->counters = nullptr;
 
   if (hipSetDevice(local_rank) != hipSuccess) {
     return MUILLM_COMM_UNKNOWN_ERROR;
@@ -922,7 +950,8 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   int local_rank,
   const muillm_comm_local_socket_t* local_socket,
   muillm_comm_p2p_t** comm_ptr,
-  hipStream_t stream
+  hipStream_t stream,
+  at::cuda::CUDAStream second_stream
 ) {
   if (world_size != local_size) {
     // we currently ony support single machine, so
@@ -935,7 +964,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   muillm_comm_method_t transfer_method = MUILLM_COMM_METHOD_P2P_TRANSFER;
 
   // create the comm object
-  muillm_comm_p2p_t* comm = new muillm_comm_p2p_t;
+  muillm_comm_p2p_t* comm = new muillm_comm_p2p_t(second_stream);
   comm->transfer_method = transfer_method;
 
   comm->world_size = world_size;
@@ -946,6 +975,10 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   comm->signal_host = nullptr;
   comm->signal = nullptr;
   comm->signal_seq_no = 0;
+
+  comm->stream_signal_host = nullptr;
+  comm->stream_signal = nullptr;
+  comm->stream_signal_seq_no = 0;
 
   comm->process_group = local_socket->process_group;
 
@@ -984,7 +1017,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
-  // allocate signal memory
+  // allocate shared signal memory
   __allocate_locked_shared_cpu_mem(
     comm,
     sizeof(uint64_t), // alloc 8 bytese even though we use only 4
@@ -997,6 +1030,21 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   }
   // initialize to 0
   if (hipMemset(comm->signal, 0, sizeof(uint64_t)) != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // allocate signal memory
+  __allocate_locked_cpu_mem(
+    sizeof(uint64_t), // alloc 8 bytes even though we use only 4
+    (void**) &comm->stream_signal_host,
+    (void**) &comm->stream_signal
+  );
+
+  if (comm->stream_signal_host == nullptr || comm->stream_signal == nullptr) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+  // initialize to 0
+  if (hipMemset(comm->stream_signal, 0, sizeof(uint64_t)) != hipSuccess) {
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
@@ -1084,6 +1132,16 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
     comm->signal = nullptr;
   }
 
+  // free stream signal memory
+  if (comm->stream_signal_host != nullptr) {
+    __deallocate_locked_cpu_mem(
+      comm,
+      comm->stream_signal_host
+    );
+    comm->stream_signal_host = nullptr;
+    comm->stream_signal = nullptr;
+  }
+
   // destroy cache flush event
   if (hipEventDestroy(comm->cache_flush_event) != hipSuccess) {
     std::cout<<"rank "<<local_rank<<" failed to destroy cache flush event"<<std::endl;
@@ -1109,6 +1167,8 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
 }
 
 muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal);
+
+muillm_comm_error_t __mui_stream_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no);
 
 muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no);
 
@@ -1143,6 +1203,79 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
     }
   } else {
     std::cout<<"rank "<<local_rank<<" gpu barrier failed because there is no signal memory"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+static muillm_comm_error_t __mui_signal_stream_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_t stream) {
+  int local_rank = comm->local_rank;
+
+  hipError_t hip_error;
+  muillm_comm_error_t muillm_error;
+
+  if (comm->stream_signal != nullptr) {
+    comm->stream_signal_seq_no ++;
+    uint64_t seq_no = comm->stream_signal_seq_no;
+
+    // GPU barrier: all GPUs wait on each other
+    if (comm->cant_skip_cache_flush_event) {
+      // on MI100, we get a crash if not putting this event here
+      // record an event to flush caches
+      if (hipEventRecord(comm->cache_flush_event, stream) != hipSuccess) {
+        std::cout<<"rank "<<local_rank<<" signal stream gpu barrier failed because hipEventRecord failed"<<std::endl;
+        hipError_t err = hipGetLastError();
+        const char* errStr = hipGetErrorString(err);
+        std::cout<<"Last HIP error: "<<errStr<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+    }
+
+    // write the values
+    if ((muillm_error = __mui_stream_inc_value(stream, comm->stream_signal)) != MUILLM_COMM_SUCCESS) {
+      std::cout<<"rank "<<local_rank<<" signal stream gpu barrier failed because __mui_stream_inc_wait_value failed"<<std::endl;
+      return muillm_error;
+    }
+  } else {
+    std::cout<<"rank "<<local_rank<<" signal stream gpu barrier failed because there is no signal memory"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+static muillm_comm_error_t __mui_wait_stream_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_t stream) {
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  hipError_t hip_error;
+  muillm_comm_error_t muillm_error;
+
+  if (comm->stream_signal != nullptr) {
+    // was increment by __mui_signal_stream_gpu_barrier
+    uint64_t seq_no = comm->stream_signal_seq_no;
+
+    // GPU barrier: all GPUs wait on each other
+    if (comm->cant_skip_cache_flush_event) {
+      // on MI100, we get a crash if not putting this event here
+      // record an event to flush caches
+      if (hipEventRecord(comm->cache_flush_event, stream) != hipSuccess) {
+        std::cout<<"rank "<<local_rank<<" wait stream gpu barrier failed because hipEventRecord failed"<<std::endl;
+        hipError_t err = hipGetLastError();
+        const char* errStr = hipGetErrorString(err);
+        std::cout<<"Last HIP error: "<<errStr<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+    }
+
+    // write the values
+    if ((muillm_error = __mui_stream_wait_value(stream, comm->stream_signal, seq_no)) != MUILLM_COMM_SUCCESS) {
+      std::cout<<"rank "<<local_rank<<" wait stream gpu barrier failed because __mui_stream_wait_value failed"<<std::endl;
+      return muillm_error;
+    }
+  } else {
+    std::cout<<"rank "<<local_rank<<" wait stream gpu barrier failed because there is no signal memory"<<std::endl;
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
@@ -1255,8 +1388,6 @@ muillm_comm_error_t muillm_comm_reduce_scatter_ll(
 
 #include <tuple>
 
-#include <ATen/cuda/CUDAContext.h>
-
 #define META_DIM 4
 
 #define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
@@ -1281,7 +1412,9 @@ void* all2all_comm_init(
     return (void*) nullptr;
   }
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
+  auto device_index = stream.device_index();
+  at::cuda::CUDAStream second_stream = at::cuda::getStreamFromPool(false, device_index);
 
   muillm_comm_p2p_t* comm_ptr = nullptr;
   muillm_error = muillm_comm_p2p_init_comm(
@@ -1291,7 +1424,8 @@ void* all2all_comm_init(
     local_rank,
     &local_socket,
     (muillm_comm_p2p_t**) &comm_ptr,
-    stream
+    stream,
+    second_stream
   );
 
   TORCH_CHECK(muillm_error == MUILLM_COMM_SUCCESS, "an error happened when initializing mui comm");
@@ -1307,7 +1441,7 @@ void all2all_comm_destroy(void* comms) {
   TORCH_CHECK(muillm_error == MUILLM_COMM_SUCCESS, "an error happened when destroying mui comm");
 }
 
-#define REDUCE_SCATTER_CHUNKED_THRESHOLD (32 * 1024 * 1024) // 32M elements
+#define REDUCE_SCATTER_CHUNKED_THRESHOLD (4 * 1024 * 1024) // 4M elements
 
 // output shape [M, N]
 torch::Tensor all2all_comm_gemm_reduce_scatter(
@@ -1322,7 +1456,8 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
   CHECK_INPUT(weights);
 
   auto device = input.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
+  at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(device.index());
+  at::cuda::CUDAStream second_stream = comm->second_stream;
 
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
@@ -1357,11 +1492,95 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
   int total_size = scattered_M * N;
   // if the total size is big enough, we split the computation and communication
   // into two halves to overlap them
-  /*if (total_size > REDUCE_SCATTER_CHUNKED_THRESHOLD) {
+  if (total_size >= REDUCE_SCATTER_CHUNKED_THRESHOLD) {
 
-  } else */ {
+    int half_N = N / 2;
+    int second_half_N = N - half_N;
+
+    // First half
+    {
+      // we take half of N for the weights, bias and output
+      auto weights_half = weights.narrow(0, 0, half_N);
+      std::optional<torch::Tensor> bias_half = bias.has_value() ? std::optional<torch::Tensor>(bias.value().narrow(0, 0, half_N)) : std::nullopt;
+
+      auto output_half = output.narrow(1, 0, half_N);
+      auto rs_output_half = rs_output.narrow(1, 0, half_N);
+
+      torch::linear_out(output_half, input, weights_half, bias_half); // shape [M, half_N]
+
+      // signal we are done with this part of the computation
+      if (__mui_signal_stream_gpu_barrier(comm, stream) != MUILLM_COMM_SUCCESS) {
+        TORCH_CHECK(false, "an error happened when doing signal stream gpu barrier");
+      }
+
+      // use our custom reduce-scatter implementation
+      // TODO: support striding
+      // TODO: use a special call so that it doesn't flip buffers
+      if (muillm_comm_reduce_scatter_ll(
+        comm,
+        stream,
+        output_half.data_ptr(),
+        M,
+        scattered_M,
+        half_N,
+        datatype,
+        rs_output_half.data_ptr()
+      ) != MUILLM_COMM_SUCCESS) {
+        TORCH_CHECK(false, "an error happened when doing reduce-scatter");
+      }
+    }
+
+    // Second stream
+    {
+      at::cuda::setCurrentCUDAStream(second_stream);
+
+      // wait for the signal
+      if (__mui_wait_stream_gpu_barrier(comm, second_stream) != MUILLM_COMM_SUCCESS) {
+        TORCH_CHECK(false, "an error happened when doing wait stream gpu barrier");
+      }
+      
+      // we take the second half of N for the weights, bias and output
+      auto weights_half = weights.narrow(0, half_N, second_half_N);
+      std::optional<torch::Tensor> bias_half = bias.has_value() ? std::optional<torch::Tensor>(bias.value().narrow(0, half_N, second_half_N)) : std::nullopt;
+
+      auto output_half = output.narrow(1, half_N, second_half_N);
+      auto rs_output_half = rs_output.narrow(1, half_N, second_half_N);
+
+      torch::linear_out(output_half, input, weights_half, bias_half); // shape [M, half_N]
+
+      // use our custom reduce-scatter implementation
+      // TODO: support striding
+      // TODO: use a special call so that it doesn't flip buffers
+      if (muillm_comm_reduce_scatter_ll(
+        comm,
+        second_stream,
+        output_half.data_ptr(),
+        M,
+        scattered_M,
+        second_half_N,
+        datatype,
+        rs_output_half.data_ptr()
+      ) != MUILLM_COMM_SUCCESS) {
+        TORCH_CHECK(false, "an error happened when doing reduce-scatter");
+      }
+
+      // signal we are done with this part of the computation
+      if (__mui_signal_stream_gpu_barrier(comm, second_stream) != MUILLM_COMM_SUCCESS) {
+        TORCH_CHECK(false, "an error happened when doing signal stream gpu barrier");
+      }
+
+      // switch back to the original stream
+      at::cuda::setCurrentCUDAStream(stream);
+    }
+
+    // wait for the second stream to finish
+    if (__mui_wait_stream_gpu_barrier(comm, stream) != MUILLM_COMM_SUCCESS) {
+      TORCH_CHECK(false, "an error happened when doing wait stream gpu barrier");
+    }
+
+  } else {
     // do it in one go
-    torch::linear(output, input, weights, bias); // shape [M, N]
+    torch::linear_out(output, input, weights, bias); // shape [M, N]
 
     // use our custom reduce-scatter implementation
     if (muillm_comm_reduce_scatter_ll(

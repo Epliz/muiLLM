@@ -146,7 +146,6 @@ __global__ void __muillm_inc_value_p2p_kernel(
 ) {
   if (threadIdx.x == 0) {
     atomicAdd_system(signal, 1);
-    __threadfence_system();
   }
 }
 
@@ -185,6 +184,29 @@ muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* si
   return MUILLM_COMM_SUCCESS;
 }
 
+__device__ void __do_wait_value_p2p(
+  volatile uint32_t* signal,
+  uint32_t seq_no
+) {
+  if (threadIdx.x == 0) {
+    // wait for the other ranks
+    // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
+    // have seen the previous one
+    while (*signal < seq_no) __threadfence_system();
+  }
+}
+
+__global__ void __muillm_wait_value_p2p_kernel(
+  volatile uint32_t* signal,
+  uint32_t seq_no
+) {
+  __do_wait_value_p2p(signal, seq_no);
+}
+
+muillm_comm_error_t __mui_stream_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
+  __muillm_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
+  return MUILLM_COMM_SUCCESS;
+}
 
 
 // each threads can copy 16 bytes
