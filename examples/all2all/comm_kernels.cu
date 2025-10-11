@@ -1167,6 +1167,10 @@ void __global__ all2all_combine_scale_experts_fp32_kernel(
   }
 }
 
+#define COMBINE_WRITE_BACK_THREADS_PER_BLOCK 256
+#define COMBINE_WRITE_BACK_ELEMENTS_PER_THREAD 4
+#define COMBINE_WRITE_BACK_ELEMENTS_PER_BLOCK_LOOP (COMBINE_WRITE_BACK_THREADS_PER_BLOCK * COMBINE_WRITE_BACK_ELEMENTS_PER_THREAD)
+
 void __global__ all2all_combine_write_back_fp32_kernel(
   const float* __restrict__ scaled_expert_outputs,
   float* __restrict__ output,
@@ -1182,7 +1186,25 @@ void __global__ all2all_combine_write_back_fp32_kernel(
   output = &output[token_idx * hidden_dim];
 
   // combine the expert outputs into output
-  for (int d = threadIdx.x; d < hidden_dim; d += THREADS_PER_BLOCK) {
+  int d = COMBINE_WRITE_BACK_ELEMENTS_PER_THREAD * threadIdx.x;
+  for (; d + (COMBINE_WRITE_BACK_ELEMENTS_PER_THREAD - 1) < hidden_dim; d += COMBINE_WRITE_BACK_ELEMENTS_PER_BLOCK_LOOP) {
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    float sum2 = 0.0f;
+    float sum3 = 0.0f;
+    for (int k = 0; k < experts_per_token; k++) {
+      sum0 += scaled_expert_outputs[k * hidden_dim + d + 0];
+      sum1 += scaled_expert_outputs[k * hidden_dim + d + 1];
+      sum2 += scaled_expert_outputs[k * hidden_dim + d + 2];
+      sum3 += scaled_expert_outputs[k * hidden_dim + d + 3];
+    }
+    output[d + 0] = sum0;
+    output[d + 1] = sum1;
+    output[d + 2] = sum2;
+    output[d + 3] = sum3;
+  }
+  // remainder
+  for (; d < hidden_dim; d++) {
     float sum = 0.0f;
     for (int k = 0; k < experts_per_token; k++) {
       sum += scaled_expert_outputs[k * hidden_dim + d];
@@ -1219,7 +1241,7 @@ void all2all_combine_unpack_fp32(
   }
   // Second kernel to combine scaled_expert_outputs into output
   {
-    const int threads_per_block = THREADS_PER_BLOCK;
+    const int threads_per_block = COMBINE_WRITE_BACK_THREADS_PER_BLOCK;
     const int blocks = num_tokens;
 
     all2all_combine_write_back_fp32_kernel<<<blocks, threads_per_block, 0, stream>>>(
@@ -1279,7 +1301,25 @@ void __global__ all2all_combine_write_back_fp16_kernel(
   output = &output[token_idx * hidden_dim];
 
   // combine the expert outputs into output
-  for (int d = threadIdx.x; d < hidden_dim; d += THREADS_PER_BLOCK) {
+  int d = COMBINE_WRITE_BACK_ELEMENTS_PER_THREAD * threadIdx.x;
+  for (; d + (COMBINE_WRITE_BACK_ELEMENTS_PER_THREAD - 1) < hidden_dim; d += COMBINE_WRITE_BACK_ELEMENTS_PER_BLOCK_LOOP) {
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    float sum2 = 0.0f;
+    float sum3 = 0.0f;
+    for (int k = 0; k < experts_per_token; k++) {
+      sum0 += scaled_expert_outputs[k * hidden_dim + d + 0];
+      sum1 += scaled_expert_outputs[k * hidden_dim + d + 1];
+      sum2 += scaled_expert_outputs[k * hidden_dim + d + 2];
+      sum3 += scaled_expert_outputs[k * hidden_dim + d + 3];
+    }
+    output[d + 0] = __float2half(sum0);
+    output[d + 1] = __float2half(sum1);
+    output[d + 2] = __float2half(sum2);
+    output[d + 3] = __float2half(sum3);
+  }
+  // remainder
+  for (; d < hidden_dim; d++) {
     float sum = 0.0f;
     for (int k = 0; k < experts_per_token; k++) {
       sum += scaled_expert_outputs[k * hidden_dim + d];
@@ -1316,7 +1356,7 @@ void all2all_combine_unpack_fp16(
   }
   // Second kernel to combine scaled_expert_outputs into output
   {
-    const int threads_per_block = THREADS_PER_BLOCK;
+    const int threads_per_block = COMBINE_WRITE_BACK_THREADS_PER_BLOCK;
     const int blocks = num_tokens;
 
     all2all_combine_write_back_fp16_kernel<<<blocks, threads_per_block, 0, stream>>>(
