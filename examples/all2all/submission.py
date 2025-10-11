@@ -1638,13 +1638,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
     TORCH_CHECK(false, "Unsupported data type");
   }
 
-  //
-  // We wait for all the GPUs to be done with sending data
-  //
-  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when doing combine barrier 2");
-  }
-
   // return expert_num_tokens, expert_x, expert_meta
   return std::make_tuple(expert_num_tokens, expert_x, expert_meta);
 }
@@ -2034,13 +2027,6 @@ torch::Tensor all2all_comm_combine(
     );
   } else {
     TORCH_CHECK(false, "Unsupported data type");
-  }
-
-  //
-  // We wait for all the GPUs to be done with sending data
-  //
-  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when doing combine barrier 2");
   }
 
   return out_tokens;
