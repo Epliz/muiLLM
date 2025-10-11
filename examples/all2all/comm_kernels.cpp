@@ -522,17 +522,26 @@ void __deallocate_locked_shared_cpu_mem(
 
 typedef struct muillm_comm_p2p_buffer_set {
   void* buffers[MUILLM_COMM_MAX_GPUS];
-  uint32_t* counters_host;
-  uint32_t* counters;
   size_t capacity;
 } muillm_comm_p2p_buffer_set_t;
 
+
+typedef struct muillm_comm_p2p_counter_set {
+  uint32_t* counters_host;
+  uint32_t* counters;
+} muillm_comm_p2p_counter_set_t;
 
 typedef struct muillm_comm_p2p: muillm_comm {
 
   // reduction buffer sets
   muillm_comm_p2p_buffer_set_t* first_buffers;
   muillm_comm_p2p_buffer_set_t* second_buffers;
+
+  // counters
+  muillm_comm_p2p_counter_set_t* first_counters;
+  muillm_comm_p2p_counter_set_t* second_counters;
+  muillm_comm_p2p_counter_set_t* third_counters;
+  muillm_comm_p2p_counter_set_t* fourth_counters;
 
   // shared signal memory to synchronize GPUs
   uint32_t* signal_host;
@@ -561,14 +570,6 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
 
 muillm_comm_error_t muillm_comm_p2p_destroy_comm(
     muillm_comm_p2p_t* comm
-);
-
-muillm_comm_error_t muillm_comm_p2p_get_buffers(
-  muillm_comm_p2p_t* comm,
-  size_t count,
-  muillm_comm_datatype_t datatype,
-  void*** buffers,
-  hipStream_t stream
 );
 
 #endif // __MUILLM_COMM_P2P_HPP__
@@ -649,11 +650,90 @@ static muillm_comm_error_t __free_buffer_set(
     }
   }
 
+  return MUILLM_COMM_SUCCESS;
+}
+
+static muillm_comm_error_t __allocate_counter_set(
+  muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_counter_set_t** counter_set_
+) {
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  muillm_comm_error_t error;
+
+  muillm_comm_p2p_counter_set_t* counter_set = new muillm_comm_p2p_counter_set_t;
+  if (counter_set == nullptr) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+  counter_set->counters_host = nullptr;
+  counter_set->counters = nullptr;
+  *counter_set_ = counter_set;
+
+
+  // we will import the memory mappings for that specific GPU
+  if (hipSetDevice(local_rank) != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // allocate counters memory
+  // we need it to be on the CPU side so that there is no coherency issues between GPUs
+  // (need correct fine-grained atomic operations)
+  __allocate_locked_shared_cpu_mem(
+    comm,
+    sizeof(uint64_t) * MUILLM_MAX_GPUS, // alloc 8 bytes even though we use only 4
+    (void**) &counter_set->counters_host,
+    (void**) &counter_set->counters
+  );
+
+  // initialize the counters to 0
+  if (local_rank == 0) {
+    // the counters are shared, so only one rank needs to initialize them
+    // __allocate_shared_gpu_mem after will guarantee all ranks see the updated value
+    if (hipMemset(counter_set->counters, 0, sizeof(uint64_t) * MUILLM_MAX_GPUS) != hipSuccess) {
+      return MUILLM_COMM_UNKNOWN_ERROR;
+    }
+  }
+
+  // synchronize the device
+  if (hipDeviceSynchronize() != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+static muillm_comm_error_t __free_counter_set(
+  muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_counter_set_t* counter_set,
+  bool sync = true
+) {
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  muillm_comm_error_t error;
+
+  // we need to synchronize the ranks and block the  CPU so that we can deallocate
+  // the previous receive buffers
+
+  // synchronize to make sure no GPU is going to reference the previous memory
+  if (hipDeviceSynchronize() != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // make sure all CPUs have synchronized their GPUs
+  if (sync) {
+    if ((error =__local_socket_barrier(comm)) != MUILLM_COMM_SUCCESS) {
+      TORCH_CHECK(false, "an error happened when doing barrier");
+      return error;
+    }
+  }
+
   // free the counters memory as well
-  if (buffer_set->counters_host != nullptr) {
+  if (counter_set->counters_host != nullptr) {
     __deallocate_locked_shared_cpu_mem(
       comm,
-      buffer_set->counters_host
+      counter_set->counters_host
     );
   }
 
@@ -742,25 +822,6 @@ static muillm_comm_error_t __ensure_buffer_set_capacity(
     return error;
   }
 
-  // allocate counters memory
-  // we need it to be on the CPU side so that there is no coherency issues between GPUs
-  // (need correct fine-grained atomic operations)
-  __allocate_locked_shared_cpu_mem(
-    comm,
-    sizeof(uint64_t) * MUILLM_MAX_GPUS, // alloc 8 bytes even though we use only 4
-    (void**) &buffer_set->counters_host,
-    (void**) &buffer_set->counters
-  );
-
-  // initialize the counters to 0
-  if (local_rank == 0) {
-    // the counters are shared, so only one rank needs to initialize them
-    // __allocate_shared_gpu_mem after will guarantee all ranks see the updated value
-    if (hipMemset(buffer_set->counters, 0, sizeof(uint64_t) * MUILLM_MAX_GPUS) != hipSuccess) {
-      return MUILLM_COMM_UNKNOWN_ERROR;
-    }
-  }
-
   // allocate new buffers
   capacity = __next_power_of_2(capacity);
 
@@ -814,38 +875,36 @@ muillm_comm_error_t muillm_comm_p2p_get_buffer_set(
   return muillm_comm_p2p_get_buffer_set(comm, size, buffer_set, stream);
 }
 
-muillm_comm_error_t muillm_comm_p2p_get_next_buffer_set(
+muillm_comm_error_t muillm_comm_p2p_get_counter_set(
   muillm_comm_p2p_t* comm,
-  muillm_comm_p2p_buffer_set_t** buffer_set
+  muillm_comm_p2p_counter_set_t** counter_set
 ) {
-  // always return the second buffer set
-  *buffer_set = comm->second_buffers;
+  
+  muillm_comm_error_t muillm_error;
+
+  // always return the current first buffer set
+  *counter_set = comm->first_counters;
+
+  // swap buffer sets for next time
+  muillm_comm_p2p_counter_set_t* tmp = comm->first_counters;
+  comm->first_counters = comm->second_counters;
+  comm->second_counters = comm->third_counters;
+  comm->third_counters = comm->fourth_counters;
+  comm->fourth_counters = tmp;
 
   return MUILLM_COMM_SUCCESS;
 }
 
-muillm_comm_error_t muillm_comm_p2p_get_buffers(
+
+muillm_comm_error_t muillm_comm_p2p_get_next_counter_set(
   muillm_comm_p2p_t* comm,
-  size_t count,
-  muillm_comm_datatype_t datatype,
-  void*** buffers,
-  hipStream_t stream
+  muillm_comm_p2p_counter_set_t** counter_set
 ) {
+  
+  muillm_comm_error_t muillm_error;
 
-  muillm_comm_p2p_buffer_set_t* buffer_set;
-  muillm_comm_error_t error = muillm_comm_p2p_get_buffer_set(
-    comm,
-    count,
-    datatype,
-    &buffer_set,
-    stream
-  );
-
-  if (error != MUILLM_COMM_SUCCESS) {
-    return error;
-  }
-
-  *buffers = (void**) buffer_set->buffers;
+  // always return the current first buffer set
+  *counter_set = comm->second_counters;
 
   return MUILLM_COMM_SUCCESS;
 }
@@ -868,8 +927,6 @@ static muillm_comm_error_t __init_buffer_set(
   for (int i = 0; i < MUILLM_COMM_MAX_GPUS; i++) {
     buffer_set->buffers[i] = nullptr;
   }
-  buffer_set->counters_host = nullptr;
-  buffer_set->counters = nullptr;
 
   if (hipSetDevice(local_rank) != hipSuccess) {
     return MUILLM_COMM_UNKNOWN_ERROR;
@@ -1009,6 +1066,20 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
     return muillm_error;
   }
 
+  // initialize counter sets
+  if ((muillm_error = __allocate_counter_set(comm, &comm->first_counters)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+  if ((muillm_error = __allocate_counter_set(comm, &comm->second_counters)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+  if ((muillm_error = __allocate_counter_set(comm, &comm->third_counters)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+  if ((muillm_error = __allocate_counter_set(comm, &comm->fourth_counters)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+
   // set the device
   if (hipSetDevice(local_rank) != hipSuccess) {
     return MUILLM_COMM_UNKNOWN_ERROR;
@@ -1073,6 +1144,28 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
     return error;
   }
   delete comm->second_buffers;
+
+  // free counter sets
+  if ((error = __free_counter_set(comm, comm->first_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free first counter set"<<std::endl;
+    return error;
+  }
+  delete comm->first_counters;
+  if ((error = __free_counter_set(comm, comm->second_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free second counter set"<<std::endl;
+    return error;
+  }
+  delete comm->second_counters;
+  if ((error = __free_counter_set(comm, comm->third_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free third counter set"<<std::endl;
+    return error;
+  }
+  delete comm->third_counters;
+  if ((error = __free_counter_set(comm, comm->fourth_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free fourth counter set"<<std::endl;
+    return error;
+  }
+  delete comm->fourth_counters;
 
   // free signal memory
   if (comm->signal_host != nullptr) {
@@ -1367,13 +1460,20 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
 
   muillm_comm_error_t muillm_error;
 
-  // get the next reduction buffer to get the counters to clear
-  muillm_comm_p2p_buffer_set_t* next_buffer_set = nullptr;
+  // get the next counters to clear
+  muillm_comm_p2p_counter_set_t* next_counter_set = nullptr;
 
   // we have to do this call before flipping the buffer sets with muillm_comm_p2p_get_buffer_set
-  if (muillm_comm_p2p_get_next_buffer_set(comm, &next_buffer_set) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when getting next buffer set");
+  if (muillm_comm_p2p_get_next_counter_set(comm, &next_counter_set) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when getting next counter set");
   }
+
+  // get the current counter set
+  muillm_comm_p2p_counter_set_t* current_counter_set = nullptr;
+  if (muillm_comm_p2p_get_counter_set(comm, &current_counter_set) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when getting current counter set");
+  }
+
   // get reduction buffer set
   muillm_comm_p2p_buffer_set_t* buffer_set = nullptr;
 
@@ -1382,8 +1482,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
     TORCH_CHECK(false, "an error happened when getting buffer set");
   }
 
-  uint32_t* counters = (uint32_t*)buffer_set->counters;
-  uint32_t* next_counters = (uint32_t*) next_buffer_set->counters;
+  uint32_t* counters = (uint32_t*)current_counter_set->counters;
+  uint32_t* next_counters = (uint32_t*) next_counter_set->counters;
 
   all2all_dispatch_compute_send_counts(
     stream,
@@ -1778,13 +1878,20 @@ torch::Tensor all2all_comm_combine(
 
   muillm_comm_error_t muillm_error;
 
-  // get the next reduction buffer to get the counters to clear
-  muillm_comm_p2p_buffer_set_t* next_buffer_set = nullptr;
+  // get the next counters to clear
+  muillm_comm_p2p_counter_set_t* next_counter_set = nullptr;
 
   // we have to do this call before flipping the buffer sets with muillm_comm_p2p_get_buffer_set
-  if (muillm_comm_p2p_get_next_buffer_set(comm, &next_buffer_set) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when getting next buffer set");
+  if (muillm_comm_p2p_get_next_counter_set(comm, &next_counter_set) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when getting next counter set");
   }
+
+  // get the current counter set
+  muillm_comm_p2p_counter_set_t* current_counter_set = nullptr;
+  if (muillm_comm_p2p_get_counter_set(comm, &current_counter_set) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when getting current counter set");
+  }
+
   // get reduction buffer set
   muillm_comm_p2p_buffer_set_t* buffer_set = nullptr;
 
@@ -1793,8 +1900,8 @@ torch::Tensor all2all_comm_combine(
     TORCH_CHECK(false, "an error happened when getting buffer set");
   }
 
-  uint32_t* counters = (uint32_t*)buffer_set->counters;
-  uint32_t* next_counters = (uint32_t*) next_buffer_set->counters;
+  uint32_t* counters = (uint32_t*)current_counter_set->counters;
+  uint32_t* next_counters = (uint32_t*) next_counter_set->counters;
   
   all2all_combine_compute_send_counts(
     stream,
