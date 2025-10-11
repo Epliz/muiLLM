@@ -1251,8 +1251,6 @@ muillm_comm_error_t muillm_comm_reduce_scatter_ll(
   return MUILLM_COMM_SUCCESS;
 }
 
-#define MUILLM_REDUCE_SCATTER_LL_TRESHOLD (16 * 1024 * 1024) // 16M elements
-
 // torch extension
 
 #include <tuple>
@@ -1309,6 +1307,8 @@ void all2all_comm_destroy(void* comms) {
   TORCH_CHECK(muillm_error == MUILLM_COMM_SUCCESS, "an error happened when destroying mui comm");
 }
 
+#define REDUCE_SCATTER_CHUNKED_THRESHOLD (32 * 1024 * 1024) // 32M elements
+
 // output shape [M, N]
 torch::Tensor all2all_comm_gemm_reduce_scatter(
   void* comms,
@@ -1345,19 +1345,24 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
     return torch::Tensor();
   }
 
-  torch::Tensor output = torch::linear(input, weights, bias); // shape [M, N]
-
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
                             .device(device) // same output device as inputs
                             .requires_grad(false);
 
-        
+  auto output = torch::empty({M, N}, output_options);
   auto rs_output = torch::empty({scattered_M, N}, output_options);
 
   int total_size = scattered_M * N;
-  if (true) { // total_size <= MUILLM_REDUCE_SCATTER_LL_TRESHOLD) {
+  // if the total size is big enough, we split the computation and communication
+  // into two halves to overlap them
+  /*if (total_size > REDUCE_SCATTER_CHUNKED_THRESHOLD) {
+
+  } else */ {
+    // do it in one go
+    torch::linear(output, input, weights, bias); // shape [M, N]
+
     // use our custom reduce-scatter implementation
     if (muillm_comm_reduce_scatter_ll(
       comm,
@@ -1371,7 +1376,11 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
     ) != MUILLM_COMM_SUCCESS) {
       TORCH_CHECK(false, "an error happened when doing reduce-scatter");
     }
-  } else {
+  }
+
+
+  // equivalent to:
+  /* {
     std::vector<torch::Tensor> rs_output_vector = {rs_output};
     std::vector<torch::Tensor> input_vector = {output};
     comm->process_group->reduce_scatter_tensor_coalesced(
@@ -1379,7 +1388,7 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
       input_vector,
       c10d::ReduceScatterOptions()
     );
-  }
+  } */
 
   return rs_output;
 }
