@@ -1615,7 +1615,8 @@ void all2all_combine_compute_send_counts(
     hipStream_t stream,
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
-    uint32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     // counters for the different ranks
     uint32_t* counters,
     // local counter to clear for next use
@@ -1631,7 +1632,8 @@ void all2all_combine_pack_send_buffers_fp16(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const half* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     half* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -1651,7 +1653,8 @@ void all2all_combine_pack_send_buffers_fp32(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const float* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     float* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -1717,7 +1720,7 @@ torch::Tensor all2all_comm_combine(
 
   int num_tokens = weights.size(0);
   int num_experts_per_token = weights.size(1);
-  int num_local_experts = expert_num_tokens.size(0);
+  int num_local_experts = expert_meta.size(0);
   int max_recv = expert_meta.size(1);
   int meta_dim = expert_meta.size(2);
   int hidden_dim = expert_y.size(2);
@@ -1767,7 +1770,8 @@ torch::Tensor all2all_comm_combine(
                             .device(device) // same output device as inputs
                             .requires_grad(false);
 
-  auto send_offsets = torch::empty({local_size}, send_offsets_options);
+  auto send_bases = torch::empty({local_size}, send_offsets_options);
+  auto send_offsets = torch::empty({num_local_experts, max_recv}, send_offsets_options);
 
   // we align the metadata pointer to 4k for better performance
   // so we align up the data size as such as the metadata pointer will be right after the data pointer
@@ -1800,6 +1804,7 @@ torch::Tensor all2all_comm_combine(
     stream,
     (const int32_t*) expert_num_tokens.data_ptr(),
     (const int32_t*) expert_meta.data_ptr(),
+    (uint32_t*) send_bases.data_ptr(),
     (uint32_t*) send_offsets.data_ptr(),
     counters,
     next_counters,
@@ -1821,7 +1826,8 @@ torch::Tensor all2all_comm_combine(
       (const int32_t*) expert_num_tokens.data_ptr(),
       (const int32_t*) expert_meta.data_ptr(),
       (const half*) expert_y.data_ptr(),
-      (int32_t*) send_offsets.data_ptr(),
+      (uint32_t*) send_bases.data_ptr(),
+      (uint32_t*) send_offsets.data_ptr(),
       (half*) buffer_set->buffers[0],
       (half*) buffer_set->buffers[1],
       (half*) buffer_set->buffers[2],
@@ -1842,7 +1848,8 @@ torch::Tensor all2all_comm_combine(
       (const int32_t*) expert_num_tokens.data_ptr(),
       (const int32_t*) expert_meta.data_ptr(),
       (const float*) expert_y.data_ptr(),
-      (int32_t*) send_offsets.data_ptr(),
+      (uint32_t*) send_bases.data_ptr(),
+      (uint32_t*) send_offsets.data_ptr(),
       (float*) buffer_set->buffers[0],
       (float*) buffer_set->buffers[1],
       (float*) buffer_set->buffers[2],

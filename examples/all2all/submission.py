@@ -1630,7 +1630,8 @@ void all2all_combine_compute_send_counts(
     hipStream_t stream,
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
-    uint32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     // counters for the different ranks
     uint32_t* counters,
     // local counter to clear for next use
@@ -1646,7 +1647,8 @@ void all2all_combine_pack_send_buffers_fp16(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const half* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     half* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -1666,7 +1668,8 @@ void all2all_combine_pack_send_buffers_fp32(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const float* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     float* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -1732,7 +1735,7 @@ torch::Tensor all2all_comm_combine(
 
   int num_tokens = weights.size(0);
   int num_experts_per_token = weights.size(1);
-  int num_local_experts = expert_num_tokens.size(0);
+  int num_local_experts = expert_meta.size(0);
   int max_recv = expert_meta.size(1);
   int meta_dim = expert_meta.size(2);
   int hidden_dim = expert_y.size(2);
@@ -1782,7 +1785,8 @@ torch::Tensor all2all_comm_combine(
                             .device(device) // same output device as inputs
                             .requires_grad(false);
 
-  auto send_offsets = torch::empty({local_size}, send_offsets_options);
+  auto send_bases = torch::empty({local_size}, send_offsets_options);
+  auto send_offsets = torch::empty({num_local_experts, max_recv}, send_offsets_options);
 
   // we align the metadata pointer to 4k for better performance
   // so we align up the data size as such as the metadata pointer will be right after the data pointer
@@ -1815,6 +1819,7 @@ torch::Tensor all2all_comm_combine(
     stream,
     (const int32_t*) expert_num_tokens.data_ptr(),
     (const int32_t*) expert_meta.data_ptr(),
+    (uint32_t*) send_bases.data_ptr(),
     (uint32_t*) send_offsets.data_ptr(),
     counters,
     next_counters,
@@ -1836,7 +1841,8 @@ torch::Tensor all2all_comm_combine(
       (const int32_t*) expert_num_tokens.data_ptr(),
       (const int32_t*) expert_meta.data_ptr(),
       (const half*) expert_y.data_ptr(),
-      (int32_t*) send_offsets.data_ptr(),
+      (uint32_t*) send_bases.data_ptr(),
+      (uint32_t*) send_offsets.data_ptr(),
       (half*) buffer_set->buffers[0],
       (half*) buffer_set->buffers[1],
       (half*) buffer_set->buffers[2],
@@ -1857,7 +1863,8 @@ torch::Tensor all2all_comm_combine(
       (const int32_t*) expert_num_tokens.data_ptr(),
       (const int32_t*) expert_meta.data_ptr(),
       (const float*) expert_y.data_ptr(),
-      (int32_t*) send_offsets.data_ptr(),
+      (uint32_t*) send_bases.data_ptr(),
+      (uint32_t*) send_offsets.data_ptr(),
       (float*) buffer_set->buffers[0],
       (float*) buffer_set->buffers[1],
       (float*) buffer_set->buffers[2],
@@ -2230,6 +2237,7 @@ void __global__ all2all_dispatch_pack_send_buffers_fp32_kernel(
 
   int32_t send_pos = -1;
   if (threadIdx.x == 0) {
+    // TODO: move to previous kernel to avoid global atomics by computing a global offset array
     send_pos = (int32_t)atomicAdd((uint32_t*)&send_offsets[dst_rank], 1);
   }
   send_pos = __block_broadcast(send_pos);
@@ -2331,6 +2339,7 @@ void __global__ all2all_dispatch_pack_send_buffers_fp16_kernel(
 
   int32_t send_pos = -1;
   if (threadIdx.x == 0) {
+    // TODO: move to previous kernel to avoid global atomics by computing a global offset array
     send_pos = (int32_t)atomicAdd((uint32_t*)&send_offsets[dst_rank], 1);
   }
   send_pos = __block_broadcast(send_pos);
@@ -2434,6 +2443,8 @@ void __global__ all2all_dispatch_unpack_fp16_kernel(
 
   // do a single atomic add per block and broadcast the result to the warp
   if (threadIdx.x == 0) {
+    // TODO: make a previous single block kernel to read the meta and compute offsets
+    // to avoid global atomics
     local_num_expert_tokens = atomicAdd(&expert_num_tokens[local_expert_idx], 1);
   }
   local_num_expert_tokens = __block_broadcast(local_num_expert_tokens);
@@ -2523,6 +2534,8 @@ void __global__ all2all_dispatch_unpack_fp32_kernel(
 
   // do a single atomic add per block and broadcast the result to the warp
   if (threadIdx.x == 0) {
+    // TODO: make a previous single block kernel to read the meta and compute offsets
+    // to avoid global atomics
     local_num_expert_tokens = atomicAdd(&expert_num_tokens[local_expert_idx], 1);
   }
   local_num_expert_tokens = __block_broadcast(local_num_expert_tokens);
@@ -2728,7 +2741,8 @@ void all2all_compute_fp16(
 void __global__ all2all_combine_compute_send_counts_kernel(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
-    uint32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     // counters for the different ranks
     uint32_t* counters,
     // local counter to clear for next use
@@ -2770,11 +2784,13 @@ void __global__ all2all_combine_compute_send_counts_kernel(
       int num_local_tokens = expert_num_tokens_shared[local_expert_idx];
 
       const int32_t* local_expert_meta = &expert_meta[local_expert_idx * max_recv * META_DIM + 1];
+      uint32_t* local_expert_send_offsets = &send_offsets[local_expert_idx * max_recv];
 
       // for each token of this expert, figure out which rank to send to
       for (int i = lane_id; i < num_local_tokens; i += warpSize) {
         int32_t dst_rank = local_expert_meta[i * META_DIM]; // dst_rank
-        atomicAdd((uint32_t*)&send_counts_shared[dst_rank], 1);
+        uint32_t offset = atomicAdd((uint32_t*)&send_counts_shared[dst_rank], 1);
+        local_expert_send_offsets[i] = offset;
       }
     }
   } else {
@@ -2783,11 +2799,13 @@ void __global__ all2all_combine_compute_send_counts_kernel(
       int num_local_tokens = expert_num_tokens[local_expert_idx];
 
       const int32_t* local_expert_meta = &expert_meta[local_expert_idx * max_recv * META_DIM + 1];
+      uint32_t* local_expert_send_offsets = &send_offsets[local_expert_idx * max_recv];
 
       // for each token of this expert, figure out which rank to send to
       for (int i = lane_id; i < num_local_tokens; i += warpSize) {
         int32_t dst_rank = local_expert_meta[i * META_DIM]; // dst_rank
-        atomicAdd((uint32_t*)&send_counts_shared[dst_rank], 1);
+        uint32_t offset = atomicAdd((uint32_t*)&send_counts_shared[dst_rank], 1);
+        local_expert_send_offsets[i] = offset;
       }
     }
   }
@@ -2798,8 +2816,8 @@ void __global__ all2all_combine_compute_send_counts_kernel(
   if (threadIdx.x < local_size) {
     int rank = threadIdx.x;
     uint32_t send_count = send_counts_shared[rank];
-    uint32_t send_offset = atomicAdd_system((uint32_t*) &counters[rank], send_count);
-    send_offsets[rank] = send_offset;
+    uint32_t send_base = atomicAdd_system((uint32_t*) &counters[rank], send_count);
+    send_bases[rank] = send_base;
   }
 }
 
@@ -2807,7 +2825,8 @@ void all2all_combine_compute_send_counts(
     hipStream_t stream,
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
-    uint32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     // counters for the different ranks
     uint32_t* counters,
     // local counter to clear for next use
@@ -2825,6 +2844,7 @@ void all2all_combine_compute_send_counts(
   all2all_combine_compute_send_counts_kernel<<<blocks, threads_per_block, 0, stream>>>(
     expert_num_tokens,
     expert_meta,
+    send_bases,
     send_offsets,
     counters,
     next_counters,
@@ -2844,7 +2864,8 @@ void __global__ all2all_combine_pack_send_buffers_fp16_kernel(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const half* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     half* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -2863,22 +2884,20 @@ void __global__ all2all_combine_pack_send_buffers_fp16_kernel(
   int token_idx = TOKENS_PER_BLOCK_COMBINE_PACK_SEND * blockIdx.x + warp_id;
   int local_expert_idx = blockIdx.y;
 
+  const int32_t* local_expert_meta = &expert_meta[(local_expert_idx * max_recv + token_idx) * META_DIM];
+
+  // determine where to write out
+  int32_t dst_rank = local_expert_meta[1]; // dst_rank
+
   int num_local_tokens = expert_num_tokens[local_expert_idx];
   if (token_idx >= num_local_tokens) {
     return;
   }
 
-  const int32_t* local_expert_meta = &expert_meta[(local_expert_idx * max_recv + token_idx) * META_DIM];
   const half* local_expert_y = &expert_y[(local_expert_idx * max_recv + token_idx) * hidden_dim];
+  const uint32_t* local_expert_send_offsets = &send_offsets[local_expert_idx * max_recv + token_idx];
 
-  // determine where to write out
-  int32_t dst_rank = local_expert_meta[1]; // dst_rank
-
-  int32_t send_pos = -1;
-  if (lane_id == 0) {
-    send_pos = (int32_t)atomicAdd((uint32_t*)&send_offsets[dst_rank], 1);
-  }
-  send_pos = __warp_broadcast(send_pos);
+  uint32_t send_pos = send_bases[dst_rank] + local_expert_send_offsets[0];
 
   half* send_buffs[8] = {send_buf0, send_buf1, send_buf2, send_buf3, send_buf4, send_buf5, send_buf6, send_buf7};
   half* send_buf = send_buffs[dst_rank];
@@ -2922,7 +2941,8 @@ void all2all_combine_pack_send_buffers_fp16(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const half* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     half* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -2944,6 +2964,7 @@ void all2all_combine_pack_send_buffers_fp16(
     expert_num_tokens,
     expert_meta,
     expert_y,
+    send_bases,
     send_offsets,
     send_buf0,
     send_buf1,
@@ -2963,7 +2984,8 @@ void __global__ all2all_combine_pack_send_buffers_fp32_kernel(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const float* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     float* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -2982,22 +3004,20 @@ void __global__ all2all_combine_pack_send_buffers_fp32_kernel(
   int token_idx = TOKENS_PER_BLOCK_COMBINE_PACK_SEND * blockIdx.x + warp_id;
   int local_expert_idx = blockIdx.y;
 
+  const int32_t* local_expert_meta = &expert_meta[(local_expert_idx * max_recv + token_idx) * META_DIM];
+
+  // determine where to write out
+  int32_t dst_rank = local_expert_meta[1]; // dst_rank
+
   int num_local_tokens = expert_num_tokens[local_expert_idx];
   if (token_idx >= num_local_tokens) {
     return;
   }
 
-  const int32_t* local_expert_meta = &expert_meta[(local_expert_idx * max_recv + token_idx) * META_DIM];
   const float* local_expert_y = &expert_y[(local_expert_idx * max_recv + token_idx) * hidden_dim];
+  const uint32_t* local_expert_send_offsets = &send_offsets[local_expert_idx * max_recv + token_idx];
 
-  // determine where to write out
-  int32_t dst_rank = local_expert_meta[1]; // dst_rank
-
-  int32_t send_pos = -1;
-  if (lane_id == 0) {
-    send_pos = (int32_t)atomicAdd((uint32_t*)&send_offsets[dst_rank], 1);
-  }
-  send_pos = __warp_broadcast(send_pos);
+  uint32_t send_pos = send_bases[dst_rank] + local_expert_send_offsets[0];
 
   float* send_buffs[8] = {send_buf0, send_buf1, send_buf2, send_buf3, send_buf4, send_buf5, send_buf6, send_buf7};
   float* send_buf = send_buffs[dst_rank];
@@ -3035,7 +3055,8 @@ void all2all_combine_pack_send_buffers_fp32(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const float* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
+    uint32_t* __restrict__ send_bases, // shape [world_size]
+    uint32_t* __restrict__ send_offsets, // shape [num_local_experts, max_recv]
     float* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -3057,6 +3078,7 @@ void all2all_combine_pack_send_buffers_fp32(
     expert_num_tokens,
     expert_meta,
     expert_y,
+    send_bases,
     send_offsets,
     send_buf0,
     send_buf1,
