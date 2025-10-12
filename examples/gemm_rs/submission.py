@@ -2373,6 +2373,181 @@ muillm_comm_error_t __muillm_reduce(
   }
 }
 
+
+#define PULL_REDUCE_PER_THREAD 8
+#define PULL_REDUCE_PER_BLOCK (THREADS_PER_BLOCK * PULL_REDUCE_PER_THREAD)
+
+void __global__ pull_reduce_x8_fp16_kernel(
+  const half* __restrict__ src0, // shape [scattered_M, N]
+  const half* __restrict__ src1, // shape [scattered_M, N]
+  const half* __restrict__ src2, // shape [scattered_M, N]
+  const half* __restrict__ src3, // shape [scattered_M, N]
+  const half* __restrict__ src4, // shape [scattered_M, N]
+  const half* __restrict__ src5, // shape [scattered_M, N]
+  const half* __restrict__ src6, // shape [scattered_M, N]
+  const half* __restrict__ src7, // shape [scattered_M, N]
+  half* __restrict__ dst,
+  int N
+) {
+
+  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
+  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+    // can reduce 8 elements
+    half8* dst_h8_ptr = (half8*)(&dst[i]);
+
+    const half8* src0_h8_ptr = (const half8*)(&src0[i]);
+    const half8* src1_h8_ptr = (const half8*)(&src1[i]);
+    const half8* src2_h8_ptr = (const half8*)(&src2[i]);
+    const half8* src3_h8_ptr = (const half8*)(&src3[i]);
+    const half8* src4_h8_ptr = (const half8*)(&src4[i]);
+    const half8* src5_h8_ptr = (const half8*)(&src5[i]);
+    const half8* src6_h8_ptr = (const half8*)(&src6[i]);
+    const half8* src7_h8_ptr = (const half8*)(&src7[i]);
+
+    half8 v0 = *src0_h8_ptr;
+    half8 v1 = *src1_h8_ptr;
+    half8 v2 = *src2_h8_ptr;
+    half8 v3 = *src3_h8_ptr;
+    half8 v4 = *src4_h8_ptr;
+    half8 v5 = *src5_h8_ptr;
+    half8 v6 = *src6_h8_ptr;
+    half8 v7 = *src7_h8_ptr;
+
+    half8 r;
+    r.x = __hadd(v0.x, __hadd(v1.x, __hadd(v2.x, __hadd(v3.x, __hadd(v4.x, __hadd(v5.x, __hadd(v6.x, v7.x)))))));
+    r.y = __hadd(v0.y, __hadd(v1.y, __hadd(v2.y, __hadd(v3.y, __hadd(v4.y, __hadd(v5.y, __hadd(v6.y, v7.y)))))));
+    r.z = __hadd(v0.z, __hadd(v1.z, __hadd(v2.z, __hadd(v3.z, __hadd(v4.z, __hadd(v5.z, __hadd(v6.z, v7.z)))))));
+    r.w = __hadd(v0.w, __hadd(v1.w, __hadd(v2.w, __hadd(v3.w, __hadd(v4.w, __hadd(v5.w, __hadd(v6.w, v7.w)))))));
+    r.a = __hadd(v0.a, __hadd(v1.a, __hadd(v2.a, __hadd(v3.a, __hadd(v4.a, __hadd(v5.a, __hadd(v6.a, v7.a)))))));
+    r.b = __hadd(v0.b, __hadd(v1.b, __hadd(v2.b, __hadd(v3.b, __hadd(v4.b, __hadd(v5.b, __hadd(v6.b, v7.b)))))));
+    r.c = __hadd(v0.c, __hadd(v1.c, __hadd(v2.c, __hadd(v3.c, __hadd(v4.c, __hadd(v5.c, __hadd(v6.c, v7.c)))))));
+    r.d = __hadd(v0.d, __hadd(v1.d, __hadd(v2.d, __hadd(v3.d, __hadd(v4.d, __hadd(v5.d, __hadd(v6.d, v7.d)))))));
+
+    *dst_h8_ptr = r;
+  } else {
+    // non vectorized reduce
+    for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
+      if (i < N) {
+        half v0 = src0[i];
+        half v1 = src1[i];
+        half v2 = src2[i];
+        half v3 = src3[i];
+        half v4 = src4[i];
+        half v5 = src5[i];
+        half v6 = src6[i];
+        half v7 = src7[i];
+
+        half r = __hadd(v0, __hadd(v1, __hadd(v2, __hadd(v3, __hadd(v4, __hadd(v5, __hadd(v6, v7)))))));
+
+        dst[i] = r;
+        i++;
+      }
+    }
+  }
+}
+
+void __global__ pull_reduce_x4_fp16_kernel(
+  const half* __restrict__ src0, // shape [scattered_M, N]
+  const half* __restrict__ src1, // shape [scattered_M, N]
+  const half* __restrict__ src2, // shape [scattered_M, N]
+  const half* __restrict__ src3, // shape [scattered_M, N]
+  half* __restrict__ dst,
+  int N
+) {
+
+  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
+  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+    // can reduce 8 elements
+    half8* dst_h8_ptr = (half8*)(&dst[i]);
+
+    const half8* src0_h8_ptr = (const half8*)(&src0[i]);
+    const half8* src1_h8_ptr = (const half8*)(&src1[i]);
+    const half8* src2_h8_ptr = (const half8*)(&src2[i]);
+    const half8* src3_h8_ptr = (const half8*)(&src3[i]);
+
+    half8 v0 = *src0_h8_ptr;
+    half8 v1 = *src1_h8_ptr;
+    half8 v2 = *src2_h8_ptr;
+    half8 v3 = *src3_h8_ptr;
+
+    half8 r;
+    r.x = __hadd(v0.x, __hadd(v1.x, __hadd(v2.x, v3.x)));
+    r.y = __hadd(v0.y, __hadd(v1.y, __hadd(v2.y, v3.y)));
+    r.z = __hadd(v0.z, __hadd(v1.z, __hadd(v2.z, v3.z)));
+    r.w = __hadd(v0.w, __hadd(v1.w, __hadd(v2.w, v3.w)));
+    r.a = __hadd(v0.a, __hadd(v1.a, __hadd(v2.a, v3.a)));
+    r.b = __hadd(v0.b, __hadd(v1.b, __hadd(v2.b, v3.b)));
+    r.c = __hadd(v0.c, __hadd(v1.c, __hadd(v2.c, v3.c)));
+    r.d = __hadd(v0.d, __hadd(v1.d, __hadd(v2.d, v3.d)));
+
+    *dst_h8_ptr = r;
+  } else {
+    // non vectorized reduce
+    for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
+      if (i < N) {
+        half v0 = src0[i];
+        half v1 = src1[i];
+        half v2 = src2[i];
+        half v3 = src3[i];
+
+        half r = __hadd(v0, __hadd(v1, __hadd(v2, v3)));
+
+        dst[i] = r;
+        i++;
+      }
+    }
+  }
+}
+
+
+void __global__ pull_reduce_x2_fp16_kernel(
+  const half* __restrict__ src0, // shape [scattered_M, N]
+  const half* __restrict__ src1, // shape [scattered_M, N]
+  half* __restrict__ dst,
+  int N
+) {
+
+  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
+  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+    // can reduce 8 elements
+    half8* dst_h8_ptr = (half8*)(&dst[i]);
+
+    const half8* src0_h8_ptr = (const half8*)(&src0[i]);
+    const half8* src1_h8_ptr = (const half8*)(&src1[i]);
+
+    half8 v0 = *src0_h8_ptr;
+    half8 v1 = *src1_h8_ptr;
+
+    half8 r;
+    r.x = __hadd(v0.x, v1.x);
+    r.y = __hadd(v0.y, v1.y);
+    r.z = __hadd(v0.z, v1.z);
+    r.w = __hadd(v0.w, v1.w);
+    r.a = __hadd(v0.a, v1.a);
+    r.b = __hadd(v0.b, v1.b);
+    r.c = __hadd(v0.c, v1.c);
+    r.d = __hadd(v0.d, v1.d);
+
+    *dst_h8_ptr = r;
+  } else {
+    // non vectorized reduce
+    for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
+      if (i < N) {
+        half v0 = src0[i];
+        half v1 = src1[i];
+
+        half r = __hadd(v0, v1);
+
+        dst[i] = r;
+        i++;
+      }
+    }
+  }
+}
+
 muillm_comm_error_t __muillm_reduce_pull_fp16(
   hipStream_t stream,
   // inputs
@@ -2392,7 +2567,7 @@ muillm_comm_error_t __muillm_reduce_pull_fp16(
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
+  const int num_blocks = DIV_ROUND_UP(scattered_count, PULL_REDUCE_PER_BLOCK);
 
   int offset = (local_rank * scattered_count);
   if (local_size == 8) {
@@ -2406,7 +2581,7 @@ muillm_comm_error_t __muillm_reduce_pull_fp16(
     src6 += offset;
     src7 += offset;
 
-    reduce_x8_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    pull_reduce_x8_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       src2,
@@ -2425,7 +2600,7 @@ muillm_comm_error_t __muillm_reduce_pull_fp16(
     src2 += offset;
     src3 += offset;
 
-    reduce_x4_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    pull_reduce_x4_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       src2,
@@ -2438,7 +2613,7 @@ muillm_comm_error_t __muillm_reduce_pull_fp16(
     src0 += offset;
     src1 += offset;
 
-    reduce_x2_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    pull_reduce_x2_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       dst,
@@ -2451,6 +2626,177 @@ muillm_comm_error_t __muillm_reduce_pull_fp16(
   return MUILLM_COMM_SUCCESS;
 }
 
+
+void __global__ pull_reduce_x8_bf16_kernel(
+  const __hip_bfloat16* __restrict__ src0, // shape [scattered_M, N]
+  const __hip_bfloat16* __restrict__ src1, // shape [scattered_M, N]
+  const __hip_bfloat16* __restrict__ src2, // shape [scattered_M, N]
+  const __hip_bfloat16* __restrict__ src3, // shape [scattered_M, N]
+  const __hip_bfloat16* __restrict__ src4, // shape [scattered_M, N]
+  const __hip_bfloat16* __restrict__ src5, // shape [scattered_M, N]
+  const __hip_bfloat16* __restrict__ src6, // shape [scattered_M, N]
+  const __hip_bfloat16* __restrict__ src7, // shape [scattered_M, N]
+  __hip_bfloat16* __restrict__ dst,
+  int N
+) {
+
+  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
+  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+    // can reduce 8 elements
+    __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
+
+    const __hip_bfloat168* src0_h8_ptr = (const __hip_bfloat168*)(&src0[i]);
+    const __hip_bfloat168* src1_h8_ptr = (const __hip_bfloat168*)(&src1[i]);
+    const __hip_bfloat168* src2_h8_ptr = (const __hip_bfloat168*)(&src2[i]);
+    const __hip_bfloat168* src3_h8_ptr = (const __hip_bfloat168*)(&src3[i]);
+    const __hip_bfloat168* src4_h8_ptr = (const __hip_bfloat168*)(&src4[i]);
+    const __hip_bfloat168* src5_h8_ptr = (const __hip_bfloat168*)(&src5[i]);
+    const __hip_bfloat168* src6_h8_ptr = (const __hip_bfloat168*)(&src6[i]);
+    const __hip_bfloat168* src7_h8_ptr = (const __hip_bfloat168*)(&src7[i]);
+
+    __hip_bfloat168 v0 = *src0_h8_ptr;
+    __hip_bfloat168 v1 = *src1_h8_ptr;
+    __hip_bfloat168 v2 = *src2_h8_ptr;
+    __hip_bfloat168 v3 = *src3_h8_ptr;
+    __hip_bfloat168 v4 = *src4_h8_ptr;
+    __hip_bfloat168 v5 = *src5_h8_ptr;
+    __hip_bfloat168 v6 = *src6_h8_ptr;
+    __hip_bfloat168 v7 = *src7_h8_ptr;
+
+    __hip_bfloat168 r;
+    r.x = __hadd(v0.x, __hadd(v1.x, __hadd(v2.x, __hadd(v3.x, __hadd(v4.x, __hadd(v5.x, __hadd(v6.x, v7.x)))))));
+    r.y = __hadd(v0.y, __hadd(v1.y, __hadd(v2.y, __hadd(v3.y, __hadd(v4.y, __hadd(v5.y, __hadd(v6.y, v7.y)))))));
+    r.z = __hadd(v0.z, __hadd(v1.z, __hadd(v2.z, __hadd(v3.z, __hadd(v4.z, __hadd(v5.z, __hadd(v6.z, v7.z)))))));
+    r.w = __hadd(v0.w, __hadd(v1.w, __hadd(v2.w, __hadd(v3.w, __hadd(v4.w, __hadd(v5.w, __hadd(v6.w, v7.w)))))));
+    r.a = __hadd(v0.a, __hadd(v1.a, __hadd(v2.a, __hadd(v3.a, __hadd(v4.a, __hadd(v5.a, __hadd(v6.a, v7.a)))))));
+    r.b = __hadd(v0.b, __hadd(v1.b, __hadd(v2.b, __hadd(v3.b, __hadd(v4.b, __hadd(v5.b, __hadd(v6.b, v7.b)))))));
+    r.c = __hadd(v0.c, __hadd(v1.c, __hadd(v2.c, __hadd(v3.c, __hadd(v4.c, __hadd(v5.c, __hadd(v6.c, v7.c)))))));
+    r.d = __hadd(v0.d, __hadd(v1.d, __hadd(v2.d, __hadd(v3.d, __hadd(v4.d, __hadd(v5.d, __hadd(v6.d, v7.d)))))));
+
+    *dst_h8_ptr = r;
+  } else {
+    // non vectorized reduce
+    for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
+      if (i < N) {
+        __hip_bfloat16 v0 = src0[i];
+        __hip_bfloat16 v1 = src1[i];
+        __hip_bfloat16 v2 = src2[i];
+        __hip_bfloat16 v3 = src3[i];
+        __hip_bfloat16 v4 = src4[i];
+        __hip_bfloat16 v5 = src5[i];
+        __hip_bfloat16 v6 = src6[i];
+        __hip_bfloat16 v7 = src7[i];
+
+        __hip_bfloat16 r = __hadd(v0, __hadd(v1, __hadd(v2, __hadd(v3, __hadd(v4, __hadd(v5, __hadd(v6, v7)))))));
+
+        dst[i] = r;
+        i++;
+      }
+    }
+  }
+}
+
+void __global__ pull_reduce_x4_bf16_kernel(
+  const __hip_bfloat16* __restrict__ src0, // shape [scattered_M, N]
+  const __hip_bfloat16* __restrict__ src1, // shape [scattered_M, N]
+  const __hip_bfloat16* __restrict__ src2, // shape [scattered_M, N]
+  const __hip_bfloat16* __restrict__ src3, // shape [scattered_M, N]
+  __hip_bfloat16* __restrict__ dst,
+  int N
+) {
+
+  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
+  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+    // can reduce 8 elements
+    __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
+
+    const __hip_bfloat168* src0_h8_ptr = (const __hip_bfloat168*)(&src0[i]);
+    const __hip_bfloat168* src1_h8_ptr = (const __hip_bfloat168*)(&src1[i]);
+    const __hip_bfloat168* src2_h8_ptr = (const __hip_bfloat168*)(&src2[i]);
+    const __hip_bfloat168* src3_h8_ptr = (const __hip_bfloat168*)(&src3[i]);
+
+    __hip_bfloat168 v0 = *src0_h8_ptr;
+    __hip_bfloat168 v1 = *src1_h8_ptr;
+    __hip_bfloat168 v2 = *src2_h8_ptr;
+    __hip_bfloat168 v3 = *src3_h8_ptr;
+
+    __hip_bfloat168 r;
+    r.x = __hadd(v0.x, __hadd(v1.x, __hadd(v2.x, v3.x)));
+    r.y = __hadd(v0.y, __hadd(v1.y, __hadd(v2.y, v3.y)));
+    r.z = __hadd(v0.z, __hadd(v1.z, __hadd(v2.z, v3.z)));
+    r.w = __hadd(v0.w, __hadd(v1.w, __hadd(v2.w, v3.w)));
+    r.a = __hadd(v0.a, __hadd(v1.a, __hadd(v2.a, v3.a)));
+    r.b = __hadd(v0.b, __hadd(v1.b, __hadd(v2.b, v3.b)));
+    r.c = __hadd(v0.c, __hadd(v1.c, __hadd(v2.c, v3.c)));
+    r.d = __hadd(v0.d, __hadd(v1.d, __hadd(v2.d, v3.d)));
+
+    *dst_h8_ptr = r;
+  } else {
+    // non vectorized reduce
+    for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
+      if (i < N) {
+        __hip_bfloat16 v0 = src0[i];
+        __hip_bfloat16 v1 = src1[i];
+        __hip_bfloat16 v2 = src2[i];
+        __hip_bfloat16 v3 = src3[i];
+
+        __hip_bfloat16 r = __hadd(v0, __hadd(v1, __hadd(v2, v3)));
+
+        dst[i] = r;
+        i++;
+      }
+    }
+  }
+}
+
+
+void __global__ pull_reduce_x2_bf16_kernel(
+  const __hip_bfloat16* __restrict__ src0, // shape [scattered_M, N]
+  const __hip_bfloat16* __restrict__ src1, // shape [scattered_M, N]
+  __hip_bfloat16* __restrict__ dst,
+  int N
+) {
+
+  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
+  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+    // can reduce 8 elements
+    __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
+
+    const __hip_bfloat168* src0_h8_ptr = (const __hip_bfloat168*)(&src0[i]);
+    const __hip_bfloat168* src1_h8_ptr = (const __hip_bfloat168*)(&src1[i]);
+
+    __hip_bfloat168 v0 = *src0_h8_ptr;
+    __hip_bfloat168 v1 = *src1_h8_ptr;
+
+    __hip_bfloat168 r;
+    r.x = __hadd(v0.x, v1.x);
+    r.y = __hadd(v0.y, v1.y);
+    r.z = __hadd(v0.z, v1.z);
+    r.w = __hadd(v0.w, v1.w);
+    r.a = __hadd(v0.a, v1.a);
+    r.b = __hadd(v0.b, v1.b);
+    r.c = __hadd(v0.c, v1.c);
+    r.d = __hadd(v0.d, v1.d);
+
+    *dst_h8_ptr = r;
+  } else {
+    // non vectorized reduce
+    for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
+      if (i < N) {
+        __hip_bfloat16 v0 = src0[i];
+        __hip_bfloat16 v1 = src1[i];
+
+        __hip_bfloat16 r = __hadd(v0, v1);
+
+        dst[i] = r;
+        i++;
+      }
+    }
+  }
+}
 
 muillm_comm_error_t __muillm_reduce_pull_bf16(
   hipStream_t stream,
@@ -2471,7 +2817,7 @@ muillm_comm_error_t __muillm_reduce_pull_bf16(
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
+  const int num_blocks = DIV_ROUND_UP(scattered_count, PULL_REDUCE_PER_BLOCK);
 
   int offset = (local_rank * scattered_count);
   if (local_size == 8) {
@@ -2485,7 +2831,7 @@ muillm_comm_error_t __muillm_reduce_pull_bf16(
     src6 += offset;
     src7 += offset;
 
-    reduce_x8_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    pull_reduce_x8_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       src2,
@@ -2504,7 +2850,7 @@ muillm_comm_error_t __muillm_reduce_pull_bf16(
     src2 += offset;
     src3 += offset;
 
-    reduce_x4_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    pull_reduce_x4_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       src2,
@@ -2517,7 +2863,7 @@ muillm_comm_error_t __muillm_reduce_pull_bf16(
     src0 += offset;
     src1 += offset;
 
-    reduce_x2_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    pull_reduce_x2_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       dst,
