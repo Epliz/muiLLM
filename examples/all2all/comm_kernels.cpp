@@ -2021,3 +2021,44 @@ torch::Tensor all2all_comm_combine(
 
   return out_tokens;
 }
+
+torch::Tensor all2all_comm(
+  void* comms_,
+  torch::Tensor& x, // shape [num_tokens, hidden_dim]
+  torch::Tensor& indices, // shape [num_tokens, experts_per_token]
+  torch::Tensor& weights, // shape [num_tokens, experts_per_token]
+  int num_local_experts,
+  int max_recv
+) {
+
+  muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms_;
+
+  // First dispatch
+  auto dispatch_outputs = all2all_comm_dispatch(
+    comms_,
+    x,
+    indices,
+    num_local_experts,
+    max_recv
+  );
+
+  auto expert_num_tokens = std::get<0>(dispatch_outputs);
+  auto expert_x = std::get<1>(dispatch_outputs);
+  auto expert_meta = std::get<2>(dispatch_outputs);
+
+  // Then compute
+  auto expert_y = all2all_compute(
+    expert_num_tokens,
+    expert_x,
+    comm->rank
+  );
+
+  // Finally combine
+  return all2all_comm_combine(
+    comms_,
+    weights,
+    expert_meta,
+    expert_y,
+    expert_num_tokens
+  );
+}

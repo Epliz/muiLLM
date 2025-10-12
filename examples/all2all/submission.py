@@ -2036,6 +2036,47 @@ torch::Tensor all2all_comm_combine(
 
   return out_tokens;
 }
+
+torch::Tensor all2all_comm(
+  void* comms_,
+  torch::Tensor& x, // shape [num_tokens, hidden_dim]
+  torch::Tensor& indices, // shape [num_tokens, experts_per_token]
+  torch::Tensor& weights, // shape [num_tokens, experts_per_token]
+  int num_local_experts,
+  int max_recv
+) {
+
+  muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms_;
+
+  // First dispatch
+  auto dispatch_outputs = all2all_comm_dispatch(
+    comms_,
+    x,
+    indices,
+    num_local_experts,
+    max_recv
+  );
+
+  auto expert_num_tokens = std::get<0>(dispatch_outputs);
+  auto expert_x = std::get<1>(dispatch_outputs);
+  auto expert_meta = std::get<2>(dispatch_outputs);
+
+  // Then compute
+  auto expert_y = all2all_compute(
+    expert_num_tokens,
+    expert_x,
+    comm->rank
+  );
+
+  // Finally combine
+  return all2all_comm_combine(
+    comms_,
+    weights,
+    expert_meta,
+    expert_y,
+    expert_num_tokens
+  );
+}
 """
 
 COMM_KERNELS_CUDA_CODE = """
@@ -3435,6 +3476,7 @@ class All2AllCommKernels:
                     "all2all_comm_dispatch",
                     "all2all_compute",
                     "all2all_comm_combine",
+                    "all2all_comm",
                 ],
                 extra_include_paths=[
                     os.path.join(_TORCH_PATH, "include", "torch", "csrc")
@@ -3516,20 +3558,19 @@ class All2AllComm:
         torch.Tensor,
         torch.Tensor,
     ]:
-        # returns (expert_num_tokens, expert_x, expert_meta)
-        expert_num_tokens, expert_x, expert_meta = (
-            self.comm_kernels.all2all_comm_dispatch(
-                self.comms,
-                dp_x,
-                indices,
-                num_local_experts,
-                max_recv,
-            )
+        return self.comm_kernels.all2all_comm_dispatch(
+            self.comms,
+            dp_x,
+            indices,
+            num_local_experts,
+            max_recv,
         )
 
-        return expert_num_tokens, expert_x, expert_meta
-
-    def compute(self, expert_num_tokens: torch.Tensor, expert_x: torch.Tensor):
+    def compute(
+        self,
+        expert_num_tokens: torch.Tensor,
+        expert_x: torch.Tensor,
+    ) -> torch.Tensor:
         return self.comm_kernels.all2all_compute(expert_num_tokens, expert_x, self.rank)
 
     def combine(
@@ -3545,6 +3586,23 @@ class All2AllComm:
             expert_meta,
             expert_y,
             expert_num_tokens,
+        )
+
+    def all2all(
+        self,
+        x: torch.Tensor,
+        indices: torch.Tensor,
+        weights: torch.Tensor,
+        num_local_experts: int,
+        max_recv: int,
+    ) -> torch.Tensor:
+        return self.comm_kernels.all2all_comm(
+            self.comms,
+            x,
+            indices,
+            weights,
+            num_local_experts,
+            max_recv,
         )
 
 
@@ -3613,7 +3671,11 @@ class PyTorchAllToAll:
 
     # ---------- dispatch ----------
 
-    def dispatch(self, dp_x: torch.Tensor, indices: torch.Tensor):
+    def dispatch(
+        self,
+        dp_x: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.comms.dispatch(dp_x, indices, self.num_local_experts, self.max_recv)
 
     # ---------- combine ----------
@@ -3623,7 +3685,7 @@ class PyTorchAllToAll:
         expert_meta: torch.Tensor,  # input
         expert_y: torch.Tensor,  # input, (num_local_experts, max_num_tokens * num_dp, token_dim)
         expert_num_tokens: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         return self.comms.combine(
             weights=weights,
             expert_meta=expert_meta,
@@ -3631,9 +3693,23 @@ class PyTorchAllToAll:
             expert_num_tokens=expert_num_tokens,
         )
 
-    def compute(self, expert_num_tokens: torch.Tensor, expert_x: torch.Tensor):
+    def compute(
+        self,
+        expert_num_tokens: torch.Tensor,
+        expert_x: torch.Tensor,
+    ) -> torch.Tensor:
         expert_y = self.comms.compute(expert_num_tokens, expert_x)
         return expert_y
+
+    def all2all(
+        self,
+        x: torch.Tensor,
+        indices: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.comms.all2all(
+            x, indices, weights, self.num_local_experts, self.max_recv
+        )
 
 
 def custom_kernel(data: input_t) -> output_t:
@@ -3641,26 +3717,35 @@ def custom_kernel(data: input_t) -> output_t:
 
     ata = PyTorchAllToAll(cfg, rank, world_size)
 
-    # Dispatch seems to work with kernels
-    expert_num_tokens, expert_x, expert_meta = ata.dispatch(
-        dp_x=rank_data.x, indices=rank_data.indices
+    # Having three different methos dispatch, compute and combine incurs CPU overheads
+    # due to Python
+    # while they were all implemented and correct, for performance we provide a single
+    # all2all method that does all three steps in one C++ call
+
+    # Three different calls:
+    # expert_num_tokens, expert_x, expert_meta = ata.dispatch(
+    #     dp_x=rank_data.x, indices=rank_data.indices
+    # )
+
+    # expert_y = ata.compute(
+    #     expert_num_tokens=expert_num_tokens,
+    #     expert_x=expert_x,
+    # )
+
+    # return ata.combine(
+    #     weights=rank_data.weights,
+    #     expert_meta=expert_meta,
+    #     expert_y=expert_y,
+    #     expert_num_tokens=expert_num_tokens,
+    # )
+
+    # Everything combined into a single call:
+    ata_comms = ata.comms
+    return ata_comms.comm_kernels.all2all_comm(
+        ata_comms.comms,
+        rank_data.x,
+        rank_data.indices,
+        rank_data.weights,
+        ata.num_local_experts,
+        ata.max_recv,
     )
-
-    if ata.comms is not None:
-        # use the custom kernel
-        # Compute seems to work with kernels
-        expert_y = ata.compute(
-            expert_num_tokens=expert_num_tokens,
-            expert_x=expert_x,
-        )
-    else:
-        expert_y = expert_x.to(cfg.out_dtype) * (1 + rank)
-
-    y = ata.combine(
-        weights=rank_data.weights,
-        expert_meta=expert_meta,
-        expert_y=expert_y,
-        expert_num_tokens=expert_num_tokens,
-    )
-
-    return y
