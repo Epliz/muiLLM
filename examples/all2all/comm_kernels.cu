@@ -260,6 +260,7 @@ void __global__ all2all_dispatch_pack_send_buffers_fp32_kernel(
   const float* __restrict__ x,
   const int32_t* __restrict__ indices,
   uint32_t* __restrict__ send_offsets,
+  uint32_t* __restrict__ expert_num_tokens,
   float* __restrict__ send_buf0,
   float* __restrict__ send_buf1,
   float* __restrict__ send_buf2,
@@ -277,6 +278,13 @@ void __global__ all2all_dispatch_pack_send_buffers_fp32_kernel(
 ) {
   int expert_idx = blockIdx.x;
   int token_idx = blockIdx.y;
+
+  if (blockIdx.x == 0 && blockIdx.y == 0) {
+    // zero expert_num_tokens
+    for (int i = threadIdx.x; i < num_local_experts; i+= THREADS_PER_BLOCK) {
+      expert_num_tokens[i] = 0;
+    }
+  }
 
   x = &x[token_idx * hidden_dim];
 
@@ -317,6 +325,7 @@ void all2all_dispatch_pack_send_buffers_fp32(
     const float* __restrict__ x,
     const int32_t* __restrict__ indices,
     uint32_t* __restrict__ send_offsets,
+    uint32_t* __restrict__ expert_num_tokens,
     float* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -341,6 +350,7 @@ void all2all_dispatch_pack_send_buffers_fp32(
     x,
     indices,
     send_offsets,
+    expert_num_tokens,
     send_buf0,
     send_buf1,
     send_buf2,
@@ -362,6 +372,7 @@ void __global__ all2all_dispatch_pack_send_buffers_fp16_kernel(
   const half* __restrict__ x,
   const int32_t* __restrict__ indices,
   uint32_t* __restrict__ send_offsets,
+  uint32_t* __restrict__ expert_num_tokens,
   half* __restrict__ send_buf0,
   half* __restrict__ send_buf1,
   half* __restrict__ send_buf2,
@@ -379,6 +390,13 @@ void __global__ all2all_dispatch_pack_send_buffers_fp16_kernel(
 ) {
   int expert_idx = blockIdx.x;
   int token_idx = blockIdx.y;
+
+  if (blockIdx.x == 0 && blockIdx.y == 0) {
+    // zero expert_num_tokens
+    for (int i = threadIdx.x; i < num_local_experts; i+= THREADS_PER_BLOCK) {
+      expert_num_tokens[i] = 0;
+    }
+  }
 
   x = &x[token_idx * hidden_dim];
 
@@ -419,6 +437,7 @@ void all2all_dispatch_pack_send_buffers_fp16(
     const half* __restrict__ x,
     const int32_t* __restrict__ indices,
     uint32_t* __restrict__ send_offsets,
+    uint32_t* __restrict__ expert_num_tokens,
     half* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -443,6 +462,7 @@ void all2all_dispatch_pack_send_buffers_fp16(
     x,
     indices,
     send_offsets,
+    expert_num_tokens,
     send_buf0,
     send_buf1,
     send_buf2,

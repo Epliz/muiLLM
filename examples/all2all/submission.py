@@ -1337,6 +1337,7 @@ void all2all_dispatch_pack_send_buffers_fp32(
     const float* __restrict__ x,
     const int32_t* __restrict__ indices,
     uint32_t* __restrict__ send_offsets,
+    uint32_t* __restrict__ expert_num_tokens,
     float* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -1359,6 +1360,7 @@ void all2all_dispatch_pack_send_buffers_fp16(
     const half* __restrict__ x,
     const int32_t* __restrict__ indices,
     uint32_t* __restrict__ send_offsets,
+    uint32_t* __restrict__ expert_num_tokens,
     half* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -1513,6 +1515,16 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
     local_rank
   );
 
+
+  // we will zero expert_num_tokens in the dispatch pack send kernels
+  auto expert_num_tokens_options = at::TensorOptions()
+                            .dtype(torch::kInt32)
+                            .layout(at::kStrided)
+                            .device(device) // same output device as inputs
+                            .requires_grad(false);
+
+  torch::Tensor expert_num_tokens = torch::empty({num_local_experts}, expert_num_tokens_options);
+
   //
   // Second we pack and send the data to the experts
   //
@@ -1525,6 +1537,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
       (const float*)x.data_ptr(),
       (const int32_t*)indices.data_ptr(),
       (uint32_t*)send_offsets.data_ptr(),
+      (uint32_t*)expert_num_tokens.data_ptr(),
       (float*)buffer_set->buffers[0], // send_buf0
       (float*)buffer_set->buffers[1], // send_buf1
       (float*)buffer_set->buffers[2], // send_buf2
@@ -1548,6 +1561,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
       (const half*)x.data_ptr(),
       (const int32_t*)indices.data_ptr(),
       (uint32_t*)send_offsets.data_ptr(),
+      (uint32_t*)expert_num_tokens.data_ptr(),
       (half*)buffer_set->buffers[0], // send_buf0
       (half*)buffer_set->buffers[1], // send_buf1
       (half*)buffer_set->buffers[2], // send_buf2
@@ -1578,11 +1592,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   //
   // Third, we unpack into the output tensors
   //
-  auto expert_num_tokens_options = at::TensorOptions()
-                            .dtype(torch::kInt32)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
 
   auto expert_meta_options = at::TensorOptions()
                             .dtype(torch::kInt32)
@@ -1596,8 +1605,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
                             .device(device) // same output device as inputs
                             .requires_grad(false);
 
-  // TODO: do not zero, we can just use shared memory in the kernel
-  torch::Tensor expert_num_tokens = torch::zeros({num_local_experts}, expert_num_tokens_options);
   torch::Tensor expert_meta = torch::empty({num_local_experts, max_recv, META_DIM}, expert_meta_options);
   torch::Tensor expert_x = torch::empty({num_local_experts, max_recv, hidden_dim}, expert_y_options);
 
@@ -2342,6 +2349,7 @@ void __global__ all2all_dispatch_pack_send_buffers_fp32_kernel(
   const float* __restrict__ x,
   const int32_t* __restrict__ indices,
   uint32_t* __restrict__ send_offsets,
+  uint32_t* __restrict__ expert_num_tokens,
   float* __restrict__ send_buf0,
   float* __restrict__ send_buf1,
   float* __restrict__ send_buf2,
@@ -2359,6 +2367,13 @@ void __global__ all2all_dispatch_pack_send_buffers_fp32_kernel(
 ) {
   int expert_idx = blockIdx.x;
   int token_idx = blockIdx.y;
+
+  if (blockIdx.x == 0 && blockIdx.y == 0) {
+    // zero expert_num_tokens
+    for (int i = threadIdx.x; i < num_local_experts; i+= THREADS_PER_BLOCK) {
+      expert_num_tokens[i] = 0;
+    }
+  }
 
   x = &x[token_idx * hidden_dim];
 
@@ -2399,6 +2414,7 @@ void all2all_dispatch_pack_send_buffers_fp32(
     const float* __restrict__ x,
     const int32_t* __restrict__ indices,
     uint32_t* __restrict__ send_offsets,
+    uint32_t* __restrict__ expert_num_tokens,
     float* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     float* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -2423,6 +2439,7 @@ void all2all_dispatch_pack_send_buffers_fp32(
     x,
     indices,
     send_offsets,
+    expert_num_tokens,
     send_buf0,
     send_buf1,
     send_buf2,
@@ -2444,6 +2461,7 @@ void __global__ all2all_dispatch_pack_send_buffers_fp16_kernel(
   const half* __restrict__ x,
   const int32_t* __restrict__ indices,
   uint32_t* __restrict__ send_offsets,
+  uint32_t* __restrict__ expert_num_tokens,
   half* __restrict__ send_buf0,
   half* __restrict__ send_buf1,
   half* __restrict__ send_buf2,
@@ -2461,6 +2479,13 @@ void __global__ all2all_dispatch_pack_send_buffers_fp16_kernel(
 ) {
   int expert_idx = blockIdx.x;
   int token_idx = blockIdx.y;
+
+  if (blockIdx.x == 0 && blockIdx.y == 0) {
+    // zero expert_num_tokens
+    for (int i = threadIdx.x; i < num_local_experts; i+= THREADS_PER_BLOCK) {
+      expert_num_tokens[i] = 0;
+    }
+  }
 
   x = &x[token_idx * hidden_dim];
 
@@ -2501,6 +2526,7 @@ void all2all_dispatch_pack_send_buffers_fp16(
     const half* __restrict__ x,
     const int32_t* __restrict__ indices,
     uint32_t* __restrict__ send_offsets,
+    uint32_t* __restrict__ expert_num_tokens,
     half* __restrict__ send_buf0, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf1, // shape [total_send, hidden_dim]
     half* __restrict__ send_buf2, // shape [total_send, hidden_dim]
@@ -2525,6 +2551,7 @@ void all2all_dispatch_pack_send_buffers_fp16(
     x,
     indices,
     send_offsets,
+    expert_num_tokens,
     send_buf0,
     send_buf1,
     send_buf2,
