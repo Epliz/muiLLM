@@ -7,6 +7,16 @@
 #include <iostream>
 #include <algorithm>
 
+#define HIP_CHECK(call) \
+    do { \
+        hipError_t err = call; \
+        if (err != cudaSuccess) { \
+            std::cerr << "HIP error at " << __FILE__ << ":" << __LINE__ \
+                      << " - " << hipGetErrorString(err) << std::endl; \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
+
 #define MUILLM_MAX_GPUS 8
 
 typedef enum muillm_comm_error {
@@ -846,6 +856,219 @@ muillm_comm_error_t __muillm_reduce(
       (const __hip_bfloat16*) src,
       scattered_count,
       local_size,
+      (__hip_bfloat16*) dst
+    );
+  } else {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+}
+
+muillm_comm_error_t __muillm_reduce_pull_fp16(
+  hipStream_t stream,
+  // inputs
+  const half* src0, // shape [M, N] needs to be offset
+  const half* src1, // shape [M, N] needs to be offset
+  const half* src2, // shape [M, N] needs to be offset
+  const half* src3, // shape [M, N] needs to be offset
+  const half* src4, // shape [M, N] needs to be offset
+  const half* src5, // shape [M, N] needs to be offset
+  const half* src6, // shape [M, N] needs to be offset
+  const half* src7, // shape [M, N] needs to be offset
+  int scattered_count,
+  int local_size,
+  int local_rank,
+  // outputs
+  half* dst
+) {
+
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
+
+  int offset = (local_rank * scattered_count);
+  if (local_size == 8) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+    src2 += offset;
+    src3 += offset;
+    src4 += offset;
+    src5 += offset;
+    src6 += offset;
+    src7 += offset;
+
+    reduce_x8_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      src2,
+      src3,
+      src4,
+      src5,
+      src6,
+      src7,
+      dst,
+      scattered_count
+    );
+  } else if (local_size == 4) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+    src2 += offset;
+    src3 += offset;
+
+    reduce_x4_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      src2,
+      src3,
+      dst,
+      scattered_count
+    );
+  } else if (local_size == 2) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+
+    reduce_x2_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      dst,
+      scattered_count
+    );
+  } else {
+    return MUILLM_COMM_UNSUPPORTED_SIZE;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+
+muillm_comm_error_t __muillm_reduce_pull_bf16(
+  hipStream_t stream,
+  // inputs
+  const __hip_bfloat16* src0, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src1, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src2, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src3, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src4, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src5, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src6, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src7, // shape [M, N] needs to be offset
+  int scattered_count,
+  int local_size,
+  int local_rank,
+  // outputs
+  __hip_bfloat16* dst
+) {
+
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
+
+  int offset = (local_rank * scattered_count);
+  if (local_size == 8) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+    src2 += offset;
+    src3 += offset;
+    src4 += offset;
+    src5 += offset;
+    src6 += offset;
+    src7 += offset;
+
+    reduce_x8_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      src2,
+      src3,
+      src4,
+      src5,
+      src6,
+      src7,
+      dst,
+      scattered_count
+    );
+  } else if (local_size == 4) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+    src2 += offset;
+    src3 += offset;
+
+    reduce_x4_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      src2,
+      src3,
+      dst,
+      scattered_count
+    );
+  } else if (local_size == 2) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+
+    reduce_x2_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      dst,
+      scattered_count
+    );
+  } else {
+    return MUILLM_COMM_UNSUPPORTED_SIZE;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+
+muillm_comm_error_t __muillm_reduce_pull(
+  hipStream_t stream,
+  // inputs
+  const void* src0, // shape [M, N] needs to be offset
+  const void* src1, // shape [M, N] needs to be offset
+  const void* src2, // shape [M, N] needs to be offset
+  const void* src3, // shape [M, N] needs to be offset
+  const void* src4, // shape [M, N] needs to be offset
+  const void* src5, // shape [M, N] needs to be offset
+  const void* src6, // shape [M, N] needs to be offset
+  const void* src7, // shape [M, N] needs to be offset
+  int scattered_count,
+  int local_size,
+  int local_rank,
+  muillm_comm_datatype_t datatype,
+  // outputs
+  void* dst // shape [scattered_M, N]
+) {
+  if (datatype == MUILLM_COMM_FP16) {
+    return __muillm_reduce_pull_fp16(
+      stream,
+      (const half*) src0,
+      (const half*) src1,
+      (const half*) src2,
+      (const half*) src3,
+      (const half*) src4,
+      (const half*) src5,
+      (const half*) src6,
+      (const half*) src7,
+      scattered_count,
+      local_size,
+      local_rank,
+      (half*) dst
+    );
+  } else if (datatype == MUILLM_COMM_BF16) {
+    return __muillm_reduce_pull_bf16(
+      stream,
+      (const __hip_bfloat16*) src0,
+      (const __hip_bfloat16*) src1,
+      (const __hip_bfloat16*) src2,
+      (const __hip_bfloat16*) src3,
+      (const __hip_bfloat16*) src4,
+      (const __hip_bfloat16*) src5,
+      (const __hip_bfloat16*) src6,
+      (const __hip_bfloat16*) src7,
+      scattered_count,
+      local_size,
+      local_rank,
       (__hip_bfloat16*) dst
     );
   } else {

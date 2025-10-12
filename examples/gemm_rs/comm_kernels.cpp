@@ -1382,3 +1382,117 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
 
   return rs_output;
 }
+
+muillm_comm_error_t __muillm_reduce_pull(
+  hipStream_t stream,
+  // inputs
+  const void* src0, // shape [M, N] needs to be offset
+  const void* src1, // shape [M, N] needs to be offset
+  const void* src2, // shape [M, N] needs to be offset
+  const void* src3, // shape [M, N] needs to be offset
+  const void* src4, // shape [M, N] needs to be offset
+  const void* src5, // shape [M, N] needs to be offset
+  const void* src6, // shape [M, N] needs to be offset
+  const void* src7, // shape [M, N] needs to be offset
+  int scattered_count,
+  int local_size,
+  int local_rank,
+  muillm_comm_datatype_t datatype,
+  // outputs
+  void* dst // shape [scattered_M, N]
+);
+
+torch::Tensor all2all_comm_gemm_reduce_scatter_pull(
+  void* comms,
+  torch::Tensor& input, // shape [M, local_K]
+  torch::Tensor& weights, // shape [N, local_K]
+  std::optional<torch::Tensor> bias // shape [N]
+) {
+  muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms;
+  muillm_comm_error_t error;
+
+  CHECK_INPUT(input);
+  CHECK_INPUT(weights);
+
+  auto device = input.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  int M = input.size(0);
+  int N = weights.size(0);
+  int K = input.size(1);
+
+  int scattered_M = M / local_size;
+
+  auto dtype = input.dtype();
+
+  muillm_comm_datatype_t datatype;
+  if (dtype == torch::kFloat16) {
+    datatype = MUILLM_COMM_FP16;
+  } else if (dtype == torch::kBFloat16) {
+    datatype = MUILLM_COMM_BF16;
+  } else {
+    TORCH_CHECK(false, "unsupported data type");
+    return torch::Tensor();
+  }
+
+  int scattered_count = scattered_M * N;
+
+  //
+  // First make sure we have enough buffer space
+  //
+  int capacity = __comm_size(datatype, M * N); // need to hold the full output
+
+  muillm_comm_p2p_buffer_set_t* buffer_set;
+  if ((error = muillm_comm_p2p_get_buffer_set(comm, capacity, &buffer_set, stream)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to get buffer set"<<std::endl;
+    TORCH_CHECK(false, "an error happened when getting buffer set");
+    return torch::Tensor();
+  }
+
+  // then we compute the local GEMM placing the output in the send/recv buffers
+
+  auto output_options = at::TensorOptions()
+                            .dtype(dtype)
+                            .layout(at::kStrided)
+                            .device(device) // same output device as inputs
+                            .requires_grad(false);
+
+  torch::Tensor output = torch::from_blob(buffer_set->buffers[local_rank], {M, N}, output_options); // shape [M, N]
+
+  torch::linear_out(output, input, weights, bias); // shape [M, N]
+
+  // Synchronize GPUs
+  if (__mui_gpu_barrier(comm, stream) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when doing gpu barrier");
+    return torch::Tensor();
+  }
+
+  auto rs_output = torch::empty({scattered_M, N}, output_options);
+
+  // Finally gather/reduce the data on each GPU
+  if ((error = __muillm_reduce_pull(
+    stream,
+    buffer_set->buffers[0],
+    buffer_set->buffers[1],
+    buffer_set->buffers[2],
+    buffer_set->buffers[3],
+    buffer_set->buffers[4],
+    buffer_set->buffers[5],
+    buffer_set->buffers[6],
+    buffer_set->buffers[7],
+    scattered_count,
+    local_size,
+    local_rank,
+    datatype,
+    rs_output.data_ptr() // shape [scattered_M, N]
+  )) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to reduce_pull data"<<std::endl;
+    TORCH_CHECK(false, "an error happened when doing reduce_pull");
+    return torch::Tensor();
+  }
+
+  return rs_output;
+}

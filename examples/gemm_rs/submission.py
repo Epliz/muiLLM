@@ -1391,6 +1391,120 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
 
   return rs_output;
 }
+
+muillm_comm_error_t __muillm_reduce_pull(
+  hipStream_t stream,
+  // inputs
+  const void* src0, // shape [M, N] needs to be offset
+  const void* src1, // shape [M, N] needs to be offset
+  const void* src2, // shape [M, N] needs to be offset
+  const void* src3, // shape [M, N] needs to be offset
+  const void* src4, // shape [M, N] needs to be offset
+  const void* src5, // shape [M, N] needs to be offset
+  const void* src6, // shape [M, N] needs to be offset
+  const void* src7, // shape [M, N] needs to be offset
+  int scattered_count,
+  int local_size,
+  int local_rank,
+  muillm_comm_datatype_t datatype,
+  // outputs
+  void* dst // shape [scattered_M, N]
+);
+
+torch::Tensor all2all_comm_gemm_reduce_scatter_pull(
+  void* comms,
+  torch::Tensor& input, // shape [M, local_K]
+  torch::Tensor& weights, // shape [N, local_K]
+  std::optional<torch::Tensor> bias // shape [N]
+) {
+  muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms;
+  muillm_comm_error_t error;
+
+  CHECK_INPUT(input);
+  CHECK_INPUT(weights);
+
+  auto device = input.device();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  int M = input.size(0);
+  int N = weights.size(0);
+  int K = input.size(1);
+
+  int scattered_M = M / local_size;
+
+  auto dtype = input.dtype();
+
+  muillm_comm_datatype_t datatype;
+  if (dtype == torch::kFloat16) {
+    datatype = MUILLM_COMM_FP16;
+  } else if (dtype == torch::kBFloat16) {
+    datatype = MUILLM_COMM_BF16;
+  } else {
+    TORCH_CHECK(false, "unsupported data type");
+    return torch::Tensor();
+  }
+
+  int scattered_count = scattered_M * N;
+
+  //
+  // First make sure we have enough buffer space
+  //
+  int capacity = __comm_size(datatype, M * N); // need to hold the full output
+
+  muillm_comm_p2p_buffer_set_t* buffer_set;
+  if ((error = muillm_comm_p2p_get_buffer_set(comm, capacity, &buffer_set, stream)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to get buffer set"<<std::endl;
+    TORCH_CHECK(false, "an error happened when getting buffer set");
+    return torch::Tensor();
+  }
+
+  // then we compute the local GEMM placing the output in the send/recv buffers
+
+  auto output_options = at::TensorOptions()
+                            .dtype(dtype)
+                            .layout(at::kStrided)
+                            .device(device) // same output device as inputs
+                            .requires_grad(false);
+
+  torch::Tensor output = torch::from_blob(buffer_set->buffers[local_rank], {M, N}, output_options); // shape [M, N]
+
+  torch::linear_out(output, input, weights, bias); // shape [M, N]
+
+  // Synchronize GPUs
+  if (__mui_gpu_barrier(comm, stream) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when doing gpu barrier");
+    return torch::Tensor();
+  }
+
+  auto rs_output = torch::empty({scattered_M, N}, output_options);
+
+  // Finally gather/reduce the data on each GPU
+  if ((error = __muillm_reduce_pull(
+    stream,
+    buffer_set->buffers[0],
+    buffer_set->buffers[1],
+    buffer_set->buffers[2],
+    buffer_set->buffers[3],
+    buffer_set->buffers[4],
+    buffer_set->buffers[5],
+    buffer_set->buffers[6],
+    buffer_set->buffers[7],
+    scattered_count,
+    local_size,
+    local_rank,
+    datatype,
+    rs_output.data_ptr() // shape [scattered_M, N]
+  )) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to reduce_pull data"<<std::endl;
+    TORCH_CHECK(false, "an error happened when doing reduce_pull");
+    return torch::Tensor();
+  }
+
+  return rs_output;
+}
 """
 
 COMM_KERNELS_CUDA_CODE = """
@@ -1402,6 +1516,16 @@ COMM_KERNELS_CUDA_CODE = """
 
 #include <iostream>
 #include <algorithm>
+
+#define HIP_CHECK(call) \
+    do { \
+        hipError_t err = call; \
+        if (err != cudaSuccess) { \
+            std::cerr << "HIP error at " << __FILE__ << ":" << __LINE__ \
+                      << " - " << hipGetErrorString(err) << std::endl; \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
 
 #define MUILLM_MAX_GPUS 8
 
@@ -1750,6 +1874,7 @@ void __global__ reduce_x8_fp16_kernel(
 ) {
 
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
   if (i + (REDUCE_PER_THREAD - 1) < N) {
     // can reduce 8 elements
     half8* dst_h8_ptr = (half8*)(&dst[i]);
@@ -1815,6 +1940,7 @@ void __global__ reduce_x4_fp16_kernel(
 ) {
 
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
   if (i + (REDUCE_PER_THREAD - 1) < N) {
     // can reduce 8 elements
     half8* dst_h8_ptr = (half8*)(&dst[i]);
@@ -1867,6 +1993,7 @@ void __global__ reduce_x2_fp16_kernel(
 ) {
 
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
   if (i + (REDUCE_PER_THREAD - 1) < N) {
     // can reduce 8 elements
     half8* dst_h8_ptr = (half8*)(&dst[i]);
@@ -1988,6 +2115,7 @@ void __global__ reduce_x8_bf16_kernel(
 ) {
 
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
   if (i + (REDUCE_PER_THREAD - 1) < N) {
     // can reduce 8 elements
     __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
@@ -2053,6 +2181,7 @@ void __global__ reduce_x4_bf16_kernel(
 ) {
 
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
   if (i + (REDUCE_PER_THREAD - 1) < N) {
     // can reduce 8 elements
     __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
@@ -2105,6 +2234,7 @@ void __global__ reduce_x2_bf16_kernel(
 ) {
 
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+  // TODO: make copy more like for scatter
   if (i + (REDUCE_PER_THREAD - 1) < N) {
     // can reduce 8 elements
     __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
@@ -2242,6 +2372,219 @@ muillm_comm_error_t __muillm_reduce(
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 }
+
+muillm_comm_error_t __muillm_reduce_pull_fp16(
+  hipStream_t stream,
+  // inputs
+  const half* src0, // shape [M, N] needs to be offset
+  const half* src1, // shape [M, N] needs to be offset
+  const half* src2, // shape [M, N] needs to be offset
+  const half* src3, // shape [M, N] needs to be offset
+  const half* src4, // shape [M, N] needs to be offset
+  const half* src5, // shape [M, N] needs to be offset
+  const half* src6, // shape [M, N] needs to be offset
+  const half* src7, // shape [M, N] needs to be offset
+  int scattered_count,
+  int local_size,
+  int local_rank,
+  // outputs
+  half* dst
+) {
+
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
+
+  int offset = (local_rank * scattered_count);
+  if (local_size == 8) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+    src2 += offset;
+    src3 += offset;
+    src4 += offset;
+    src5 += offset;
+    src6 += offset;
+    src7 += offset;
+
+    reduce_x8_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      src2,
+      src3,
+      src4,
+      src5,
+      src6,
+      src7,
+      dst,
+      scattered_count
+    );
+  } else if (local_size == 4) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+    src2 += offset;
+    src3 += offset;
+
+    reduce_x4_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      src2,
+      src3,
+      dst,
+      scattered_count
+    );
+  } else if (local_size == 2) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+
+    reduce_x2_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      dst,
+      scattered_count
+    );
+  } else {
+    return MUILLM_COMM_UNSUPPORTED_SIZE;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+
+muillm_comm_error_t __muillm_reduce_pull_bf16(
+  hipStream_t stream,
+  // inputs
+  const __hip_bfloat16* src0, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src1, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src2, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src3, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src4, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src5, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src6, // shape [M, N] needs to be offset
+  const __hip_bfloat16* src7, // shape [M, N] needs to be offset
+  int scattered_count,
+  int local_size,
+  int local_rank,
+  // outputs
+  __hip_bfloat16* dst
+) {
+
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
+
+  int offset = (local_rank * scattered_count);
+  if (local_size == 8) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+    src2 += offset;
+    src3 += offset;
+    src4 += offset;
+    src5 += offset;
+    src6 += offset;
+    src7 += offset;
+
+    reduce_x8_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      src2,
+      src3,
+      src4,
+      src5,
+      src6,
+      src7,
+      dst,
+      scattered_count
+    );
+  } else if (local_size == 4) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+    src2 += offset;
+    src3 += offset;
+
+    reduce_x4_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      src2,
+      src3,
+      dst,
+      scattered_count
+    );
+  } else if (local_size == 2) {
+    // compute the src pointers by applying the offsets
+    src0 += offset;
+    src1 += offset;
+
+    reduce_x2_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+      src0,
+      src1,
+      dst,
+      scattered_count
+    );
+  } else {
+    return MUILLM_COMM_UNSUPPORTED_SIZE;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
+
+muillm_comm_error_t __muillm_reduce_pull(
+  hipStream_t stream,
+  // inputs
+  const void* src0, // shape [M, N] needs to be offset
+  const void* src1, // shape [M, N] needs to be offset
+  const void* src2, // shape [M, N] needs to be offset
+  const void* src3, // shape [M, N] needs to be offset
+  const void* src4, // shape [M, N] needs to be offset
+  const void* src5, // shape [M, N] needs to be offset
+  const void* src6, // shape [M, N] needs to be offset
+  const void* src7, // shape [M, N] needs to be offset
+  int scattered_count,
+  int local_size,
+  int local_rank,
+  muillm_comm_datatype_t datatype,
+  // outputs
+  void* dst // shape [scattered_M, N]
+) {
+  if (datatype == MUILLM_COMM_FP16) {
+    return __muillm_reduce_pull_fp16(
+      stream,
+      (const half*) src0,
+      (const half*) src1,
+      (const half*) src2,
+      (const half*) src3,
+      (const half*) src4,
+      (const half*) src5,
+      (const half*) src6,
+      (const half*) src7,
+      scattered_count,
+      local_size,
+      local_rank,
+      (half*) dst
+    );
+  } else if (datatype == MUILLM_COMM_BF16) {
+    return __muillm_reduce_pull_bf16(
+      stream,
+      (const __hip_bfloat16*) src0,
+      (const __hip_bfloat16*) src1,
+      (const __hip_bfloat16*) src2,
+      (const __hip_bfloat16*) src3,
+      (const __hip_bfloat16*) src4,
+      (const __hip_bfloat16*) src5,
+      (const __hip_bfloat16*) src6,
+      (const __hip_bfloat16*) src7,
+      scattered_count,
+      local_size,
+      local_rank,
+      (__hip_bfloat16*) dst
+    );
+  } else {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+}
 """
 
 
@@ -2267,6 +2610,7 @@ class All2AllCommKernels:
                     "all2all_comm_init",
                     "all2all_comm_destroy",
                     "all2all_comm_gemm_reduce_scatter",
+                    "all2all_comm_gemm_reduce_scatter_pull",
                 ],
                 extra_include_paths=[
                     os.path.join(_TORCH_PATH, "include", "torch", "csrc")
@@ -2387,6 +2731,19 @@ class All2AllComm:
             bias,
         )
 
+    def gemm_reduce_scatter_pull(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        return self.comm_kernels.all2all_comm_gemm_reduce_scatter_pull(
+            self.comms,
+            input,
+            weight,
+            bias,
+        )
+
 
 _global_all2all_comm = None
 
@@ -2425,7 +2782,7 @@ def custom_kernel(data: input_t) -> output_t:
 
     comms = get_global_all2all_comm()
 
-    return comms.gemm_reduce_scatter(
+    return comms.gemm_reduce_scatter_pull(
         input=input,
         weight=weight,
         bias=bias,
