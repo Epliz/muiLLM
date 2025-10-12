@@ -1765,7 +1765,7 @@ void all2all_combine_unpack_fp32(
     const int32_t* __restrict__ recv_meta, // shape [total_recv, META_DIM]
     const float* __restrict__ weights, // shape [num_tokens, experts_per_token]
     float* __restrict__ scaled_expert_outputs, // shape [num_tokens, experts_per_token, hidden_dim]
-    float* __restrict__ output, // shape [max_num_tokens, hidden_dim]
+    float* __restrict__ output, // shape [num_tokens, hidden_dim]
     int hidden_dim,
     int total_recv,
     int num_tokens,
@@ -1778,7 +1778,7 @@ void all2all_combine_unpack_fp16(
     const int32_t* __restrict__ recv_meta, // shape [total_recv, META_DIM]
     const float* __restrict__ weights, // shape [num_tokens, experts_per_token]
     float* __restrict__ scaled_expert_outputs, // shape [num_tokens, experts_per_token, hidden_dim]
-    half* __restrict__ output, // shape [max_num_tokens, hidden_dim]
+    half* __restrict__ output, // shape [num_tokens, hidden_dim]
     int hidden_dim,
     int total_recv,
     int num_tokens,
@@ -1791,8 +1791,7 @@ torch::Tensor all2all_comm_combine(
   torch::Tensor& weights, // shape [num_tokens, experts_per_token]
   torch::Tensor& expert_meta, // shape [num_local_experts, max_recv, meta_dim] (expert_id, src_rank, src_token_id, topk_offset)
   torch::Tensor& expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-  torch::Tensor& expert_num_tokens, // shape [num_local_experts]
-  torch::Tensor& out_tokens // shape [max_num_tokens, hidden_dim]
+  torch::Tensor& expert_num_tokens // shape [num_local_experts]
 ) {
   muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms;
 
@@ -1800,7 +1799,6 @@ torch::Tensor all2all_comm_combine(
   CHECK_INPUT(expert_meta);
   CHECK_INPUT(expert_y);
   CHECK_INPUT(expert_num_tokens);
-  CHECK_INPUT(out_tokens);
 
   auto device = expert_meta.device();
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
@@ -1979,6 +1977,14 @@ torch::Tensor all2all_comm_combine(
   // allocate empty tensor to hold scaled expert outputs shape [num_tokens, experts_per_token, hidden_dim]
   // makes it possible to avoid accumulations with atomicAdd
   torch::Tensor scaled_expert_outputs = torch::empty({num_tokens, num_experts_per_token, hidden_dim}, scaled_expert_output_options);
+
+  auto output_options = at::TensorOptions()
+                            .dtype(dtype)
+                            .layout(at::kStrided)
+                            .device(device) // same output device as inputs
+                            .requires_grad(false);
+
+  torch::Tensor out_tokens = torch::empty({num_tokens, hidden_dim}, output_options);
 
   void* recv_buf = buffer_set->buffers[local_rank];
   int32_t* recv_meta = (int32_t*) ((uint8_t*)recv_buf + buff_meta_offset);
