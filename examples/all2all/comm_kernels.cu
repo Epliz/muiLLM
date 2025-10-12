@@ -702,6 +702,7 @@ void all2all_dispatch_unpack_fp32(
 }
 
 #define COMPUTE_PER_THREAD_FP32 4
+#define COMPUTE_PER_BLOCK_FP32_LOOP (COMPUTE_PER_THREAD_FP32 * THREADS_PER_BLOCK)
 
 void __global__ all2all_compute_fp32_kernel(
   const int32_t* __restrict__ expert_num_tokens,
@@ -709,7 +710,7 @@ void __global__ all2all_compute_fp32_kernel(
   float* __restrict__ expert_y,
   int max_recv,
   int hidden_dim,
-  int rank
+  float s
 ) {
 
   int token_idx = blockIdx.x;
@@ -720,28 +721,22 @@ void __global__ all2all_compute_fp32_kernel(
     return;
   }
 
-  int element_idx = threadIdx.x * COMPUTE_PER_THREAD_FP32;
 
   // realign the pointers
-  expert_x = &expert_x[(local_expert_idx * max_recv + token_idx) * hidden_dim + element_idx];
-  expert_y = &expert_y[(local_expert_idx * max_recv + token_idx) * hidden_dim + element_idx];
+  expert_x = &expert_x[(local_expert_idx * max_recv + token_idx) * hidden_dim];
+  expert_y = &expert_y[(local_expert_idx * max_recv + token_idx) * hidden_dim];
 
-  for (; element_idx < hidden_dim; element_idx += THREADS_PER_BLOCK * COMPUTE_PER_THREAD_FP32) {
-    if (element_idx + (COMPUTE_PER_THREAD_FP32 - 1) < hidden_dim) {
-      // all elements are within range
-      #pragma unroll
-      for (int i = 0; i < COMPUTE_PER_THREAD_FP32; i++) {
-        expert_y[i] = expert_x[i] * (1.0f + rank);
-      }
-    } else {
-      // not all elements are within range, use a loop
-      for (int i = 0; i < COMPUTE_PER_THREAD_FP32 && element_idx < hidden_dim; i++, element_idx++) {
-        expert_y[i] = expert_x[i] * (1.0f + rank);
-      }
-    }
-    // realign the pointers for the next iteration
-    expert_x += THREADS_PER_BLOCK * COMPUTE_PER_THREAD_FP32;
-    expert_y += THREADS_PER_BLOCK * COMPUTE_PER_THREAD_FP32;
+  int i = threadIdx.x * COMPUTE_PER_THREAD_FP32;
+  for (; i + (COMPUTE_PER_THREAD_FP32 - 1) < hidden_dim; i += COMPUTE_PER_BLOCK_FP32_LOOP) {
+    float4 x = *((float4*)&expert_x[i]);
+    expert_y[i + 0] = x.x * s;
+    expert_y[i + 1] = x.y * s;
+    expert_y[i + 2] = x.z * s;
+    expert_y[i + 3] = x.w * s;
+  }
+  // handle the remaining elements
+  for (; i < hidden_dim; i++) {
+    expert_y[i] = expert_x[i] * s;
   }
 }
 
@@ -760,17 +755,19 @@ void all2all_compute_fp32(
   const int threads_per_block = THREADS_PER_BLOCK;
   const dim3 blocks(max_recv, num_local_experts);
 
+  float s = 1.0f + rank;
   all2all_compute_fp32_kernel<<<blocks, threads_per_block, 0, stream>>>(
     expert_num_tokens,
     expert_x,
     expert_y,
     max_recv,
     hidden_dim,
-    rank
+    s
   );
 }
 
 #define COMPUTE_PER_THREAD_FP16 8
+#define COMPUTE_PER_BLOCK_FP16_LOOP (COMPUTE_PER_THREAD_FP16 * THREADS_PER_BLOCK)
 
 void __global__ all2all_compute_fp16_kernel(
   const int32_t* __restrict__ expert_num_tokens,
@@ -778,7 +775,7 @@ void __global__ all2all_compute_fp16_kernel(
   half* __restrict__ expert_y,
   int max_recv,
   int hidden_dim,
-  int rank
+  float s
 ) {
 
   int token_idx = blockIdx.x;
@@ -789,28 +786,25 @@ void __global__ all2all_compute_fp16_kernel(
     return;
   }
 
-  int element_idx = threadIdx.x * COMPUTE_PER_THREAD_FP16;
-
   // realign the pointers
-  expert_x = &expert_x[(local_expert_idx * max_recv + token_idx) * hidden_dim + element_idx];
-  expert_y = &expert_y[(local_expert_idx * max_recv + token_idx) * hidden_dim + element_idx];
+  expert_x = &expert_x[(local_expert_idx * max_recv + token_idx) * hidden_dim];
+  expert_y = &expert_y[(local_expert_idx * max_recv + token_idx) * hidden_dim];
 
-  for (; element_idx < hidden_dim; element_idx += THREADS_PER_BLOCK * COMPUTE_PER_THREAD_FP16) {
-    if (element_idx + (COMPUTE_PER_THREAD_FP16 - 1) < hidden_dim) {
-      // all elements are within range
-      #pragma unroll
-      for (int i = 0; i < COMPUTE_PER_THREAD_FP16; i++) {
-        expert_y[i] = __float2half_rn(__half2float(expert_x[i]) * (1.0f + rank));
-      }
-    } else {
-      // not all elements are within range, use a loop
-      for (int i = 0; i < COMPUTE_PER_THREAD_FP16 && element_idx < hidden_dim; i++, element_idx++) {
-        expert_y[i] = __float2half_rn(__half2float(expert_x[i]) * (1.0f + rank));
-      }
-    }
-    // realign the pointers for the next iteration
-    expert_x += THREADS_PER_BLOCK * COMPUTE_PER_THREAD_FP16;
-    expert_y += THREADS_PER_BLOCK * COMPUTE_PER_THREAD_FP16;
+  int i = threadIdx.x * COMPUTE_PER_THREAD_FP16;
+  for (; i + (COMPUTE_PER_THREAD_FP16 - 1) < hidden_dim; i += COMPUTE_PER_BLOCK_FP16_LOOP) {
+    half8 x = *(half8*)&expert_x[i];
+    expert_y[i + 0] = __float2half_rn(__half2float(x.x) * s);
+    expert_y[i + 1] = __float2half_rn(__half2float(x.y) * s);
+    expert_y[i + 2] = __float2half_rn(__half2float(x.z) * s);
+    expert_y[i + 3] = __float2half_rn(__half2float(x.w) * s);
+    expert_y[i + 4] = __float2half_rn(__half2float(x.a) * s);
+    expert_y[i + 5] = __float2half_rn(__half2float(x.b) * s);
+    expert_y[i + 6] = __float2half_rn(__half2float(x.c) * s);
+    expert_y[i + 7] = __float2half_rn(__half2float(x.d) * s);
+  }
+  // handle the remaining elements
+  for (; i < hidden_dim; i++) {
+    expert_y[i] = __float2half_rn(__half2float(expert_x[i]) * s);
   }
 }
 
@@ -829,13 +823,14 @@ void all2all_compute_fp16(
   const int threads_per_block = THREADS_PER_BLOCK;
   const dim3 blocks(max_recv, num_local_experts);
 
+  float s = 1.0f + rank;
   all2all_compute_fp16_kernel<<<blocks, threads_per_block, 0, stream>>>(
     expert_num_tokens,
     expert_x,
     expert_y,
     max_recv,
     hidden_dim,
-    rank
+    s
   );
 }
 

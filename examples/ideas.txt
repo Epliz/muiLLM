@@ -38,7 +38,7 @@ All2All:
 - vectorize copies everywhere
   all2all_dispatch_pack_send_buffers_fp32_kernel
   all2all_dispatch_pack_send_buffers_fp16_kernel
-  all2all_dispatch_unpack_fp16_kernel
-  all2all_dispatch_unpack_fp32_kernel
+  all2all_dispatch_unpack_fp16_kernel DONE
+  all2all_dispatch_unpack_fp32_kernel DONE
   compute
   all2all_combine_pack_send_buffers_fp32_kernel (revisit)
