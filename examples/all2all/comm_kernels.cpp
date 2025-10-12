@@ -1814,11 +1814,10 @@ torch::Tensor all2all_comm_combine(
   int max_recv = expert_meta.size(1);
   int meta_dim = expert_meta.size(2);
   int hidden_dim = expert_y.size(2);
-  int max_num_tokens = out_tokens.size(0);
 
   // total number of tokens a rank has to combine is at most this much.
   // we use this to allocate the send buffer with the same size on all ranks
-  int max_total_send = max_num_tokens * num_experts_per_token * local_size;
+  int max_total_send = max_recv * num_experts_per_token;
   // but for this rank, the actual number of tokens to combine is:
   int total_recv = num_tokens * num_experts_per_token;
 

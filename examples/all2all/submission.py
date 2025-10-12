@@ -1829,11 +1829,10 @@ torch::Tensor all2all_comm_combine(
   int max_recv = expert_meta.size(1);
   int meta_dim = expert_meta.size(2);
   int hidden_dim = expert_y.size(2);
-  int max_num_tokens = out_tokens.size(0);
 
   // total number of tokens a rank has to combine is at most this much.
   // we use this to allocate the send buffer with the same size on all ranks
-  int max_total_send = max_num_tokens * num_experts_per_token * local_size;
+  int max_total_send = max_recv * num_experts_per_token;
   // but for this rank, the actual number of tokens to combine is:
   int total_recv = num_tokens * num_experts_per_token;
 
@@ -3864,7 +3863,7 @@ def custom_kernel(data: input_t) -> output_t:
 
     # TODO: use empty instead of zeros
     y = torch.zeros(
-        cfg.max_num_tokens,
+        rank_data.num_tokens,
         cfg.hidden_dim,
         dtype=cfg.out_dtype,
         device=rank_data.x.device,
@@ -3879,4 +3878,4 @@ def custom_kernel(data: input_t) -> output_t:
         expert_num_tokens=expert_num_tokens,
     )
 
-    return y[: rank_data.num_tokens]
+    return y
