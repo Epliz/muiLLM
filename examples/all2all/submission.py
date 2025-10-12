@@ -3663,6 +3663,11 @@ def apply_monkey_patch():
     if _monkey_patched:
         return
 
+    # disable GC to avoid CPU variability during the benchmarking
+    import gc
+
+    gc.disable()
+
     import torch.distributed as dist
 
     # Save the original function
