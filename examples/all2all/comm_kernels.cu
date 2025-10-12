@@ -480,6 +480,15 @@ void all2all_dispatch_pack_send_buffers_fp16(
   );
 }
 
+void __global__ all2all_dispatch_cache_recv_count_kernel(
+    const uint32_t* __restrict__ recv_counts,
+    uint32_t* __restrict__ local_count_cache
+) {
+  if (threadIdx.x == 0) {
+    local_count_cache[0] = recv_counts[0];
+  }
+}
+
 #define DISPATCH_UNPACK_THREADS_PER_BLOCK 256
 
 #define DISPATCH_UNPACK_FP16_ELEMENTS_PER_THREAD 8
@@ -493,7 +502,6 @@ void __global__ all2all_dispatch_unpack_fp16_kernel(
     int32_t* __restrict__ expert_num_tokens,
     half* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
-    // TODO recv_counts is on CPU so uncached
     const uint32_t* __restrict__ recv_counts,
     int hidden_dim,
     int max_recv,
@@ -501,7 +509,7 @@ void __global__ all2all_dispatch_unpack_fp16_kernel(
 
   int token_idx = blockIdx.x;
 
-  if (token_idx >= recv_counts[0]) { // TODO: remove uncached access somehow
+  if (token_idx >= recv_counts[0]) {
     return;
   }
 
@@ -559,10 +567,17 @@ void all2all_dispatch_unpack_fp16(
     half* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
     const uint32_t* __restrict__ recv_counts,
+    uint32_t* __restrict__ local_count_cache,
     int hidden_dim,
     int max_recv,
     int local_expert_offset,
     int max_total_recv) {
+
+  // copy recv count into cache
+  all2all_dispatch_cache_recv_count_kernel<<<1, 1, 0, stream>>>(
+    recv_counts,
+    local_count_cache
+  );
 
   const int threads_per_block = DISPATCH_UNPACK_THREADS_PER_BLOCK;
   const int blocks = max_total_recv;
@@ -573,7 +588,7 @@ void all2all_dispatch_unpack_fp16(
     expert_num_tokens,
     expert_x,
     expert_meta,
-    recv_counts,
+    local_count_cache,
     hidden_dim,
     max_recv,
     local_expert_offset
@@ -591,7 +606,6 @@ void __global__ all2all_dispatch_unpack_fp32_kernel(
     int32_t* __restrict__ expert_num_tokens,
     float* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
-    // TODO recv_counts is on CPU so uncached
     const uint32_t* __restrict__ recv_counts,
     int hidden_dim,
     int max_recv,
@@ -601,7 +615,7 @@ void __global__ all2all_dispatch_unpack_fp32_kernel(
 
   int token_idx = blockIdx.x;
 
-  if (token_idx >= recv_counts[0]) { // TODO: remove uncached access somehow
+  if (token_idx >= recv_counts[0]) {
     return;
   }
 
@@ -659,10 +673,17 @@ void all2all_dispatch_unpack_fp32(
     float* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
     const uint32_t* __restrict__ recv_counts,
+    uint32_t* __restrict__ local_count_cache,
     int hidden_dim,
     int max_recv,
     int local_expert_offset,
     int max_total_recv) {
+
+  // copy recv count into cache
+  all2all_dispatch_cache_recv_count_kernel<<<1, 1, 0, stream>>>(
+    recv_counts,
+    local_count_cache
+  );
 
   const int threads_per_block = THREADS_PER_BLOCK;
   const int blocks = max_total_recv;
@@ -673,7 +694,7 @@ void all2all_dispatch_unpack_fp32(
     expert_num_tokens,
     expert_x,
     expert_meta,
-    recv_counts,
+    local_count_cache,
     hidden_dim,
     max_recv,
     local_expert_offset

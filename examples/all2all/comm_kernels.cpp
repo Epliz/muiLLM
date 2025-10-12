@@ -556,6 +556,8 @@ typedef struct muillm_comm_p2p: muillm_comm {
   bool cant_skip_cache_flush_event;
 
   muillm_gpu_info_t* gpu_info;
+
+  uint32_t* local_count_cache;
 } muillm_comm_p2p_t;
 
 muillm_comm_error_t muillm_comm_p2p_init_comm(
@@ -1080,6 +1082,11 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
     return muillm_error;
   }
 
+  // allocate local count cache on GPU
+  if (hipMalloc(&comm->local_count_cache, sizeof(uint32_t)) != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
   // set the device
   if (hipSetDevice(local_rank) != hipSuccess) {
     return MUILLM_COMM_UNKNOWN_ERROR;
@@ -1371,6 +1378,7 @@ void all2all_dispatch_unpack_fp16(
     half* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
     const uint32_t* __restrict__ recv_counts,
+    uint32_t* __restrict__ local_count_cache,
     int hidden_dim,
     int max_recv,
     int local_expert_offset,
@@ -1385,6 +1393,7 @@ void all2all_dispatch_unpack_fp32(
     float* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
     const uint32_t* __restrict__ recv_counts,
+    uint32_t* __restrict__ local_count_cache,
     int hidden_dim,
     int max_recv,
     int local_expert_offset,
@@ -1607,6 +1616,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
       (float*) expert_x.data_ptr(),
       (int32_t*) expert_meta.data_ptr(),
       &counters[local_rank], // total_recv
+      comm->local_count_cache,
       hidden_dim,
       max_recv,
       local_expert_offset,
@@ -1621,6 +1631,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
       (half*) expert_x.data_ptr(),
       (int32_t*) expert_meta.data_ptr(),
       &counters[local_rank], // total_recv
+      comm->local_count_cache,
       hidden_dim,
       max_recv,
       local_expert_offset,
