@@ -47,3 +47,5 @@ All2All:
   all2all_combine_pack_send_buffers_fp32_kernel (revisit)
 
 - fuse local count caching with GPU barrier
+- check if divisions are a problem (can run a profile removing them, then if yes, use the magic int division)
+   (e.g. https://github.com/milakov/int_fastdiv/blob/master/int_fastdiv.h)
