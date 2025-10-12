@@ -35,3 +35,10 @@ All2All:
 - remove as many kernels as possible 
   -> for both dispatch and combine avoid "compute_send_counts" kernels
      by writing from sender to dst directly based on token_idx/expert_idx
+- vectorize copies everywhere
+  all2all_dispatch_pack_send_buffers_fp32_kernel
+  all2all_dispatch_pack_send_buffers_fp16_kernel
+  all2all_dispatch_unpack_fp16_kernel
+  all2all_dispatch_unpack_fp32_kernel
+  compute
+  all2all_combine_pack_send_buffers_fp32_kernel (revisit)

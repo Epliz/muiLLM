@@ -2495,6 +2495,11 @@ void all2all_dispatch_pack_send_buffers_fp16(
   );
 }
 
+#define DISPATCH_UNPACK_THREADS_PER_BLOCK 256
+
+#define DISPATCH_UNPACK_FP16_ELEMENTS_PER_THREAD 8
+#define DISPATCH_UNPACK_FP16_ELEMENTS_PER_BLOCK_LOOP (DISPATCH_UNPACK_FP16_ELEMENTS_PER_THREAD * DISPATCH_UNPACK_THREADS_PER_BLOCK)
+
 // expected to be launched with 1D grid with total_recv blocks
 // each block handles one token
 void __global__ all2all_dispatch_unpack_fp16_kernel(
@@ -2508,8 +2513,6 @@ void __global__ all2all_dispatch_unpack_fp16_kernel(
     int hidden_dim,
     int max_recv,
     int local_expert_offset) {
-  
-  int lane_id = threadIdx.x % warpSize;
 
   int token_idx = blockIdx.x;
 
@@ -2547,7 +2550,13 @@ void __global__ all2all_dispatch_unpack_fp16_kernel(
   expert_meta = &expert_meta[(local_expert_idx * max_recv + local_num_expert_tokens) * META_DIM];
 
   // copy the token to expert_x
-  for (int d = threadIdx.x; d < hidden_dim; d += THREADS_PER_BLOCK) {
+  int d = threadIdx.x * DISPATCH_UNPACK_FP16_ELEMENTS_PER_THREAD;
+  for (; d + (DISPATCH_UNPACK_FP16_ELEMENTS_PER_THREAD - 1) < hidden_dim; d += DISPATCH_UNPACK_FP16_ELEMENTS_PER_BLOCK_LOOP) {
+    const half8 recv = *((half8*)&recv_buf[d]);
+    *(half8*)&expert_x[d] = recv;
+  }
+  // one thread handles the remaining elements
+  for (; d < hidden_dim; d++) {
     expert_x[d] = recv_buf[d];
   }
 
@@ -2570,7 +2579,7 @@ void all2all_dispatch_unpack_fp16(
     int local_expert_offset,
     int max_total_recv) {
 
-  const int threads_per_block = THREADS_PER_BLOCK;
+  const int threads_per_block = DISPATCH_UNPACK_THREADS_PER_BLOCK;
   const int blocks = max_total_recv;
 
   all2all_dispatch_unpack_fp16_kernel<<<blocks, threads_per_block, 0, stream>>>(
@@ -2585,6 +2594,9 @@ void all2all_dispatch_unpack_fp16(
     local_expert_offset
   );
 }
+
+#define DISPATCH_UNPACK_FP32_ELEMENTS_PER_THREAD 4
+#define DISPATCH_UNPACK_FP32_ELEMENTS_PER_BLOCK_LOOP (DISPATCH_UNPACK_FP32_ELEMENTS_PER_THREAD * DISPATCH_UNPACK_THREADS_PER_BLOCK)
 
 // expected to be launched with 1D grid with total_recv blocks
 // each block handles one token
@@ -2638,7 +2650,13 @@ void __global__ all2all_dispatch_unpack_fp32_kernel(
   expert_meta = &expert_meta[(local_expert_idx * max_recv + local_num_expert_tokens) * META_DIM];
 
   // copy the token to expert_x
-  for (int d = threadIdx.x; d < hidden_dim; d += THREADS_PER_BLOCK) {
+  int d = threadIdx.x * DISPATCH_UNPACK_FP32_ELEMENTS_PER_THREAD;
+  for (; d + (DISPATCH_UNPACK_FP32_ELEMENTS_PER_THREAD - 1) < hidden_dim; d += DISPATCH_UNPACK_FP32_ELEMENTS_PER_BLOCK_LOOP) {
+    float4 recv = *((float4*)&recv_buf[d]);
+    *((float4*)&expert_x[d]) = recv;
+  }
+  // one thread handles the remaining elements
+  for (; d < hidden_dim; d++) {
     expert_x[d] = recv_buf[d];
   }
 
