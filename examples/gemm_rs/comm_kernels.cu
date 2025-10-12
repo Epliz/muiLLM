@@ -863,9 +863,10 @@ muillm_comm_error_t __muillm_reduce(
   }
 }
 
+#define MAX_PULL_REDUCE_X_BLOCKS 64
 
 #define PULL_REDUCE_PER_THREAD 8
-#define PULL_REDUCE_PER_BLOCK (THREADS_PER_BLOCK * PULL_REDUCE_PER_THREAD)
+#define PULL_REDUCE_PER_BLOCK_LOOP (THREADS_PER_BLOCK * PULL_REDUCE_PER_THREAD)
 
 void __global__ pull_reduce_x8_fp16_kernel(
   const half* __restrict__ src0, // shape [scattered_M, N]
@@ -877,12 +878,14 @@ void __global__ pull_reduce_x8_fp16_kernel(
   const half* __restrict__ src6, // shape [scattered_M, N]
   const half* __restrict__ src7, // shape [scattered_M, N]
   half* __restrict__ dst,
-  int N
+  int N,
+  int elements_per_block
 ) {
+  unsigned block_start = blockIdx.x * elements_per_block;
+  unsigned block_end = std::min(block_start + elements_per_block, N);
+  unsigned i = block_start + (threadIdx.x * PULL_REDUCE_PER_THREAD);
 
-  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
-  // TODO: make copy more like for scatter
-  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+  for (; i + (PULL_REDUCE_PER_THREAD - 1) < block_end; i += PULL_REDUCE_PER_BLOCK_LOOP) {
     // can reduce 8 elements
     half8* dst_h8_ptr = (half8*)(&dst[i]);
 
@@ -915,10 +918,12 @@ void __global__ pull_reduce_x8_fp16_kernel(
     r.d = __hadd(v0.d, __hadd(v1.d, __hadd(v2.d, __hadd(v3.d, __hadd(v4.d, __hadd(v5.d, __hadd(v6.d, v7.d)))))));
 
     *dst_h8_ptr = r;
-  } else {
+  }
+  
+  if (i < block_end) {
     // non vectorized reduce
     for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < block_end) {
         half v0 = src0[i];
         half v1 = src1[i];
         half v2 = src2[i];
@@ -943,12 +948,15 @@ void __global__ pull_reduce_x4_fp16_kernel(
   const half* __restrict__ src2, // shape [scattered_M, N]
   const half* __restrict__ src3, // shape [scattered_M, N]
   half* __restrict__ dst,
-  int N
+  int N,
+  int elements_per_block
 ) {
 
-  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
-  // TODO: make copy more like for scatter
-  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+  unsigned block_start = blockIdx.x * elements_per_block;
+  unsigned block_end = std::min(block_start + elements_per_block, N);
+  unsigned i = block_start + (threadIdx.x * PULL_REDUCE_PER_THREAD);
+
+  for (; i + (PULL_REDUCE_PER_THREAD - 1) < block_end; i += PULL_REDUCE_PER_BLOCK_LOOP) {
     // can reduce 8 elements
     half8* dst_h8_ptr = (half8*)(&dst[i]);
 
@@ -973,10 +981,12 @@ void __global__ pull_reduce_x4_fp16_kernel(
     r.d = __hadd(v0.d, __hadd(v1.d, __hadd(v2.d, v3.d)));
 
     *dst_h8_ptr = r;
-  } else {
+  }
+  
+  if (i < block_end) {
     // non vectorized reduce
     for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < block_end) {
         half v0 = src0[i];
         half v1 = src1[i];
         half v2 = src2[i];
@@ -996,12 +1006,15 @@ void __global__ pull_reduce_x2_fp16_kernel(
   const half* __restrict__ src0, // shape [scattered_M, N]
   const half* __restrict__ src1, // shape [scattered_M, N]
   half* __restrict__ dst,
-  int N
+  int N,
+  int elements_per_block
 ) {
 
-  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
-  // TODO: make copy more like for scatter
-  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+  unsigned block_start = blockIdx.x * elements_per_block;
+  unsigned block_end = std::min(block_start + elements_per_block, N);
+  unsigned i = block_start + (threadIdx.x * PULL_REDUCE_PER_THREAD);
+
+  for (; i + (PULL_REDUCE_PER_THREAD - 1) < block_end; i += PULL_REDUCE_PER_BLOCK_LOOP) {
     // can reduce 8 elements
     half8* dst_h8_ptr = (half8*)(&dst[i]);
 
@@ -1022,10 +1035,12 @@ void __global__ pull_reduce_x2_fp16_kernel(
     r.d = __hadd(v0.d, v1.d);
 
     *dst_h8_ptr = r;
-  } else {
+  }
+  
+  if (i < block_end) {
     // non vectorized reduce
     for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < block_end) {
         half v0 = src0[i];
         half v1 = src1[i];
 
@@ -1057,7 +1072,14 @@ muillm_comm_error_t __muillm_reduce_pull_fp16(
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(scattered_count, PULL_REDUCE_PER_BLOCK);
+  // we want to avoid spawning too many blocks to copy the data and want instead
+  // to make blocks process more data when we have more than MAX_PULL_REDUCE_X_BLOCKS
+  //
+  int num_small_x_blocks = DIV_ROUND_UP(scattered_count, PULL_REDUCE_PER_BLOCK_LOOP);
+  int num_x_blocks = std::min(num_small_x_blocks, MAX_PULL_REDUCE_X_BLOCKS);
+  const int num_blocks = num_x_blocks;
+
+  int elements_per_block = ALIGN_UP(DIV_ROUND_UP(scattered_count, num_x_blocks), 4096);
 
   int offset = (local_rank * scattered_count);
   if (local_size == 8) {
@@ -1081,7 +1103,8 @@ muillm_comm_error_t __muillm_reduce_pull_fp16(
       src6,
       src7,
       dst,
-      scattered_count
+      scattered_count,
+      elements_per_block
     );
   } else if (local_size == 4) {
     // compute the src pointers by applying the offsets
@@ -1096,7 +1119,8 @@ muillm_comm_error_t __muillm_reduce_pull_fp16(
       src2,
       src3,
       dst,
-      scattered_count
+      scattered_count,
+      elements_per_block
     );
   } else if (local_size == 2) {
     // compute the src pointers by applying the offsets
@@ -1107,7 +1131,8 @@ muillm_comm_error_t __muillm_reduce_pull_fp16(
       src0,
       src1,
       dst,
-      scattered_count
+      scattered_count,
+      elements_per_block
     );
   } else {
     return MUILLM_COMM_UNSUPPORTED_SIZE;
@@ -1127,12 +1152,15 @@ void __global__ pull_reduce_x8_bf16_kernel(
   const __hip_bfloat16* __restrict__ src6, // shape [scattered_M, N]
   const __hip_bfloat16* __restrict__ src7, // shape [scattered_M, N]
   __hip_bfloat16* __restrict__ dst,
-  int N
+  int N,
+  int elements_per_block
 ) {
 
-  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
-  // TODO: make copy more like for scatter
-  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+  unsigned block_start = blockIdx.x * elements_per_block;
+  unsigned block_end = std::min(block_start + elements_per_block, N);
+  unsigned i = block_start + (threadIdx.x * PULL_REDUCE_PER_THREAD);
+
+  for (; i + (PULL_REDUCE_PER_THREAD - 1) < block_end; i += PULL_REDUCE_PER_BLOCK_LOOP) {
     // can reduce 8 elements
     __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
 
@@ -1165,10 +1193,11 @@ void __global__ pull_reduce_x8_bf16_kernel(
     r.d = __hadd(v0.d, __hadd(v1.d, __hadd(v2.d, __hadd(v3.d, __hadd(v4.d, __hadd(v5.d, __hadd(v6.d, v7.d)))))));
 
     *dst_h8_ptr = r;
-  } else {
+  }
+  if (i < block_end) {
     // non vectorized reduce
     for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < block_end) {
         __hip_bfloat16 v0 = src0[i];
         __hip_bfloat16 v1 = src1[i];
         __hip_bfloat16 v2 = src2[i];
@@ -1193,12 +1222,15 @@ void __global__ pull_reduce_x4_bf16_kernel(
   const __hip_bfloat16* __restrict__ src2, // shape [scattered_M, N]
   const __hip_bfloat16* __restrict__ src3, // shape [scattered_M, N]
   __hip_bfloat16* __restrict__ dst,
-  int N
+  int N,
+  int elements_per_block
 ) {
 
-  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
-  // TODO: make copy more like for scatter
-  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+  unsigned block_start = blockIdx.x * elements_per_block;
+  unsigned block_end = std::min(block_start + elements_per_block, N);
+  unsigned i = block_start + (threadIdx.x * PULL_REDUCE_PER_THREAD);
+
+  for (; i + (PULL_REDUCE_PER_THREAD - 1) < block_end; i += PULL_REDUCE_PER_BLOCK_LOOP) {
     // can reduce 8 elements
     __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
 
@@ -1223,10 +1255,11 @@ void __global__ pull_reduce_x4_bf16_kernel(
     r.d = __hadd(v0.d, __hadd(v1.d, __hadd(v2.d, v3.d)));
 
     *dst_h8_ptr = r;
-  } else {
+  }
+  if (i < block_end) {
     // non vectorized reduce
     for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < block_end) {
         __hip_bfloat16 v0 = src0[i];
         __hip_bfloat16 v1 = src1[i];
         __hip_bfloat16 v2 = src2[i];
@@ -1246,12 +1279,15 @@ void __global__ pull_reduce_x2_bf16_kernel(
   const __hip_bfloat16* __restrict__ src0, // shape [scattered_M, N]
   const __hip_bfloat16* __restrict__ src1, // shape [scattered_M, N]
   __hip_bfloat16* __restrict__ dst,
-  int N
+  int N,
+  int elements_per_block
 ) {
 
-  unsigned i = blockIdx.x * PULL_REDUCE_PER_BLOCK + (threadIdx.x * PULL_REDUCE_PER_THREAD);
-  // TODO: make copy more like for scatter
-  if (i + (PULL_REDUCE_PER_THREAD - 1) < N) {
+  unsigned block_start = blockIdx.x * elements_per_block;
+  unsigned block_end = std::min(block_start + elements_per_block, N);
+  unsigned i = block_start + (threadIdx.x * PULL_REDUCE_PER_THREAD);
+
+  for (; i + (PULL_REDUCE_PER_THREAD - 1) < block_end; i += PULL_REDUCE_PER_BLOCK_LOOP) {
     // can reduce 8 elements
     __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
 
@@ -1272,10 +1308,11 @@ void __global__ pull_reduce_x2_bf16_kernel(
     r.d = __hadd(v0.d, v1.d);
 
     *dst_h8_ptr = r;
-  } else {
+  }
+  if (i < block_end) {
     // non vectorized reduce
     for (unsigned r = 0; r < PULL_REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < block_end) {
         __hip_bfloat16 v0 = src0[i];
         __hip_bfloat16 v1 = src1[i];
 
@@ -1307,7 +1344,14 @@ muillm_comm_error_t __muillm_reduce_pull_bf16(
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(scattered_count, PULL_REDUCE_PER_BLOCK);
+  // we want to avoid spawning too many blocks to copy the data and want instead
+  // to make blocks process more data when we have more than MAX_PULL_REDUCE_X_BLOCKS
+  //
+  int num_small_x_blocks = DIV_ROUND_UP(scattered_count, PULL_REDUCE_PER_BLOCK_LOOP);
+  int num_x_blocks = std::min(num_small_x_blocks, MAX_PULL_REDUCE_X_BLOCKS);
+  const int num_blocks = num_x_blocks;
+
+  int elements_per_block = ALIGN_UP(DIV_ROUND_UP(scattered_count, num_x_blocks), 4096);
 
   int offset = (local_rank * scattered_count);
   if (local_size == 8) {
@@ -1331,7 +1375,8 @@ muillm_comm_error_t __muillm_reduce_pull_bf16(
       src6,
       src7,
       dst,
-      scattered_count
+      scattered_count,
+      elements_per_block
     );
   } else if (local_size == 4) {
     // compute the src pointers by applying the offsets
@@ -1346,7 +1391,8 @@ muillm_comm_error_t __muillm_reduce_pull_bf16(
       src2,
       src3,
       dst,
-      scattered_count
+      scattered_count,
+      elements_per_block
     );
   } else if (local_size == 2) {
     // compute the src pointers by applying the offsets
@@ -1357,7 +1403,8 @@ muillm_comm_error_t __muillm_reduce_pull_bf16(
       src0,
       src1,
       dst,
-      scattered_count
+      scattered_count,
+      elements_per_block
     );
   } else {
     return MUILLM_COMM_UNSUPPORTED_SIZE;
