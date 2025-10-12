@@ -3861,15 +3861,13 @@ def custom_kernel(data: input_t) -> output_t:
     else:
         expert_y = expert_x.to(cfg.out_dtype) * (1 + rank)
 
-    # TODO: use empty instead of zeros
-    y = torch.zeros(
+    y = torch.empty(
         rank_data.num_tokens,
         cfg.hidden_dim,
         dtype=cfg.out_dtype,
         device=rank_data.x.device,
     )
 
-    # Combine doesn't work with kernels
     y = ata.combine(
         out_tokens=y,
         weights=rank_data.weights,
