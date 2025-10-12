@@ -1711,39 +1711,23 @@ at::Tensor all2all_compute(
   return expert_y;
 }
 
-void all2all_combine_compute_send_counts(
-    hipStream_t stream,
-    const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
-    const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
-    uint32_t* __restrict__ send_offsets, // shape [world_size]
-    // counters for the different ranks
-    uint32_t* counters,
-    // local counter to clear for next use
-    uint32_t* next_counters,
-    int num_local_experts,
-    int max_recv,
-    int local_size,
-    int local_rank
-);
-
 void all2all_combine_pack_send_buffers_fp16(
     hipStream_t stream,
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const half* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
-    half* __restrict__ send_buf0, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf1, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf2, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf3, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf4, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf5, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf6, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf7, // shape [total_send, hidden_dim]
+    half* __restrict__ send_buf0, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf1, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf2, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf3, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf4, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf5, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf6, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf7, // shape [max_num_tokens, experts_per_token, hidden_dim]
     int num_local_experts,
     int max_recv,
-    int hidden_dim,
-    int buff_meta_offset
+    int experts_per_token,
+    int hidden_dim
 );
 
 void all2all_combine_pack_send_buffers_fp32(
@@ -1751,30 +1735,26 @@ void all2all_combine_pack_send_buffers_fp32(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const float* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
-    float* __restrict__ send_buf0, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf1, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf2, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf3, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf4, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf5, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf6, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf7, // shape [total_send, hidden_dim]
+    float* __restrict__ send_buf0, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf1, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf2, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf3, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf4, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf5, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf6, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf7, // shape [max_num_tokens, experts_per_token, hidden_dim]
     int num_local_experts,
     int max_recv,
-    int hidden_dim,
-    int buff_meta_offset
+    int experts_per_token,
+    int hidden_dim
 );
 
 void all2all_combine_unpack_fp32(
     hipStream_t stream,
-    const float* __restrict__ recv_buf, // shape [total_recv, hidden_sim]
-    const int32_t* __restrict__ recv_meta, // shape [total_recv, META_DIM]
+    const float* __restrict__ recv_buf, // shape [num_tokens, experts_per_token, hidden_dim]
     const float* __restrict__ weights, // shape [num_tokens, experts_per_token]
-    float* __restrict__ scaled_expert_outputs, // shape [num_tokens, experts_per_token, hidden_dim]
-    float* __restrict__ output, // shape [num_tokens, hidden_dim]
+    float* __restrict__ output, // shape [max_num_tokens, hidden_dim]
     int hidden_dim,
-    int total_recv,
     int num_tokens,
     int experts_per_token
 );
@@ -1782,12 +1762,9 @@ void all2all_combine_unpack_fp32(
 void all2all_combine_unpack_fp16(
     hipStream_t stream,
     const half* __restrict__ recv_buf, // shape [total_recv, hidden_sim]
-    const int32_t* __restrict__ recv_meta, // shape [total_recv, META_DIM]
     const float* __restrict__ weights, // shape [num_tokens, experts_per_token]
-    float* __restrict__ scaled_expert_outputs, // shape [num_tokens, experts_per_token, hidden_dim]
-    half* __restrict__ output, // shape [num_tokens, hidden_dim]
+    half* __restrict__ output, // shape [max_num_tokens, hidden_dim]
     int hidden_dim,
-    int total_recv,
     int num_tokens,
     int experts_per_token
 );
@@ -1822,9 +1799,9 @@ torch::Tensor all2all_comm_combine(
 
   // total number of tokens a rank has to combine is at most this much.
   // we use this to allocate the send buffer with the same size on all ranks
-  int max_total_send = max_recv * num_experts_per_token;
+  int max_total_send = max_recv * num_experts_per_token; // TODO: inaccurate, could max_num_tokens * num_experts_per_token
   // but for this rank, the actual number of tokens to combine is:
-  int total_recv = num_tokens * num_experts_per_token;
+  // int total_recv = num_tokens * num_experts_per_token;
 
   if (meta_dim != META_DIM) {
     TORCH_CHECK(false, "meta_dim must be ", META_DIM);
@@ -1875,20 +1852,6 @@ torch::Tensor all2all_comm_combine(
 
   muillm_comm_error_t muillm_error;
 
-  // get the next counters to clear
-  muillm_comm_p2p_counter_set_t* next_counter_set = nullptr;
-
-  // we have to do this call before flipping the buffer sets with muillm_comm_p2p_get_buffer_set
-  if (muillm_comm_p2p_get_next_counter_set(comm, &next_counter_set) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when getting next counter set");
-  }
-
-  // get the current counter set
-  muillm_comm_p2p_counter_set_t* current_counter_set = nullptr;
-  if (muillm_comm_p2p_get_counter_set(comm, &current_counter_set) != MUILLM_COMM_SUCCESS) {
-    TORCH_CHECK(false, "an error happened when getting current counter set");
-  }
-
   // get reduction buffer set
   muillm_comm_p2p_buffer_set_t* buffer_set = nullptr;
 
@@ -1897,26 +1860,9 @@ torch::Tensor all2all_comm_combine(
     TORCH_CHECK(false, "an error happened when getting buffer set");
   }
 
-  uint32_t* counters = (uint32_t*)current_counter_set->counters;
-  uint32_t* next_counters = (uint32_t*) next_counter_set->counters;
-  
-  all2all_combine_compute_send_counts(
-    stream,
-    (const int32_t*) expert_num_tokens.data_ptr(),
-    (const int32_t*) expert_meta.data_ptr(),
-    (uint32_t*) send_offsets.data_ptr(),
-    counters,
-    next_counters,
-    num_local_experts,
-    max_recv,
-    local_size,
-    local_rank
-  );
-
   //
-  // then we send/receive the data and meta data
+  // then we send/receive the data
   //
-  int buff_meta_offset = aligned_size_data;
 
   if (dtype == torch::kFloat16) {
     // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
@@ -1925,7 +1871,6 @@ torch::Tensor all2all_comm_combine(
       (const int32_t*) expert_num_tokens.data_ptr(),
       (const int32_t*) expert_meta.data_ptr(),
       (const half*) expert_y.data_ptr(),
-      (int32_t*) send_offsets.data_ptr(),
       (half*) buffer_set->buffers[0],
       (half*) buffer_set->buffers[1],
       (half*) buffer_set->buffers[2],
@@ -1936,8 +1881,8 @@ torch::Tensor all2all_comm_combine(
       (half*) buffer_set->buffers[7],
       num_local_experts,
       max_recv,
-      hidden_dim,
-      buff_meta_offset
+      num_experts_per_token,
+      hidden_dim
     );
   } else if (dtype == torch::kFloat32) {
     // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
@@ -1946,7 +1891,6 @@ torch::Tensor all2all_comm_combine(
       (const int32_t*) expert_num_tokens.data_ptr(),
       (const int32_t*) expert_meta.data_ptr(),
       (const float*) expert_y.data_ptr(),
-      (int32_t*) send_offsets.data_ptr(),
       (float*) buffer_set->buffers[0],
       (float*) buffer_set->buffers[1],
       (float*) buffer_set->buffers[2],
@@ -1957,8 +1901,8 @@ torch::Tensor all2all_comm_combine(
       (float*) buffer_set->buffers[7],
       num_local_experts,
       max_recv,
-      hidden_dim,
-      buff_meta_offset
+      num_experts_per_token,
+      hidden_dim
     );
   } else {
     TORCH_CHECK(false, "datatype must be float16 for now");
@@ -1974,17 +1918,6 @@ torch::Tensor all2all_comm_combine(
   //
   // Finally, we need to combine the received data
   //
-
-  auto scaled_expert_output_options = at::TensorOptions()
-                            .dtype(at::kFloat)
-                            .layout(at::kStrided)
-                            .device(device) // same output device as inputs
-                            .requires_grad(false);
-
-  // allocate empty tensor to hold scaled expert outputs shape [num_tokens, experts_per_token, hidden_dim]
-  // makes it possible to avoid accumulations with atomicAdd
-  torch::Tensor scaled_expert_outputs = torch::empty({num_tokens, num_experts_per_token, hidden_dim}, scaled_expert_output_options);
-
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
@@ -1994,18 +1927,14 @@ torch::Tensor all2all_comm_combine(
   torch::Tensor out_tokens = torch::empty({num_tokens, hidden_dim}, output_options);
 
   void* recv_buf = buffer_set->buffers[local_rank];
-  int32_t* recv_meta = (int32_t*) ((uint8_t*)recv_buf + buff_meta_offset);
 
   if (dtype == at::kFloat) {
     all2all_combine_unpack_fp32(
       stream,
       (const float*) recv_buf,
-      recv_meta,
       (const float*) weights.data_ptr(),
-      (float*) scaled_expert_outputs.data_ptr(),
       (float*) out_tokens.data_ptr(),
       hidden_dim,
-      total_recv,
       num_tokens,
       num_experts_per_token
     );
@@ -2013,12 +1942,9 @@ torch::Tensor all2all_comm_combine(
     all2all_combine_unpack_fp16(
       stream,
       (const half*) recv_buf,
-      recv_meta,
       (const float*) weights.data_ptr(),
-      (float*) scaled_expert_outputs.data_ptr(),
       (half*) out_tokens.data_ptr(),
       hidden_dim,
-      total_recv,
       num_tokens,
       num_experts_per_token
     );

@@ -804,120 +804,6 @@ void all2all_compute_fp16(
 // All2All combine kernels
 //
 
-// Compute send count kernels
-
-#define MAX_LDS_LOADED_EXPERTS 1024
-
-void __global__ all2all_combine_compute_send_counts_kernel(
-    const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
-    const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
-    uint32_t* __restrict__ send_offsets, // shape [world_size]
-    // counters for the different ranks
-    uint32_t* counters,
-    // local counter to clear for next use
-    uint32_t* next_counters,
-    int num_local_experts,
-    int max_recv,
-    int local_size,
-    int local_rank
-) {
-  int warps_per_block = THREADS_PER_BLOCK / warpSize;
-  int warp_id = threadIdx.x / warpSize;
-
-  int lane_id = threadIdx.x % warpSize;
-
-  __shared__ uint32_t send_counts_shared[MUILLM_MAX_GPUS];
-  __shared__ uint32_t expert_num_tokens_shared[MAX_LDS_LOADED_EXPERTS];
-
-  if (threadIdx.x < local_size) {
-    send_counts_shared[threadIdx.x] = 0;
-  }
-
-  if (num_local_experts <= MAX_LDS_LOADED_EXPERTS) {
-    // load expert_num_tokens into LDS
-    for (int i = threadIdx.x; i < num_local_experts; i += THREADS_PER_BLOCK) {
-      expert_num_tokens_shared[i] = (uint32_t) expert_num_tokens[i];
-    }
-  }
-
-  __syncthreads();
-
-  if (local_rank == 0 && threadIdx.x < local_size) {
-    // clear the counters for the next use
-    next_counters[threadIdx.x] = 0;
-  }
-
-  if (num_local_experts <= MAX_LDS_LOADED_EXPERTS) {
-    // each thread handles one token expert
-    for (int local_expert_idx = warp_id; local_expert_idx < num_local_experts; local_expert_idx += warps_per_block) {
-      int num_local_tokens = expert_num_tokens_shared[local_expert_idx];
-
-      const int32_t* local_expert_meta = &expert_meta[local_expert_idx * max_recv * META_DIM + 1];
-
-      // for each token of this expert, figure out which rank to send to
-      for (int i = lane_id; i < num_local_tokens; i += warpSize) {
-        int32_t dst_rank = local_expert_meta[i * META_DIM]; // dst_rank
-        atomicAdd((uint32_t*)&send_counts_shared[dst_rank], 1);
-      }
-    }
-  } else {
-    // each thread handles one token expert
-    for (int local_expert_idx = warp_id; local_expert_idx < num_local_experts; local_expert_idx += warps_per_block) {
-      int num_local_tokens = expert_num_tokens[local_expert_idx];
-
-      const int32_t* local_expert_meta = &expert_meta[local_expert_idx * max_recv * META_DIM + 1];
-
-      // for each token of this expert, figure out which rank to send to
-      for (int i = lane_id; i < num_local_tokens; i += warpSize) {
-        int32_t dst_rank = local_expert_meta[i * META_DIM]; // dst_rank
-        atomicAdd((uint32_t*)&send_counts_shared[dst_rank], 1);
-      }
-    }
-  }
-
-  __syncthreads();
-
-  // do a single thread prefix sum to compute send offsets
-  if (threadIdx.x < local_size) {
-    int rank = threadIdx.x;
-    uint32_t send_count = send_counts_shared[rank];
-    uint32_t send_offset = atomicAdd_system((uint32_t*) &counters[rank], send_count);
-    send_offsets[rank] = send_offset;
-  }
-}
-
-void all2all_combine_compute_send_counts(
-    hipStream_t stream,
-    const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
-    const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
-    uint32_t* __restrict__ send_offsets, // shape [world_size]
-    // counters for the different ranks
-    uint32_t* counters,
-    // local counter to clear for next use
-    uint32_t* next_counters,
-    int num_local_experts,
-    int max_recv,
-    int local_size,
-    int local_rank
-) {
-
-  // call kernel to compute send_counts using a single block to do the send offset reduction as well
-  const int threads_per_block = THREADS_PER_BLOCK;
-  const int blocks = 1;
-
-  all2all_combine_compute_send_counts_kernel<<<blocks, threads_per_block, 0, stream>>>(
-    expert_num_tokens,
-    expert_meta,
-    send_offsets,
-    counters,
-    next_counters,
-    num_local_experts,
-    max_recv,
-    local_size,
-    local_rank
-  );
-}
-
 // Send kernels
 
 #define THREADS_PER_BLOCK_COMBINE_PACK_SEND 256
@@ -927,19 +813,25 @@ void __global__ all2all_combine_pack_send_buffers_fp16_kernel(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const half* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
-    half* __restrict__ send_buf0, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf1, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf2, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf3, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf4, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf5, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf6, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf7, // shape [total_send, hidden_dim]
+    half* __restrict__ send_buf0, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf1, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf2, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf3, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf4, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf5, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf6, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf7, // shape [max_num_tokens, experts_per_token, hidden_dim]
     int max_recv,
-    int hidden_dim,
-    int buff_meta_offset
+    int experts_per_token,
+    int hidden_dim
 ) {
+  /* META contains: 
+    meta_ptr[0] = dispatched_expert;
+    meta_ptr[1] = orig_rank;
+    meta_ptr[2] = token_idx;
+    meta_ptr[3] = expert_idx;
+  */
+
   int warp_id = threadIdx.x / warpSize;
   int lane_id = threadIdx.x % warpSize;
 
@@ -956,13 +848,10 @@ void __global__ all2all_combine_pack_send_buffers_fp16_kernel(
 
   // determine where to write out
   int32_t dst_rank = local_expert_meta[1]; // dst_rank
+  int32_t dst_token_idx = local_expert_meta[2]; // token_idx
+  int32_t dst_expert_idx = local_expert_meta[3]; // expert_idx
 
-  int32_t send_pos = -1;
-  if (lane_id == 0) {
-    // TODO: move to previous kernel to avoid global atomics by computing a global offset array
-    send_pos = (int32_t)atomicAdd((uint32_t*)&send_offsets[dst_rank], 1);
-  }
-  send_pos = __warp_broadcast(send_pos);
+  int32_t send_pos = dst_token_idx * experts_per_token + dst_expert_idx;
 
   half* send_buffs[8] = {send_buf0, send_buf1, send_buf2, send_buf3, send_buf4, send_buf5, send_buf6, send_buf7};
   half* send_buf = send_buffs[dst_rank];
@@ -992,13 +881,6 @@ void __global__ all2all_combine_pack_send_buffers_fp16_kernel(
       send_buf_ptr[i + 0] = y0;
     }
   }
-
-  // write to send_meta
-  int32_t* send_meta = (int32_t*)(((uint8_t*)send_buf) + buff_meta_offset);
-  int32_t* send_meta_ptr = &send_meta[send_pos * META_DIM];
-  for (int i = lane_id; i < META_DIM; i += warpSize) {
-    send_meta_ptr[i] = local_expert_meta[i];
-  }
 }
 
 void all2all_combine_pack_send_buffers_fp16(
@@ -1006,19 +888,18 @@ void all2all_combine_pack_send_buffers_fp16(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const half* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
-    half* __restrict__ send_buf0, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf1, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf2, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf3, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf4, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf5, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf6, // shape [total_send, hidden_dim]
-    half* __restrict__ send_buf7, // shape [total_send, hidden_dim]
+    half* __restrict__ send_buf0, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf1, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf2, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf3, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf4, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf5, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf6, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    half* __restrict__ send_buf7, // shape [max_num_tokens, experts_per_token, hidden_dim]
     int num_local_experts,
     int max_recv,
-    int hidden_dim,
-    int buff_meta_offset
+    int experts_per_token,
+    int hidden_dim
 ) {
   // call kernel to do the packing, with a 2D grid of size (max_recv, num_local_experts)
   const int threads_per_block = THREADS_PER_BLOCK_COMBINE_PACK_SEND;
@@ -1028,7 +909,6 @@ void all2all_combine_pack_send_buffers_fp16(
     expert_num_tokens,
     expert_meta,
     expert_y,
-    send_offsets,
     send_buf0,
     send_buf1,
     send_buf2,
@@ -1038,8 +918,8 @@ void all2all_combine_pack_send_buffers_fp16(
     send_buf6,
     send_buf7,
     max_recv,
-    hidden_dim,
-    buff_meta_offset
+    experts_per_token,
+    hidden_dim
   );
 }
 
@@ -1047,19 +927,24 @@ void __global__ all2all_combine_pack_send_buffers_fp32_kernel(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const float* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
-    float* __restrict__ send_buf0, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf1, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf2, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf3, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf4, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf5, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf6, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf7, // shape [total_send, hidden_dim]
+    float* __restrict__ send_buf0, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf1, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf2, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf3, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf4, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf5, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf6, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf7, // shape [max_num_tokens, experts_per_token, hidden_dim]
     int max_recv,
-    int hidden_dim,
-    int buff_meta_offset
+    int experts_per_token,
+    int hidden_dim
 ) {
+  /* META contains: 
+    meta_ptr[0] = dispatched_expert;
+    meta_ptr[1] = orig_rank;
+    meta_ptr[2] = token_idx;
+    meta_ptr[3] = expert_idx;
+  */
   int warp_id = threadIdx.x / warpSize;
   int lane_id = threadIdx.x % warpSize;
 
@@ -1076,13 +961,10 @@ void __global__ all2all_combine_pack_send_buffers_fp32_kernel(
 
   // determine where to write out
   int32_t dst_rank = local_expert_meta[1]; // dst_rank
+  int32_t dst_token_idx = local_expert_meta[2]; // token_idx
+  int32_t dst_expert_idx = local_expert_meta[3]; // expert_idx
 
-  int32_t send_pos = -1;
-  if (lane_id == 0) {
-    // TODO: move to previous kernel to avoid global atomics by computing a global offset array
-    send_pos = (int32_t)atomicAdd((uint32_t*)&send_offsets[dst_rank], 1);
-  }
-  send_pos = __warp_broadcast(send_pos);
+  int32_t send_pos = dst_token_idx * experts_per_token + dst_expert_idx;
 
   float* send_buffs[8] = {send_buf0, send_buf1, send_buf2, send_buf3, send_buf4, send_buf5, send_buf6, send_buf7};
   float* send_buf = send_buffs[dst_rank];
@@ -1106,13 +988,6 @@ void __global__ all2all_combine_pack_send_buffers_fp32_kernel(
       send_buf_ptr[i + 0] = y0;
     }
   }
-
-  // write to send_meta
-  int32_t* send_meta = (int32_t*)(((uint8_t*)send_buf) + buff_meta_offset);
-  int32_t* send_meta_ptr = &send_meta[send_pos * META_DIM];
-  for (int i = lane_id; i < META_DIM; i += warpSize) {
-    send_meta_ptr[i] = local_expert_meta[i];
-  }
 }
 
 void all2all_combine_pack_send_buffers_fp32(
@@ -1120,19 +995,18 @@ void all2all_combine_pack_send_buffers_fp32(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
     const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
     const float* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    int32_t* __restrict__ send_offsets, // shape [world_size]
-    float* __restrict__ send_buf0, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf1, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf2, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf3, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf4, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf5, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf6, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf7, // shape [total_send, hidden_dim]
+    float* __restrict__ send_buf0, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf1, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf2, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf3, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf4, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf5, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf6, // shape [max_num_tokens, experts_per_token, hidden_dim]
+    float* __restrict__ send_buf7, // shape [max_num_tokens, experts_per_token, hidden_dim]
     int num_local_experts,
     int max_recv,
-    int hidden_dim,
-    int buff_meta_offset
+    int experts_per_token,
+    int hidden_dim
 ) {
   // call kernel to do the packing, with a 2D grid of size (max_recv, num_local_experts)
   const int threads_per_block = THREADS_PER_BLOCK_COMBINE_PACK_SEND;
@@ -1142,7 +1016,6 @@ void all2all_combine_pack_send_buffers_fp32(
     expert_num_tokens,
     expert_meta,
     expert_y,
-    send_offsets,
     send_buf0,
     send_buf1,
     send_buf2,
@@ -1152,39 +1025,9 @@ void all2all_combine_pack_send_buffers_fp32(
     send_buf6,
     send_buf7,
     max_recv,
-    hidden_dim,
-    buff_meta_offset
+    experts_per_token,
+    hidden_dim
   );
-}
-
-// expected to be launched with 1D grid with total_recv blocks
-// each block handles one token
-void __global__ all2all_combine_scale_experts_fp32_kernel(
-  const float* __restrict__ recv_buf,
-  const int32_t* __restrict__ recv_meta,
-  const float* __restrict__ weights,
-  float* __restrict__ scaled_expert_outputs,
-  int hidden_dim,
-  int experts_per_token
-) {
-  int recv_token_idx = blockIdx.x;
-
-  // realign input pointers
-  recv_buf = &recv_buf[recv_token_idx * hidden_dim];
-  recv_meta = &recv_meta[recv_token_idx * META_DIM];
-
-  int src_token_idx = recv_meta[2];
-  int src_k = recv_meta[3]; // src_k
-
-  float w = weights[src_token_idx * experts_per_token + src_k];
-
-  // realign output pointer
-  scaled_expert_outputs = &scaled_expert_outputs[(src_token_idx * experts_per_token + src_k) * hidden_dim];
-
-  // scale and write the expert output from the receive buffer
-  for (int d = threadIdx.x; d < hidden_dim; d += THREADS_PER_BLOCK) {
-    scaled_expert_outputs[d] = recv_buf[d] * w;
-  }
 }
 
 #define COMBINE_WRITE_BACK_THREADS_PER_BLOCK 256
@@ -1192,15 +1035,18 @@ void __global__ all2all_combine_scale_experts_fp32_kernel(
 #define COMBINE_WRITE_BACK_ELEMENTS_PER_BLOCK_LOOP (COMBINE_WRITE_BACK_THREADS_PER_BLOCK * COMBINE_WRITE_BACK_ELEMENTS_PER_THREAD)
 
 void __global__ all2all_combine_write_back_fp32_kernel(
-  const float* __restrict__ scaled_expert_outputs,
+  const float* __restrict__ recv_buf, // shape [num_tokens, num_experts_per_token, hidden_dim]
+  const float* __restrict__ weights, // shape [num_tokens, experts_per_token]
   float* __restrict__ output,
   int hidden_dim,
   int experts_per_token
 ) {
   int token_idx = blockIdx.x;
 
-  // realign input pointer
-  scaled_expert_outputs = &scaled_expert_outputs[token_idx * experts_per_token * hidden_dim];
+  // realign input pointers
+  recv_buf = &recv_buf[token_idx * experts_per_token * hidden_dim];
+
+  weights = &weights[token_idx * experts_per_token + 0];
 
   // realign output pointer
   output = &output[token_idx * hidden_dim];
@@ -1213,10 +1059,11 @@ void __global__ all2all_combine_write_back_fp32_kernel(
     float sum2 = 0.0f;
     float sum3 = 0.0f;
     for (int k = 0; k < experts_per_token; k++) {
-      sum0 += scaled_expert_outputs[k * hidden_dim + d + 0];
-      sum1 += scaled_expert_outputs[k * hidden_dim + d + 1];
-      sum2 += scaled_expert_outputs[k * hidden_dim + d + 2];
-      sum3 += scaled_expert_outputs[k * hidden_dim + d + 3];
+      float w = weights[k];
+      sum0 += w * recv_buf[k * hidden_dim + d + 0];
+      sum1 += w * recv_buf[k * hidden_dim + d + 1];
+      sum2 += w * recv_buf[k * hidden_dim + d + 2];
+      sum3 += w * recv_buf[k * hidden_dim + d + 3];
     }
     output[d + 0] = sum0;
     output[d + 1] = sum1;
@@ -1227,7 +1074,8 @@ void __global__ all2all_combine_write_back_fp32_kernel(
   for (; d < hidden_dim; d++) {
     float sum = 0.0f;
     for (int k = 0; k < experts_per_token; k++) {
-      sum += scaled_expert_outputs[k * hidden_dim + d];
+      float w = weights[k];
+      sum += w * recv_buf[k * hidden_dim + d];
     }
     output[d] = sum;
   }
@@ -1235,87 +1083,38 @@ void __global__ all2all_combine_write_back_fp32_kernel(
 
 void all2all_combine_unpack_fp32(
     hipStream_t stream,
-    const float* __restrict__ recv_buf, // shape [total_recv, hidden_sim]
-    const int32_t* __restrict__ recv_meta, // shape [total_recv, META_DIM]
+    const float* __restrict__ recv_buf, // shape [num_tokens, experts_per_token, hidden_dim]
     const float* __restrict__ weights, // shape [num_tokens, experts_per_token]
-    float* __restrict__ scaled_expert_outputs, // shape [num_tokens, experts_per_token, hidden_dim]
     float* __restrict__ output, // shape [max_num_tokens, hidden_dim]
     int hidden_dim,
-    int total_recv,
     int num_tokens,
     int experts_per_token
 ) {
-  // First kernel to scale expert outputs by weights and write to scaled_expert_outputs
-  {
-    const int threads_per_block = THREADS_PER_BLOCK;
-    const int blocks = total_recv;
+  const int threads_per_block = COMBINE_WRITE_BACK_THREADS_PER_BLOCK;
+  const int blocks = num_tokens;
 
-    all2all_combine_scale_experts_fp32_kernel<<<blocks, threads_per_block, 0, stream>>>(
-      recv_buf,
-      recv_meta,
-      weights,
-      scaled_expert_outputs,
-      hidden_dim,
-      experts_per_token
-    );
-  }
-  // Second kernel to combine scaled_expert_outputs into output
-  {
-    const int threads_per_block = COMBINE_WRITE_BACK_THREADS_PER_BLOCK;
-    const int blocks = num_tokens;
-
-    all2all_combine_write_back_fp32_kernel<<<blocks, threads_per_block, 0, stream>>>(
-      scaled_expert_outputs,
-      output,
-      hidden_dim,
-      experts_per_token
-    );
-  }
-}
-
-
-// expected to be launched with 1D grid with total_recv blocks
-// each block handles one token
-void __global__ all2all_combine_scale_experts_fp16_kernel(
-  const half* __restrict__ recv_buf,
-  const int32_t* __restrict__ recv_meta,
-  const float* __restrict__ weights,
-  float* __restrict__ scaled_expert_outputs,
-  int hidden_dim,
-  int experts_per_token
-) {
-  int recv_token_idx = blockIdx.x;
-
-  // realign input pointers
-  recv_buf = &recv_buf[recv_token_idx * hidden_dim];
-  recv_meta = &recv_meta[recv_token_idx * META_DIM];
-
-  // int dst_expert = recv_meta[0];
-  // int dst_rank = recv_meta[1];
-  int src_token_idx = recv_meta[2];
-  int src_k = recv_meta[3]; // src_k
-
-  float w = weights[src_token_idx * experts_per_token + src_k];
-
-  // realign output pointer
-  scaled_expert_outputs = &scaled_expert_outputs[(src_token_idx * experts_per_token + src_k) * hidden_dim];
-
-  // scale and write the expert output from the receive buffer
-  for (int d = threadIdx.x; d < hidden_dim; d += THREADS_PER_BLOCK) {
-    scaled_expert_outputs[d] = __half2float(recv_buf[d]) * w;
-  }
+  all2all_combine_write_back_fp32_kernel<<<blocks, threads_per_block, 0, stream>>>(
+    recv_buf,
+    weights,
+    output,
+    hidden_dim,
+    experts_per_token
+  );
 }
 
 void __global__ all2all_combine_write_back_fp16_kernel(
-  const float* __restrict__ scaled_expert_outputs,
+  const half* __restrict__ recv_buf, // shape [num_tokens, num_experts_per_token, hidden_dim]
+  const float* __restrict__ weights, // shape [num_tokens, num_experts_per_token]
   half* __restrict__ output,
   int hidden_dim,
   int experts_per_token
 ) {
   int token_idx = blockIdx.x;
 
-  // realign input pointer
-  scaled_expert_outputs = &scaled_expert_outputs[token_idx * experts_per_token * hidden_dim];
+  // realign input pointers
+  recv_buf = &recv_buf[token_idx * experts_per_token * hidden_dim];
+
+  weights = &weights[token_idx * experts_per_token + 0];
 
   // realign output pointer
   output = &output[token_idx * hidden_dim];
@@ -1328,10 +1127,11 @@ void __global__ all2all_combine_write_back_fp16_kernel(
     float sum2 = 0.0f;
     float sum3 = 0.0f;
     for (int k = 0; k < experts_per_token; k++) {
-      sum0 += scaled_expert_outputs[k * hidden_dim + d + 0];
-      sum1 += scaled_expert_outputs[k * hidden_dim + d + 1];
-      sum2 += scaled_expert_outputs[k * hidden_dim + d + 2];
-      sum3 += scaled_expert_outputs[k * hidden_dim + d + 3];
+      float w = weights[k];
+      sum0 += w * __half2float(recv_buf[k * hidden_dim + d + 0]);
+      sum1 += w * __half2float(recv_buf[k * hidden_dim + d + 1]);
+      sum2 += w * __half2float(recv_buf[k * hidden_dim + d + 2]);
+      sum3 += w * __half2float(recv_buf[k * hidden_dim + d + 3]);
     }
     output[d + 0] = __float2half(sum0);
     output[d + 1] = __float2half(sum1);
@@ -1342,7 +1142,8 @@ void __global__ all2all_combine_write_back_fp16_kernel(
   for (; d < hidden_dim; d++) {
     float sum = 0.0f;
     for (int k = 0; k < experts_per_token; k++) {
-      sum += scaled_expert_outputs[k * hidden_dim + d];
+      float w = weights[k];
+      sum += w * __half2float(recv_buf[k * hidden_dim + d]);
     }
     output[d] = __float2half(sum);
   }
@@ -1351,39 +1152,20 @@ void __global__ all2all_combine_write_back_fp16_kernel(
 void all2all_combine_unpack_fp16(
     hipStream_t stream,
     const half* __restrict__ recv_buf, // shape [total_recv, hidden_sim]
-    const int32_t* __restrict__ recv_meta, // shape [total_recv, META_DIM]
     const float* __restrict__ weights, // shape [num_tokens, experts_per_token]
-    float* __restrict__ scaled_expert_outputs, // shape [num_tokens, experts_per_token, hidden_dim]
     half* __restrict__ output, // shape [max_num_tokens, hidden_dim]
     int hidden_dim,
-    int total_recv,
     int num_tokens,
     int experts_per_token
 ) {
-  // First kernel to scale expert outputs by weights and write to scaled_expert_outputs
-  {
-    const int threads_per_block = THREADS_PER_BLOCK;
-    const int blocks = total_recv;
+  const int threads_per_block = COMBINE_WRITE_BACK_THREADS_PER_BLOCK;
+  const int blocks = num_tokens;
 
-    all2all_combine_scale_experts_fp16_kernel<<<blocks, threads_per_block, 0, stream>>>(
-      recv_buf,
-      recv_meta,
-      weights,
-      scaled_expert_outputs,
-      hidden_dim,
-      experts_per_token
-    );
-  }
-  // Second kernel to combine scaled_expert_outputs into output
-  {
-    const int threads_per_block = COMBINE_WRITE_BACK_THREADS_PER_BLOCK;
-    const int blocks = num_tokens;
-
-    all2all_combine_write_back_fp16_kernel<<<blocks, threads_per_block, 0, stream>>>(
-      scaled_expert_outputs,
-      output,
-      hidden_dim,
-      experts_per_token
-    );
-  }
+  all2all_combine_write_back_fp16_kernel<<<blocks, threads_per_block, 0, stream>>>(
+    recv_buf,
+    weights,
+    output,
+    hidden_dim,
+    experts_per_token
+  );
 }

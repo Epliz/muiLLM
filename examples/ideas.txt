@@ -32,3 +32,6 @@ All2All:
   - remove torch::slice
   - monkey patch distributed barrier
   - re-use torch tensors
+- remove as many kernels as possible 
+  -> for both dispatch and combine avoid "compute_send_counts" kernels
+     by writing from sender to dst directly based on token_idx/expert_idx
