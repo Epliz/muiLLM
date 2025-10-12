@@ -2385,10 +2385,13 @@ class All2AllComm:
 _global_all2all_comm = None
 
 
-def get_global_all2all_comm(rank: int, world_size: int):
+def get_global_all2all_comm():
     global _global_all2all_comm
     if _global_all2all_comm is None:
+        world_size = torch.distributed.get_world_size()
+        rank = torch.distributed.get_rank()
         _global_all2all_comm = All2AllComm(rank, world_size)
+
     return _global_all2all_comm
 
 
@@ -2414,10 +2417,7 @@ def custom_kernel(data: input_t) -> output_t:
     """
     input, weight, bias = data
 
-    world_size = torch.distributed.get_world_size()
-    rank = torch.distributed.get_rank()
-
-    comms = get_global_all2all_comm(rank=rank, world_size=world_size)
+    comms = get_global_all2all_comm()
 
     return comms.gemm_reduce_scatter(
         input=input,

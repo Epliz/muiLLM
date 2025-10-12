@@ -20,25 +20,30 @@ GEMM-RS:
 All2All:
 --------
 
-- reduce gpu syncs:
+- reduce gpu syncs: DONE
    maybe the issue we overwrite counters?
    use more counter sets
 
 - fuse gpu syncs
 - avoid global atomics in as many kernels as possible
+
 - reduce CPU overhead:
-  - all in C++
-  - remove torch::zeros
-  - remove torch::slice
+  - all in C++ DONE
+  - remove torch::zeros DONE
+  - remove torch::slice DONE
   - monkey patch distributed barrier
   - re-use torch tensors
 - remove as many kernels as possible 
   -> for both dispatch and combine avoid "compute_send_counts" kernels
      by writing from sender to dst directly based on token_idx/expert_idx
-- vectorize copies everywhere
+     DONE for combine
+
+- vectorized copies everywhere
   all2all_dispatch_pack_send_buffers_fp32_kernel
   all2all_dispatch_pack_send_buffers_fp16_kernel
   all2all_dispatch_unpack_fp16_kernel DONE
   all2all_dispatch_unpack_fp32_kernel DONE
   compute
   all2all_combine_pack_send_buffers_fp32_kernel (revisit)
+
+- fuse local count caching with GPU barrier
