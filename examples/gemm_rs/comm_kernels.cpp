@@ -1345,14 +1345,13 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
     return torch::Tensor();
   }
 
-  torch::Tensor output = torch::linear(input, weights, bias); // shape [M, N]
-
   auto output_options = at::TensorOptions()
                             .dtype(dtype)
                             .layout(at::kStrided)
                             .device(device) // same output device as inputs
                             .requires_grad(false);
-
+  
+  torch::Tensor output = torch::linear(input, weights, bias); // shape [M, N]
         
   auto rs_output = torch::empty({scattered_M, N}, output_options);
 
