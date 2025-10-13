@@ -9,7 +9,8 @@ General ideas:
 GEMM-RS:
 --------
 
-- try splitting for large matrices
+- try splitting for large matrices:
+  - spawn the scatter kernels first, wait inside it
 - improving further reduction kernels
 - use pull approach to be able to do reduction during data transfers
     - potentially use shared memory, pulling from one GPU at a time and accumulating in there
@@ -47,6 +48,17 @@ All2All:
   compute
   all2all_combine_pack_send_buffers_fp32_kernel (revisit)
 
-- fuse local count caching with GPU barrier
+- fuse local count caching with GPU barrier: DONE
 - check if divisions are a problem (can run a profile removing them, then if yes, use the magic int division)
    (e.g. https://github.com/milakov/int_fastdiv/blob/master/int_fastdiv.h)
+
+- avoid checking expert_num_tokens
+  - in compute -> not beneficial for big sizes, doesn't change anything for small sizes
+  - in dispatch unpack
+  - in combine pack send
+
+
+Most important:
+---------------
+- remove dispatch count
+- fuse compute?
