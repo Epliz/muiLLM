@@ -1264,6 +1264,56 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t __mui_stream_inc_wait_value_cache_val(
+  hipStream_t stream,
+  uint32_t* signal,
+  uint32_t seq_no,
+  const uint32_t* __restrict__ uncached_val,
+  uint32_t* __restrict__ cached_val
+);
+
+static muillm_comm_error_t __mui_gpu_barrier_cache_val(
+  muillm_comm_p2p_t* comm,
+  hipStream_t stream,
+  const uint32_t* __restrict__ uncached_val,
+  uint32_t* __restrict__ cached_val
+) {
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  hipError_t hip_error;
+  muillm_comm_error_t muillm_error;
+
+  if (comm->signal != nullptr) {
+    comm->signal_seq_no += local_size;
+    uint64_t seq_no = comm->signal_seq_no;
+
+    // GPU barrier: all GPUs wait on each other
+    if (comm->cant_skip_cache_flush_event) {
+      // on MI100, we get a crash if not putting this event here
+      // record an event to flush caches
+      if (hipEventRecord(comm->cache_flush_event, stream) != hipSuccess) {
+        std::cout<<"rank "<<local_rank<<" caching gpu barrier failed because hipEventRecord failed"<<std::endl;
+        hipError_t err = hipGetLastError();
+        const char* errStr = hipGetErrorString(err);
+        std::cout<<"Last HIP error: "<<errStr<<std::endl;
+        return MUILLM_COMM_UNKNOWN_ERROR;
+      }
+    }
+
+    // write the values
+    if ((muillm_error = __mui_stream_inc_wait_value_cache_val(stream, comm->signal, seq_no, uncached_val, cached_val)) != MUILLM_COMM_SUCCESS) {
+      std::cout<<"rank "<<local_rank<<" caching gpu barrier failed because __mui_stream_inc_wait_value failed"<<std::endl;
+      return muillm_error;
+    }
+  } else {
+    std::cout<<"rank "<<local_rank<<" caching gpu barrier failed because there is no signal memory"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  return MUILLM_COMM_SUCCESS;
+}
+
 muillm_comm_error_t __muillm_gpu_copy(void* dst, const void* src, size_t count, hipStream_t stream);
 
 // torch extension
@@ -1392,7 +1442,6 @@ void all2all_dispatch_unpack_fp16(
     int32_t* __restrict__ expert_num_tokens,
     half* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
-    const uint32_t* __restrict__ recv_counts,
     uint32_t* __restrict__ local_count_cache,
     int hidden_dim,
     int max_recv,
@@ -1407,7 +1456,6 @@ void all2all_dispatch_unpack_fp32(
     int32_t* __restrict__ expert_num_tokens,
     float* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
-    const uint32_t* __restrict__ recv_counts,
     uint32_t* __restrict__ local_count_cache,
     int hidden_dim,
     int max_recv,
@@ -1591,10 +1639,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
     TORCH_CHECK(false, "unsupported data type");
   }
 
+
+  const uint32_t* uncached_val = &counters[local_rank]; // total_recv
+  uint32_t* cached_val = comm->local_count_cache;
   //
   // We wait for all the GPUs to be done with sending data
   //
-  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
+  if ((muillm_error = __mui_gpu_barrier_cache_val(comm, stream, uncached_val, cached_val)) != MUILLM_COMM_SUCCESS) {
     TORCH_CHECK(false, "an error happened when doing dispatch barrier 2");
   }
 
@@ -1630,8 +1681,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
       (int32_t*) expert_num_tokens.data_ptr(),
       (float*) expert_x.data_ptr(),
       (int32_t*) expert_meta.data_ptr(),
-      &counters[local_rank], // total_recv
-      comm->local_count_cache,
+      cached_val,
       hidden_dim,
       max_recv,
       local_expert_offset,
@@ -1645,8 +1695,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
       (int32_t*) expert_num_tokens.data_ptr(),
       (half*) expert_x.data_ptr(),
       (int32_t*) expert_meta.data_ptr(),
-      &counters[local_rank], // total_recv
-      comm->local_count_cache,
+      cached_val,
       hidden_dim,
       max_recv,
       local_expert_offset,
@@ -2147,7 +2196,29 @@ muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* si
   return MUILLM_COMM_SUCCESS;
 }
 
+__global__ void __muillm_inc_wait_value_cache_val_p2p_kernel(
+  volatile uint32_t* signal,
+  uint32_t seq_no,
+  const uint32_t* __restrict__ uncached_val,
+  uint32_t* __restrict__ cached_val
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
 
+  if (threadIdx.x == 0) {
+    *cached_val = *uncached_val;
+  }
+}
+
+muillm_comm_error_t __mui_stream_inc_wait_value_cache_val(
+  hipStream_t stream,
+  uint32_t* signal,
+  uint32_t seq_no,
+  const uint32_t* __restrict__ uncached_val,
+  uint32_t* __restrict__ cached_val
+) {
+  __muillm_inc_wait_value_cache_val_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no, uncached_val, cached_val);
+  return MUILLM_COMM_SUCCESS;
+}
 
 // each threads can copy 16 bytes
 #define BYTES_PER_THREAD 16
@@ -2592,18 +2663,11 @@ void all2all_dispatch_unpack_fp16(
     int32_t* __restrict__ expert_num_tokens,
     half* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
-    const uint32_t* __restrict__ recv_counts,
     uint32_t* __restrict__ local_count_cache,
     int hidden_dim,
     int max_recv,
     int local_expert_offset,
     int max_total_recv) {
-
-  // copy recv count into cache
-  all2all_dispatch_cache_recv_count_kernel<<<1, 1, 0, stream>>>(
-    recv_counts,
-    local_count_cache
-  );
 
   const int threads_per_block = DISPATCH_UNPACK_THREADS_PER_BLOCK;
   const int blocks = max_total_recv;
@@ -2698,19 +2762,11 @@ void all2all_dispatch_unpack_fp32(
     int32_t* __restrict__ expert_num_tokens,
     float* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
-    const uint32_t* __restrict__ recv_counts,
     uint32_t* __restrict__ local_count_cache,
     int hidden_dim,
     int max_recv,
     int local_expert_offset,
     int max_total_recv) {
-
-  // copy recv count into cache
-  all2all_dispatch_cache_recv_count_kernel<<<1, 1, 0, stream>>>(
-    recv_counts,
-    local_count_cache
-  );
-
   const int threads_per_block = THREADS_PER_BLOCK;
   const int blocks = max_total_recv;
 

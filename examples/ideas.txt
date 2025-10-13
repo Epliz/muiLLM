@@ -36,7 +36,8 @@ All2All:
 - remove as many kernels as possible 
   -> for both dispatch and combine avoid "compute_send_counts" kernels
      by writing from sender to dst directly based on token_idx/expert_idx
-     DONE for combine
+     - DONE for combine
+     - for dispatch, could use global atomics in send + write at a per rank place
 
 - vectorized copies everywhere
   all2all_dispatch_pack_send_buffers_fp32_kernel

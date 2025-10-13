@@ -121,7 +121,29 @@ muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* si
   return MUILLM_COMM_SUCCESS;
 }
 
+__global__ void __muillm_inc_wait_value_cache_val_p2p_kernel(
+  volatile uint32_t* signal,
+  uint32_t seq_no,
+  const uint32_t* __restrict__ uncached_val,
+  uint32_t* __restrict__ cached_val
+) {
+  __do_inc_wait_value_p2p(signal, seq_no);
 
+  if (threadIdx.x == 0) {
+    *cached_val = *uncached_val;
+  }
+}
+
+muillm_comm_error_t __mui_stream_inc_wait_value_cache_val(
+  hipStream_t stream,
+  uint32_t* signal,
+  uint32_t seq_no,
+  const uint32_t* __restrict__ uncached_val,
+  uint32_t* __restrict__ cached_val
+) {
+  __muillm_inc_wait_value_cache_val_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no, uncached_val, cached_val);
+  return MUILLM_COMM_SUCCESS;
+}
 
 // each threads can copy 16 bytes
 #define BYTES_PER_THREAD 16
@@ -566,18 +588,11 @@ void all2all_dispatch_unpack_fp16(
     int32_t* __restrict__ expert_num_tokens,
     half* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
-    const uint32_t* __restrict__ recv_counts,
     uint32_t* __restrict__ local_count_cache,
     int hidden_dim,
     int max_recv,
     int local_expert_offset,
     int max_total_recv) {
-
-  // copy recv count into cache
-  all2all_dispatch_cache_recv_count_kernel<<<1, 1, 0, stream>>>(
-    recv_counts,
-    local_count_cache
-  );
 
   const int threads_per_block = DISPATCH_UNPACK_THREADS_PER_BLOCK;
   const int blocks = max_total_recv;
@@ -672,19 +687,11 @@ void all2all_dispatch_unpack_fp32(
     int32_t* __restrict__ expert_num_tokens,
     float* __restrict__ expert_x,
     int32_t* __restrict__ expert_meta,
-    const uint32_t* __restrict__ recv_counts,
     uint32_t* __restrict__ local_count_cache,
     int hidden_dim,
     int max_recv,
     int local_expert_offset,
     int max_total_recv) {
-
-  // copy recv count into cache
-  all2all_dispatch_cache_recv_count_kernel<<<1, 1, 0, stream>>>(
-    recv_counts,
-    local_count_cache
-  );
-
   const int threads_per_block = THREADS_PER_BLOCK;
   const int blocks = max_total_recv;
 
