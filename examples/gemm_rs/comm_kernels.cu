@@ -313,6 +313,52 @@ void __global__ scatter_all_tp8_kernel(
 
 #define MAX_REDUCE_X_BLOCKS 8
 
+muillm_comm_error_t __muillm_scatter_all_chunk(
+  hipStream_t stream,
+  // inputs
+  const void* src,
+  int scattered_chunk_size_bytes,
+  int scattered_chunk_offset_bytes,
+  int local_size,
+  int local_rank,
+  // outputs
+  void* dst0,
+  void* dst1,
+  void* dst2,
+  void* dst3,
+  void* dst4,
+  void* dst5,
+  void* dst6,
+  void* dst7
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  // we want to avoid spawning too many blocks to copy the data and want instead
+  // to make blocks process more data when we have more than MAX_REDUCE_X_BLOCKS
+  //
+  int num_small_x_blocks = DIV_ROUND_UP(scattered_chunk_size_bytes, BYTES_PER_BLOCK_LOOP);
+  int num_x_blocks = std::min(num_small_x_blocks, MAX_REDUCE_X_BLOCKS);
+  const dim3 num_blocks = dim3(num_x_blocks, local_size);
+
+  int bytes_per_block = ALIGN_UP(DIV_ROUND_UP(scattered_chunk_size_bytes, num_x_blocks), 4096);
+
+  scatter_all_tp8_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    (const uint8_t*) src,
+    (uint8_t*) dst0 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst1 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst2 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst3 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst4 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst5 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst6 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst7 + scattered_chunk_offset_bytes,
+    bytes_per_block,
+    scattered_chunk_size_bytes,
+    local_rank
+  );
+
+  return MUILLM_COMM_SUCCESS;
+}
+
 muillm_comm_error_t __muillm_scatter_all(
   hipStream_t stream,
   // inputs
@@ -330,33 +376,22 @@ muillm_comm_error_t __muillm_scatter_all(
   void* dst6,
   void* dst7
 ) {
-
-  const int threads_per_blocks = THREADS_PER_BLOCK;
-  // we want to avoid spawning too many blocks to copy the data and want instead
-  // to make blocks process more data when we have more than MAX_REDUCE_X_BLOCKS
-  //
-  int num_small_x_blocks = DIV_ROUND_UP(scattered_size_bytes, BYTES_PER_BLOCK_LOOP);
-  int num_x_blocks = std::min(num_small_x_blocks, MAX_REDUCE_X_BLOCKS);
-  const dim3 num_blocks = dim3(num_x_blocks, local_size);
-
-  int bytes_per_block = ALIGN_UP(DIV_ROUND_UP(scattered_size_bytes, num_x_blocks), 4096);
-
-  scatter_all_tp8_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-    (const uint8_t*) src,
-    (uint8_t*) dst0,
-    (uint8_t*) dst1,
-    (uint8_t*) dst2,
-    (uint8_t*) dst3,
-    (uint8_t*) dst4,
-    (uint8_t*) dst5,
-    (uint8_t*) dst6,
-    (uint8_t*) dst7,
-    bytes_per_block,
+  return __muillm_scatter_all_chunk(
+    stream,
+    src,
     scattered_size_bytes,
-    local_rank
+    0, // offset
+    local_size,
+    local_rank,
+    dst0,
+    dst1,
+    dst2,
+    dst3,
+    dst4,
+    dst5,
+    dst6,
+    dst7
   );
-
-  return MUILLM_COMM_SUCCESS;
 }
 
 #define REDUCE_PER_THREAD 8
@@ -533,29 +568,30 @@ void __global__ reduce_x2_fp16_kernel(
   }
 }
 
-muillm_comm_error_t __muillm_reduce_fp16(
+muillm_comm_error_t __muillm_reduce_chunk_fp16(
   hipStream_t stream,
   // inputs
   const half* src, // shape [local_size, scattered_M, N]
-  int scattered_count,
+  int scattered_chunk_count,
+  int scattered_chunk_offset,
   int local_size,
   // outputs
   half* dst
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
+  const int num_blocks = DIV_ROUND_UP(scattered_chunk_count, REDUCE_PER_BLOCK);
 
   if (local_size == 8) {
     // compute the src pointers by applying the offsets
-    const half* src0 = src + (0 * scattered_count);
-    const half* src1 = src + (1 * scattered_count);
-    const half* src2 = src + (2 * scattered_count);
-    const half* src3 = src + (3 * scattered_count);
-    const half* src4 = src + (4 * scattered_count);
-    const half* src5 = src + (5 * scattered_count);
-    const half* src6 = src + (6 * scattered_count);
-    const half* src7 = src + (7 * scattered_count);
+    const half* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const half* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
+    const half* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
+    const half* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
+    const half* src4 = src + scattered_chunk_offset + (4 * scattered_chunk_count);
+    const half* src5 = src + scattered_chunk_offset + (5 * scattered_chunk_count);
+    const half* src6 = src + scattered_chunk_offset + (6 * scattered_chunk_count);
+    const half* src7 = src + scattered_chunk_offset + (7 * scattered_chunk_count);
 
     reduce_x8_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -567,14 +603,14 @@ muillm_comm_error_t __muillm_reduce_fp16(
       src6,
       src7,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else if (local_size == 4) {
     // compute the src pointers by applying the offsets
-    const half* src0 = src + (0 * scattered_count);
-    const half* src1 = src + (1 * scattered_count);
-    const half* src2 = src + (2 * scattered_count);
-    const half* src3 = src + (3 * scattered_count);
+    const half* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const half* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
+    const half* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
+    const half* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
 
     reduce_x4_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -582,18 +618,18 @@ muillm_comm_error_t __muillm_reduce_fp16(
       src2,
       src3,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else if (local_size == 2) {
     // compute the src pointers by applying the offsets
-    const half* src0 = src + (0 * scattered_count);
-    const half* src1 = src + (1 * scattered_count);
+    const half* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const half* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
 
     reduce_x2_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else {
     return MUILLM_COMM_UNSUPPORTED_SIZE;
@@ -774,29 +810,30 @@ void __global__ reduce_x2_bf16_kernel(
   }
 }
 
-muillm_comm_error_t __muillm_reduce_bf16(
+muillm_comm_error_t __muillm_reduce_chunk_bf16(
   hipStream_t stream,
   // inputs
   const __hip_bfloat16* src, // shape [local_size, scattered_M, N]
-  int scattered_count,
+  int scattered_chunk_count,
+  int scattered_chunk_offset,
   int local_size,
   // outputs
   __hip_bfloat16* dst
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
+  const int num_blocks = DIV_ROUND_UP(scattered_chunk_count, REDUCE_PER_BLOCK);
 
   if (local_size == 8) {
     // compute the src pointers by applying the offsets
-    const __hip_bfloat16* src0 = src + (0 * scattered_count);
-    const __hip_bfloat16* src1 = src + (1 * scattered_count);
-    const __hip_bfloat16* src2 = src + (2 * scattered_count);
-    const __hip_bfloat16* src3 = src + (3 * scattered_count);
-    const __hip_bfloat16* src4 = src + (4 * scattered_count);
-    const __hip_bfloat16* src5 = src + (5 * scattered_count);
-    const __hip_bfloat16* src6 = src + (6 * scattered_count);
-    const __hip_bfloat16* src7 = src + (7 * scattered_count);
+    const __hip_bfloat16* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const __hip_bfloat16* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
+    const __hip_bfloat16* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
+    const __hip_bfloat16* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
+    const __hip_bfloat16* src4 = src + scattered_chunk_offset + (4 * scattered_chunk_count);
+    const __hip_bfloat16* src5 = src + scattered_chunk_offset + (5 * scattered_chunk_count);
+    const __hip_bfloat16* src6 = src + scattered_chunk_offset + (6 * scattered_chunk_count);
+    const __hip_bfloat16* src7 = src + scattered_chunk_offset + (7 * scattered_chunk_count);
 
     reduce_x8_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -808,14 +845,14 @@ muillm_comm_error_t __muillm_reduce_bf16(
       src6,
       src7,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else if (local_size == 4) {
     // compute the src pointers by applying the offsets
-    const __hip_bfloat16* src0 = src + (0 * scattered_count);
-    const __hip_bfloat16* src1 = src + (1 * scattered_count);
-    const __hip_bfloat16* src2 = src + (2 * scattered_count);
-    const __hip_bfloat16* src3 = src + (3 * scattered_count);
+    const __hip_bfloat16* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const __hip_bfloat16* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
+    const __hip_bfloat16* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
+    const __hip_bfloat16* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
 
     reduce_x4_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -823,18 +860,18 @@ muillm_comm_error_t __muillm_reduce_bf16(
       src2,
       src3,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else if (local_size == 2) {
     // compute the src pointers by applying the offsets
-    const __hip_bfloat16* src0 = src + (0 * scattered_count);
-    const __hip_bfloat16* src1 = src + (1 * scattered_count);
+    const __hip_bfloat16* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const __hip_bfloat16* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
 
     reduce_x2_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else {
     return MUILLM_COMM_UNSUPPORTED_SIZE;
@@ -843,6 +880,39 @@ muillm_comm_error_t __muillm_reduce_bf16(
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t __muillm_reduce_chunk(
+  hipStream_t stream,
+  // inputs
+  const void* src, // shape [local_size, scattered_M, N]
+  int scattered_chunk_count,
+  int scattered_chunk_offset,
+  int local_size,
+  muillm_comm_datatype_t datatype,
+  // outputs
+  void* dst
+) {
+  if (datatype == MUILLM_COMM_FP16) {
+    return __muillm_reduce_chunk_fp16(
+      stream,
+      (const half*) src,
+      scattered_chunk_count,
+      scattered_chunk_offset,
+      local_size,
+      (half*) dst
+    );
+  } else if (datatype == MUILLM_COMM_BF16) {
+    return __muillm_reduce_chunk_bf16(
+      stream,
+      (const __hip_bfloat16*) src,
+      scattered_chunk_count,
+      scattered_chunk_offset,
+      local_size,
+      (__hip_bfloat16*) dst
+    );
+  } else {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+}
 
 muillm_comm_error_t __muillm_reduce(
   hipStream_t stream,
@@ -854,23 +924,13 @@ muillm_comm_error_t __muillm_reduce(
   // outputs
   void* dst
 ) {
-  if (datatype == MUILLM_COMM_FP16) {
-    return __muillm_reduce_fp16(
-      stream,
-      (const half*) src,
-      scattered_count,
-      local_size,
-      (half*) dst
-    );
-  } else if (datatype == MUILLM_COMM_BF16) {
-    return __muillm_reduce_bf16(
-      stream,
-      (const __hip_bfloat16*) src,
-      scattered_count,
-      local_size,
-      (__hip_bfloat16*) dst
-    );
-  } else {
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
+  return __muillm_reduce_chunk(
+    stream,
+    src,
+    scattered_count,
+    0, // offset
+    local_size,
+    datatype,
+    dst
+  );
 }

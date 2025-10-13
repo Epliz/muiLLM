@@ -1223,9 +1223,6 @@ static muillm_comm_error_t __mui_signal_stream_gpu_barrier(muillm_comm_p2p_t* co
   muillm_comm_error_t muillm_error;
 
   if (comm->stream_signal != nullptr) {
-    comm->stream_signal_seq_no ++;
-    uint64_t seq_no = comm->stream_signal_seq_no;
-
     // GPU barrier: all GPUs wait on each other
     if (comm->cant_skip_cache_flush_event) {
       // on MI100, we get a crash if not putting this event here
@@ -1252,7 +1249,7 @@ static muillm_comm_error_t __mui_signal_stream_gpu_barrier(muillm_comm_p2p_t* co
   return MUILLM_COMM_SUCCESS;
 }
 
-static muillm_comm_error_t __mui_wait_stream_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_t stream) {
+static muillm_comm_error_t __mui_wait_stream_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_t stream, uint64_t seq_no) {
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
 
@@ -1261,7 +1258,6 @@ static muillm_comm_error_t __mui_wait_stream_gpu_barrier(muillm_comm_p2p_t* comm
 
   if (comm->stream_signal != nullptr) {
     // was increment by __mui_signal_stream_gpu_barrier
-    uint64_t seq_no = comm->stream_signal_seq_no;
 
     // GPU barrier: all GPUs wait on each other
     if (comm->cant_skip_cache_flush_event) {
@@ -1309,11 +1305,42 @@ muillm_comm_error_t __muillm_scatter_all(
   void* dst7
 );
 
+muillm_comm_error_t __muillm_scatter_all_chunk(
+  hipStream_t stream,
+  // inputs
+  const void* src,
+  int scattered_chunk_size_bytes,
+  int scattered_chunk_offset,
+  int local_size,
+  int local_rank,
+  // outputs
+  void* dst0,
+  void* dst1,
+  void* dst2,
+  void* dst3,
+  void* dst4,
+  void* dst5,
+  void* dst6,
+  void* dst7
+);
+
 muillm_comm_error_t __muillm_reduce(
   hipStream_t stream,
   // inputs
   const void* src, // shape [local_size, scattered_M, N]
   int scattered_count,
+  int local_size,
+  muillm_comm_datatype_t datatype,
+  // outputs
+  void* dst
+);
+
+muillm_comm_error_t __muillm_reduce_chunk(
+  hipStream_t stream,
+  // inputs
+  const void* src, // shape [local_size, scattered_M, N]
+  int scattered_chunk_count,
+  int scattered_chunk_offset,
   int local_size,
   muillm_comm_datatype_t datatype,
   // outputs
@@ -1493,85 +1520,137 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
                             .device(device) // same output device as inputs
                             .requires_grad(false);
 
-  auto output = torch::empty({M, N}, output_options);
-  auto rs_output = torch::empty({scattered_M, N}, output_options);
-
   int total_size = scattered_M * N;
   // if the total size is big enough, we split the computation and communication
-  // into two halves to overlap them
-  if (total_size >= REDUCE_SCATTER_CHUNKED_THRESHOLD) {
+  // into two halves (divide the N dimension of inputs) to overlap them
+  // we can't easily split the M dimension as it would be scattered wrongly
+  // (first half of M has to go to first half of GPUs, not split across all GPUs)
+
+  // always use this for debugging
+  if (true) {//(total_size >= REDUCE_SCATTER_CHUNKED_THRESHOLD) {
+    muillm_comm_error_t error;
 
     int half_N = N / 2;
     int second_half_N = N - half_N;
 
-    // First half
-    {
-      // we take half of N for the weights, bias and output
-      auto weights_half = weights.narrow(0, 0, half_N);
-      std::optional<torch::Tensor> bias_half = bias.has_value() ? std::optional<torch::Tensor>(bias.value().narrow(0, 0, half_N)) : std::nullopt;
+    // get first and seconds halves of the weights and biases
+    auto first_weights_half = weights.narrow(0, 0, half_N); // shape [half_N, K]
+    auto second_weights_half = weights.narrow(0, half_N, second_half_N); // shape [second_half_N, K]
 
-      auto output_half = output.narrow(1, 0, half_N);
-      auto rs_output_half = rs_output.narrow(1, 0, half_N);
+    std::optional<torch::Tensor> first_bias_half;
+    std::optional<torch::Tensor> second_bias_half;
 
-      torch::linear_out(output_half, input, weights_half, bias_half); // shape [M, half_N]
+    if (bias.has_value()) {
+      auto bias_ = bias.value();
+      first_bias_half = std::make_optional(bias_.narrow(0, 0, half_N));
+      second_bias_half = std::make_optional(bias_.narrow(0, half_N, second_half_N));
+    }
 
-      // signal we are done with this part of the computation
+    auto first_rs_output = torch::empty({scattered_M, half_N}, output_options);
+    auto second_rs_output = torch::empty({scattered_M, second_half_N}, output_options);
+
+    //
+    // First make sure we have enough buffer space
+    //
+    int scattered_count = scattered_M * N;
+    int scattered_size = __comm_size(datatype, scattered_count);
+    int capacity = scattered_size * local_size;
+
+    int scattered_chunk_count = scattered_M * half_N;
+    int scattered_chunk_size = __comm_size(datatype, scattered_chunk_count);
+    int second_scattered_chunk_count = scattered_M * second_half_N;
+    int second_scattered_chunk_size = __comm_size(datatype, second_scattered_chunk_count);
+
+    muillm_comm_p2p_buffer_set_t* buffer_set;
+    if ((error = muillm_comm_p2p_get_buffer_set(comm, capacity, &buffer_set, stream)) != MUILLM_COMM_SUCCESS) {
+      std::cout<<"rank "<<local_rank<<" failed to get buffer set"<<std::endl;
+      TORCH_CHECK(false, "an error happened when getting buffer set");
+      return torch::Tensor();
+    }
+
+    //
+    // Start the computations
+    //
+
+    comm->stream_signal_seq_no ++;
+    // value that the second stream will wait on
+    uint64_t first_barrier_seq_no = comm->stream_signal_seq_no;
+    comm->stream_signal_seq_no ++;
+    // value that the first stream will wait on
+    uint64_t second_barrier_seq_no = comm->stream_signal_seq_no;
+
+    torch::Tensor output_half; // to be used in the second stream
+    torch::Tensor second_output_half; // to be used in the main stream
+
+    { // Spawn work for the main stream
+
+      // work on the first half
+      output_half = torch::linear(input, first_weights_half, first_bias_half); // shape [M, half_N]
+
+      // signal we are done with the first computations
       if (__mui_signal_stream_gpu_barrier(comm, stream) != MUILLM_COMM_SUCCESS) {
         TORCH_CHECK(false, "an error happened when doing signal stream gpu barrier");
       }
 
-      // use our custom reduce-scatter implementation
-      // TODO: support striding
-      // TODO: use a special call so that it doesn't flip buffers
-      if (muillm_comm_reduce_scatter_ll(
-        comm,
+      // work on the second half
+      second_output_half = torch::linear(input, second_weights_half, second_bias_half); // shape [M, second_half_N]
+
+      // scatter
+      if ((error = __muillm_scatter_all_chunk(
         stream,
-        output_half.data_ptr(),
-        M,
-        scattered_M,
-        half_N,
-        datatype,
-        rs_output_half.data_ptr()
-      ) != MUILLM_COMM_SUCCESS) {
-        TORCH_CHECK(false, "an error happened when doing reduce-scatter");
+        second_output_half.data_ptr(),
+        second_scattered_chunk_size, // size of this chunk
+        local_size * scattered_chunk_size, // offset of this chunk is the size of the gathered previous one
+        local_size,
+        local_rank,
+        buffer_set->buffers[0],
+        buffer_set->buffers[1],
+        buffer_set->buffers[2],
+        buffer_set->buffers[3],
+        buffer_set->buffers[4],
+        buffer_set->buffers[5],
+        buffer_set->buffers[6],
+        buffer_set->buffers[7]
+      )) != MUILLM_COMM_SUCCESS) {
+        std::cout<<"rank "<<local_rank<<" failed to scatter data to other GPUs"<<std::endl;
+        TORCH_CHECK(false, "an error happened when scattering data to other GPUs");
+        return torch::Tensor();
       }
     }
 
-    // Second stream
-    {
+    { // Spawn work for the second stream
       at::cuda::setCurrentCUDAStream(second_stream);
 
-      // wait for the signal
-      if (__mui_wait_stream_gpu_barrier(comm, second_stream) != MUILLM_COMM_SUCCESS) {
+      // wait for the signal from the main stream
+      // TODO: fuse in the scatter operation
+      if (__mui_wait_stream_gpu_barrier(comm, second_stream, first_barrier_seq_no) != MUILLM_COMM_SUCCESS) {
         TORCH_CHECK(false, "an error happened when doing wait stream gpu barrier");
+        return torch::Tensor();
       }
-      
-      // we take the second half of N for the weights, bias and output
-      auto weights_half = weights.narrow(0, half_N, second_half_N);
-      std::optional<torch::Tensor> bias_half = bias.has_value() ? std::optional<torch::Tensor>(bias.value().narrow(0, half_N, second_half_N)) : std::nullopt;
 
-      auto output_half = output.narrow(1, half_N, second_half_N);
-      auto rs_output_half = rs_output.narrow(1, half_N, second_half_N);
-
-      torch::linear_out(output_half, input, weights_half, bias_half); // shape [M, half_N]
-
-      // use our custom reduce-scatter implementation
-      // TODO: support striding
-      // TODO: use a special call so that it doesn't flip buffers
-      if (muillm_comm_reduce_scatter_ll(
-        comm,
+      // scatter
+      if ((error = __muillm_scatter_all_chunk(
         second_stream,
         output_half.data_ptr(),
-        M,
-        scattered_M,
-        second_half_N,
-        datatype,
-        rs_output_half.data_ptr()
-      ) != MUILLM_COMM_SUCCESS) {
-        TORCH_CHECK(false, "an error happened when doing reduce-scatter");
+        scattered_chunk_size, // size of this chunk
+        0, // offset of this chunk
+        local_size,
+        local_rank,
+        buffer_set->buffers[0],
+        buffer_set->buffers[1],
+        buffer_set->buffers[2],
+        buffer_set->buffers[3],
+        buffer_set->buffers[4],
+        buffer_set->buffers[5],
+        buffer_set->buffers[6],
+        buffer_set->buffers[7]
+      )) != MUILLM_COMM_SUCCESS) {
+        std::cout<<"rank "<<local_rank<<" failed to scatter data to other GPUs"<<std::endl;
+        TORCH_CHECK(false, "an error happened when scattering data to other GPUs");
+        return torch::Tensor();
       }
 
-      // signal we are done with this part of the computation
+      // signal we are done with the transfers
       if (__mui_signal_stream_gpu_barrier(comm, second_stream) != MUILLM_COMM_SUCCESS) {
         TORCH_CHECK(false, "an error happened when doing signal stream gpu barrier");
       }
@@ -1581,13 +1660,54 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
     }
 
     // wait for the second stream to finish
-    if (__mui_wait_stream_gpu_barrier(comm, stream) != MUILLM_COMM_SUCCESS) {
+    if (__mui_wait_stream_gpu_barrier(comm, stream, second_barrier_seq_no) != MUILLM_COMM_SUCCESS) {
       TORCH_CHECK(false, "an error happened when doing wait stream gpu barrier");
     }
 
+    // Synchronize all the GPUs
+    // TODO fuse with previous wait as well
+    if (__mui_gpu_barrier(comm, stream) != MUILLM_COMM_SUCCESS) {
+      TORCH_CHECK(false, "an error happened when doing gpu barrier");
+      return torch::Tensor();
+    }
+
+    // Finally reduce the data on each GPU
+    // We have two chunks to reduce
+    if ((error = __muillm_reduce_chunk(
+      stream,
+      buffer_set->buffers[local_rank],
+      scattered_chunk_count,
+      0, // offset of this chunk
+      local_size,
+      datatype,
+      first_rs_output.data_ptr()
+    )) != MUILLM_COMM_SUCCESS) {
+      std::cout<<"rank "<<local_rank<<" failed to reduce data"<<std::endl;
+      TORCH_CHECK(false, "an error happened when reducing data");
+      return torch::Tensor();
+    }
+    if ((error = __muillm_reduce_chunk(
+      stream,
+      buffer_set->buffers[local_rank],
+      second_scattered_chunk_count,
+      local_size * scattered_chunk_count, // offset of this chunk
+      local_size,
+      datatype,
+      second_rs_output.data_ptr()
+    )) != MUILLM_COMM_SUCCESS) {
+      std::cout<<"rank "<<local_rank<<" failed to reduce data"<<std::endl;
+      TORCH_CHECK(false, "an error happened when reducing data");
+      return torch::Tensor();
+    }
+
+    auto rs_output = torch::cat({first_rs_output, second_rs_output}, 1); // shape [scattered_M, N]
+
+    return rs_output;
   } else {
     // do it in one go
-    torch::linear_out(output, input, weights, bias); // shape [M, N]
+    auto output = torch::linear(input, weights, bias); // shape [M, N]
+
+    auto rs_output = torch::empty({scattered_M, N}, output_options);
 
     // use our custom reduce-scatter implementation
     if (muillm_comm_reduce_scatter_ll(
@@ -1602,6 +1722,8 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
     ) != MUILLM_COMM_SUCCESS) {
       TORCH_CHECK(false, "an error happened when doing reduce-scatter");
     }
+
+    return rs_output;
   }
 
 
@@ -1615,8 +1737,6 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
       c10d::ReduceScatterOptions()
     );
   } */
-
-  return rs_output;
 }
 """
 
@@ -1936,6 +2056,52 @@ void __global__ scatter_all_tp8_kernel(
 
 #define MAX_REDUCE_X_BLOCKS 8
 
+muillm_comm_error_t __muillm_scatter_all_chunk(
+  hipStream_t stream,
+  // inputs
+  const void* src,
+  int scattered_chunk_size_bytes,
+  int scattered_chunk_offset_bytes,
+  int local_size,
+  int local_rank,
+  // outputs
+  void* dst0,
+  void* dst1,
+  void* dst2,
+  void* dst3,
+  void* dst4,
+  void* dst5,
+  void* dst6,
+  void* dst7
+) {
+  const int threads_per_blocks = THREADS_PER_BLOCK;
+  // we want to avoid spawning too many blocks to copy the data and want instead
+  // to make blocks process more data when we have more than MAX_REDUCE_X_BLOCKS
+  //
+  int num_small_x_blocks = DIV_ROUND_UP(scattered_chunk_size_bytes, BYTES_PER_BLOCK_LOOP);
+  int num_x_blocks = std::min(num_small_x_blocks, MAX_REDUCE_X_BLOCKS);
+  const dim3 num_blocks = dim3(num_x_blocks, local_size);
+
+  int bytes_per_block = ALIGN_UP(DIV_ROUND_UP(scattered_chunk_size_bytes, num_x_blocks), 4096);
+
+  scatter_all_tp8_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
+    (const uint8_t*) src,
+    (uint8_t*) dst0 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst1 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst2 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst3 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst4 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst5 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst6 + scattered_chunk_offset_bytes,
+    (uint8_t*) dst7 + scattered_chunk_offset_bytes,
+    bytes_per_block,
+    scattered_chunk_size_bytes,
+    local_rank
+  );
+
+  return MUILLM_COMM_SUCCESS;
+}
+
 muillm_comm_error_t __muillm_scatter_all(
   hipStream_t stream,
   // inputs
@@ -1953,33 +2119,22 @@ muillm_comm_error_t __muillm_scatter_all(
   void* dst6,
   void* dst7
 ) {
-
-  const int threads_per_blocks = THREADS_PER_BLOCK;
-  // we want to avoid spawning too many blocks to copy the data and want instead
-  // to make blocks process more data when we have more than MAX_REDUCE_X_BLOCKS
-  //
-  int num_small_x_blocks = DIV_ROUND_UP(scattered_size_bytes, BYTES_PER_BLOCK_LOOP);
-  int num_x_blocks = std::min(num_small_x_blocks, MAX_REDUCE_X_BLOCKS);
-  const dim3 num_blocks = dim3(num_x_blocks, local_size);
-
-  int bytes_per_block = ALIGN_UP(DIV_ROUND_UP(scattered_size_bytes, num_x_blocks), 4096);
-
-  scatter_all_tp8_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
-    (const uint8_t*) src,
-    (uint8_t*) dst0,
-    (uint8_t*) dst1,
-    (uint8_t*) dst2,
-    (uint8_t*) dst3,
-    (uint8_t*) dst4,
-    (uint8_t*) dst5,
-    (uint8_t*) dst6,
-    (uint8_t*) dst7,
-    bytes_per_block,
+  return __muillm_scatter_all_chunk(
+    stream,
+    src,
     scattered_size_bytes,
-    local_rank
+    0, // offset
+    local_size,
+    local_rank,
+    dst0,
+    dst1,
+    dst2,
+    dst3,
+    dst4,
+    dst5,
+    dst6,
+    dst7
   );
-
-  return MUILLM_COMM_SUCCESS;
 }
 
 #define REDUCE_PER_THREAD 8
@@ -2156,29 +2311,30 @@ void __global__ reduce_x2_fp16_kernel(
   }
 }
 
-muillm_comm_error_t __muillm_reduce_fp16(
+muillm_comm_error_t __muillm_reduce_chunk_fp16(
   hipStream_t stream,
   // inputs
   const half* src, // shape [local_size, scattered_M, N]
-  int scattered_count,
+  int scattered_chunk_count,
+  int scattered_chunk_offset,
   int local_size,
   // outputs
   half* dst
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
+  const int num_blocks = DIV_ROUND_UP(scattered_chunk_count, REDUCE_PER_BLOCK);
 
   if (local_size == 8) {
     // compute the src pointers by applying the offsets
-    const half* src0 = src + (0 * scattered_count);
-    const half* src1 = src + (1 * scattered_count);
-    const half* src2 = src + (2 * scattered_count);
-    const half* src3 = src + (3 * scattered_count);
-    const half* src4 = src + (4 * scattered_count);
-    const half* src5 = src + (5 * scattered_count);
-    const half* src6 = src + (6 * scattered_count);
-    const half* src7 = src + (7 * scattered_count);
+    const half* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const half* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
+    const half* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
+    const half* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
+    const half* src4 = src + scattered_chunk_offset + (4 * scattered_chunk_count);
+    const half* src5 = src + scattered_chunk_offset + (5 * scattered_chunk_count);
+    const half* src6 = src + scattered_chunk_offset + (6 * scattered_chunk_count);
+    const half* src7 = src + scattered_chunk_offset + (7 * scattered_chunk_count);
 
     reduce_x8_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -2190,14 +2346,14 @@ muillm_comm_error_t __muillm_reduce_fp16(
       src6,
       src7,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else if (local_size == 4) {
     // compute the src pointers by applying the offsets
-    const half* src0 = src + (0 * scattered_count);
-    const half* src1 = src + (1 * scattered_count);
-    const half* src2 = src + (2 * scattered_count);
-    const half* src3 = src + (3 * scattered_count);
+    const half* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const half* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
+    const half* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
+    const half* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
 
     reduce_x4_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -2205,18 +2361,18 @@ muillm_comm_error_t __muillm_reduce_fp16(
       src2,
       src3,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else if (local_size == 2) {
     // compute the src pointers by applying the offsets
-    const half* src0 = src + (0 * scattered_count);
-    const half* src1 = src + (1 * scattered_count);
+    const half* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const half* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
 
     reduce_x2_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else {
     return MUILLM_COMM_UNSUPPORTED_SIZE;
@@ -2397,29 +2553,30 @@ void __global__ reduce_x2_bf16_kernel(
   }
 }
 
-muillm_comm_error_t __muillm_reduce_bf16(
+muillm_comm_error_t __muillm_reduce_chunk_bf16(
   hipStream_t stream,
   // inputs
   const __hip_bfloat16* src, // shape [local_size, scattered_M, N]
-  int scattered_count,
+  int scattered_chunk_count,
+  int scattered_chunk_offset,
   int local_size,
   // outputs
   __hip_bfloat16* dst
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(scattered_count, REDUCE_PER_BLOCK);
+  const int num_blocks = DIV_ROUND_UP(scattered_chunk_count, REDUCE_PER_BLOCK);
 
   if (local_size == 8) {
     // compute the src pointers by applying the offsets
-    const __hip_bfloat16* src0 = src + (0 * scattered_count);
-    const __hip_bfloat16* src1 = src + (1 * scattered_count);
-    const __hip_bfloat16* src2 = src + (2 * scattered_count);
-    const __hip_bfloat16* src3 = src + (3 * scattered_count);
-    const __hip_bfloat16* src4 = src + (4 * scattered_count);
-    const __hip_bfloat16* src5 = src + (5 * scattered_count);
-    const __hip_bfloat16* src6 = src + (6 * scattered_count);
-    const __hip_bfloat16* src7 = src + (7 * scattered_count);
+    const __hip_bfloat16* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const __hip_bfloat16* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
+    const __hip_bfloat16* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
+    const __hip_bfloat16* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
+    const __hip_bfloat16* src4 = src + scattered_chunk_offset + (4 * scattered_chunk_count);
+    const __hip_bfloat16* src5 = src + scattered_chunk_offset + (5 * scattered_chunk_count);
+    const __hip_bfloat16* src6 = src + scattered_chunk_offset + (6 * scattered_chunk_count);
+    const __hip_bfloat16* src7 = src + scattered_chunk_offset + (7 * scattered_chunk_count);
 
     reduce_x8_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -2431,14 +2588,14 @@ muillm_comm_error_t __muillm_reduce_bf16(
       src6,
       src7,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else if (local_size == 4) {
     // compute the src pointers by applying the offsets
-    const __hip_bfloat16* src0 = src + (0 * scattered_count);
-    const __hip_bfloat16* src1 = src + (1 * scattered_count);
-    const __hip_bfloat16* src2 = src + (2 * scattered_count);
-    const __hip_bfloat16* src3 = src + (3 * scattered_count);
+    const __hip_bfloat16* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const __hip_bfloat16* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
+    const __hip_bfloat16* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
+    const __hip_bfloat16* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
 
     reduce_x4_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -2446,18 +2603,18 @@ muillm_comm_error_t __muillm_reduce_bf16(
       src2,
       src3,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else if (local_size == 2) {
     // compute the src pointers by applying the offsets
-    const __hip_bfloat16* src0 = src + (0 * scattered_count);
-    const __hip_bfloat16* src1 = src + (1 * scattered_count);
+    const __hip_bfloat16* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
+    const __hip_bfloat16* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
 
     reduce_x2_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       dst,
-      scattered_count
+      scattered_chunk_count
     );
   } else {
     return MUILLM_COMM_UNSUPPORTED_SIZE;
@@ -2466,6 +2623,39 @@ muillm_comm_error_t __muillm_reduce_bf16(
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t __muillm_reduce_chunk(
+  hipStream_t stream,
+  // inputs
+  const void* src, // shape [local_size, scattered_M, N]
+  int scattered_chunk_count,
+  int scattered_chunk_offset,
+  int local_size,
+  muillm_comm_datatype_t datatype,
+  // outputs
+  void* dst
+) {
+  if (datatype == MUILLM_COMM_FP16) {
+    return __muillm_reduce_chunk_fp16(
+      stream,
+      (const half*) src,
+      scattered_chunk_count,
+      scattered_chunk_offset,
+      local_size,
+      (half*) dst
+    );
+  } else if (datatype == MUILLM_COMM_BF16) {
+    return __muillm_reduce_chunk_bf16(
+      stream,
+      (const __hip_bfloat16*) src,
+      scattered_chunk_count,
+      scattered_chunk_offset,
+      local_size,
+      (__hip_bfloat16*) dst
+    );
+  } else {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+}
 
 muillm_comm_error_t __muillm_reduce(
   hipStream_t stream,
@@ -2477,25 +2667,15 @@ muillm_comm_error_t __muillm_reduce(
   // outputs
   void* dst
 ) {
-  if (datatype == MUILLM_COMM_FP16) {
-    return __muillm_reduce_fp16(
-      stream,
-      (const half*) src,
-      scattered_count,
-      local_size,
-      (half*) dst
-    );
-  } else if (datatype == MUILLM_COMM_BF16) {
-    return __muillm_reduce_bf16(
-      stream,
-      (const __hip_bfloat16*) src,
-      scattered_count,
-      local_size,
-      (__hip_bfloat16*) dst
-    );
-  } else {
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
+  return __muillm_reduce_chunk(
+    stream,
+    src,
+    scattered_count,
+    0, // offset
+    local_size,
+    datatype,
+    dst
+  );
 }
 """
 
