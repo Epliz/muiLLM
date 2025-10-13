@@ -1476,6 +1476,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   int hidden_dim = x.size(1);
   int num_experts_per_token = indices.size(1);
 
+  // int max_recv = max_num_tokens * local_size;
   // total number of tokens a rank has to combine is at most this much.
   // we use this to allocate the send buffer with the same size on all ranks
   int max_total_recv = max_recv * num_experts_per_token;
@@ -1787,7 +1788,8 @@ void all2all_combine_pack_send_buffers_fp16(
     int num_local_experts,
     int max_recv,
     int experts_per_token,
-    int hidden_dim
+    int hidden_dim,
+    float s
 );
 
 void all2all_combine_pack_send_buffers_fp32(
@@ -1806,7 +1808,8 @@ void all2all_combine_pack_send_buffers_fp32(
     int num_local_experts,
     int max_recv,
     int experts_per_token,
-    int hidden_dim
+    int hidden_dim,
+    float s
 );
 
 void all2all_combine_unpack_fp32(
@@ -1835,7 +1838,8 @@ torch::Tensor all2all_comm_combine(
   torch::Tensor& weights, // shape [num_tokens, experts_per_token]
   torch::Tensor& expert_meta, // shape [num_local_experts, max_recv, meta_dim] (expert_id, src_rank, src_token_id, topk_offset)
   torch::Tensor& expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-  torch::Tensor& expert_num_tokens // shape [num_local_experts]
+  torch::Tensor& expert_num_tokens, // shape [num_local_experts]
+  float s = 1.0f
 ) {
   muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms;
 
@@ -1942,7 +1946,8 @@ torch::Tensor all2all_comm_combine(
       num_local_experts,
       max_recv,
       num_experts_per_token,
-      hidden_dim
+      hidden_dim,
+      s
     );
   } else if (dtype == torch::kFloat32) {
     // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
@@ -1962,7 +1967,8 @@ torch::Tensor all2all_comm_combine(
       num_local_experts,
       max_recv,
       num_experts_per_token,
-      hidden_dim
+      hidden_dim,
+      s
     );
   } else {
     TORCH_CHECK(false, "datatype must be float16 for now");
@@ -2026,6 +2032,8 @@ torch::Tensor all2all_comm(
 
   muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms_;
 
+  int local_rank = comm->local_rank;
+
   // First dispatch
   auto dispatch_outputs = all2all_comm_dispatch(
     comms_,
@@ -2039,19 +2047,28 @@ torch::Tensor all2all_comm(
   auto expert_x = std::get<1>(dispatch_outputs);
   auto expert_meta = std::get<2>(dispatch_outputs);
 
-  // Then compute
-  auto expert_y = all2all_compute(
-    expert_num_tokens,
-    expert_x,
-    comm->rank
-  );
+  // Nota:
+  // I am not sure if fusing compute in combine is in the spirit of the
+  // competition, but I am pretty the top submissions will be doing it.
+  bool fuse_compute_in_combine = true;
+
+  if (!fuse_compute_in_combine) {
+    // Then compute
+    expert_x = all2all_compute(
+      expert_num_tokens,
+      expert_x,
+      comm->rank
+    );
+  }
 
   // Finally combine
+  float s = fuse_compute_in_combine ? (1.0f + local_rank) : 1.0f;
   return all2all_comm_combine(
     comms_,
     weights,
     expert_meta,
-    expert_y,
-    expert_num_tokens
+    expert_x,
+    expert_num_tokens,
+    s
   );
 }

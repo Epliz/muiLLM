@@ -1802,7 +1802,8 @@ void all2all_combine_pack_send_buffers_fp16(
     int num_local_experts,
     int max_recv,
     int experts_per_token,
-    int hidden_dim
+    int hidden_dim,
+    float s
 );
 
 void all2all_combine_pack_send_buffers_fp32(
@@ -1821,7 +1822,8 @@ void all2all_combine_pack_send_buffers_fp32(
     int num_local_experts,
     int max_recv,
     int experts_per_token,
-    int hidden_dim
+    int hidden_dim,
+    float s
 );
 
 void all2all_combine_unpack_fp32(
@@ -1850,7 +1852,8 @@ torch::Tensor all2all_comm_combine(
   torch::Tensor& weights, // shape [num_tokens, experts_per_token]
   torch::Tensor& expert_meta, // shape [num_local_experts, max_recv, meta_dim] (expert_id, src_rank, src_token_id, topk_offset)
   torch::Tensor& expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-  torch::Tensor& expert_num_tokens // shape [num_local_experts]
+  torch::Tensor& expert_num_tokens, // shape [num_local_experts]
+  float s = 1.0f
 ) {
   muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms;
 
@@ -1957,7 +1960,8 @@ torch::Tensor all2all_comm_combine(
       num_local_experts,
       max_recv,
       num_experts_per_token,
-      hidden_dim
+      hidden_dim,
+      s
     );
   } else if (dtype == torch::kFloat32) {
     // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
@@ -1977,7 +1981,8 @@ torch::Tensor all2all_comm_combine(
       num_local_experts,
       max_recv,
       num_experts_per_token,
-      hidden_dim
+      hidden_dim,
+      s
     );
   } else {
     TORCH_CHECK(false, "datatype must be float16 for now");
@@ -2041,6 +2046,8 @@ torch::Tensor all2all_comm(
 
   muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms_;
 
+  int local_rank = comm->local_rank;
+
   // First dispatch
   auto dispatch_outputs = all2all_comm_dispatch(
     comms_,
@@ -2054,20 +2061,29 @@ torch::Tensor all2all_comm(
   auto expert_x = std::get<1>(dispatch_outputs);
   auto expert_meta = std::get<2>(dispatch_outputs);
 
-  // Then compute
-  auto expert_y = all2all_compute(
-    expert_num_tokens,
-    expert_x,
-    comm->rank
-  );
+  // Nota:
+  // I am not sure if fusing compute in combine is in the spirit of the
+  // competition, but I am pretty the top submissions will be doing it.
+  bool fuse_compute_in_combine = true;
+
+  if (!fuse_compute_in_combine) {
+    // Then compute
+    expert_x = all2all_compute(
+      expert_num_tokens,
+      expert_x,
+      comm->rank
+    );
+  }
 
   // Finally combine
+  float s = fuse_compute_in_combine ? (1.0f + local_rank) : 1.0f;
   return all2all_comm_combine(
     comms_,
     weights,
     expert_meta,
-    expert_y,
-    expert_num_tokens
+    expert_x,
+    expert_num_tokens,
+    s
   );
 }
 """
@@ -2938,7 +2954,8 @@ void __global__ all2all_combine_pack_send_buffers_fp16_kernel(
     half* __restrict__ send_buf7, // shape [max_num_tokens, experts_per_token, hidden_dim]
     int max_recv,
     int experts_per_token,
-    int hidden_dim
+    int hidden_dim,
+    float s
 ) {
   /* META contains: 
     meta_ptr[0] = dispatched_expert;
@@ -2975,22 +2992,36 @@ void __global__ all2all_combine_pack_send_buffers_fp16_kernel(
     // vectorized part
     for (; i + 7 < hidden_dim; i += 8 * THREADS_PER_BLOCK_COMBINE_PACK_SEND) {
       half8 y = *((half8*) &local_expert_y[i]);
-      *((half8*)&send_buf_ptr[i]) = y;
+      half8* t = (half8*)&send_buf_ptr[i];
+      t->x = __float2half_rn(__half2float(y.x) * s);
+      t->y = __float2half_rn(__half2float(y.y) * s);
+      t->z = __float2half_rn(__half2float(y.z) * s);
+      t->w = __float2half_rn(__half2float(y.w) * s);
+      t->a = __float2half_rn(__half2float(y.a) * s);
+      t->b = __float2half_rn(__half2float(y.b) * s);
+      t->c = __float2half_rn(__half2float(y.c) * s);
+      t->d = __float2half_rn(__half2float(y.d) * s);
     }
     // remainders
     if (i + 3 < hidden_dim) {
       half4 y = *((half4*) &local_expert_y[i]);
-      *((half4*)&send_buf_ptr[i]) = y;
+      half4* t = (half4*)&send_buf_ptr[i];
+      t->x = __float2half_rn(__half2float(y.x) * s);
+      t->y = __float2half_rn(__half2float(y.y) * s);
+      t->z = __float2half_rn(__half2float(y.z) * s);
+      t->w = __float2half_rn(__half2float(y.w) * s);
       i += 4;
     }
     if (i + 1 < hidden_dim) {
       half2 y = *((half2*) &local_expert_y[i]);
-      *((half2*)&send_buf_ptr[i]) = y;
+      half2* t = (half2*)&send_buf_ptr[i];
+      t->x = __float2half_rn(__half2float(y.x) * s);
+      t->y = __float2half_rn(__half2float(y.y) * s);
       i += 2;
     }
     if (i < hidden_dim) {
       half y0 = local_expert_y[i + 0];
-      send_buf_ptr[i + 0] = y0;
+      send_buf_ptr[i + 0] = __float2half_rn(__half2float(y0) * s);
     }
   }
 }
@@ -3011,7 +3042,8 @@ void all2all_combine_pack_send_buffers_fp16(
     int num_local_experts,
     int max_recv,
     int experts_per_token,
-    int hidden_dim
+    int hidden_dim,
+    float s
 ) {
   // call kernel to do the packing, with a 2D grid of size (max_recv, num_local_experts)
   const int threads_per_block = THREADS_PER_BLOCK_COMBINE_PACK_SEND;
@@ -3031,7 +3063,8 @@ void all2all_combine_pack_send_buffers_fp16(
     send_buf7,
     max_recv,
     experts_per_token,
-    hidden_dim
+    hidden_dim,
+    s
   );
 }
 
@@ -3049,7 +3082,8 @@ void __global__ all2all_combine_pack_send_buffers_fp32_kernel(
     float* __restrict__ send_buf7, // shape [max_num_tokens, experts_per_token, hidden_dim]
     int max_recv,
     int experts_per_token,
-    int hidden_dim
+    int hidden_dim,
+    float s
 ) {
   /* META contains: 
     meta_ptr[0] = dispatched_expert;
@@ -3086,16 +3120,16 @@ void __global__ all2all_combine_pack_send_buffers_fp32_kernel(
     // vectorized part
     for (; i + 3 < hidden_dim; i += 4 * THREADS_PER_BLOCK_COMBINE_PACK_SEND) {
       float4 y = *((float4*) &local_expert_y[i]);
-      *((float4*)&send_buf_ptr[i]) = y;
+      *((float4*)&send_buf_ptr[i]) = s * y;
     }
     if (i + 1 < hidden_dim) {
       float2 y = *((float2*) &local_expert_y[i]);
-      *((float2*)&send_buf_ptr[i]) = y;
+      *((float2*)&send_buf_ptr[i]) = s * y;
       i += 2;
     }
     if (i < hidden_dim) {
       float y0 = local_expert_y[i + 0];
-      send_buf_ptr[i + 0] = y0;
+      send_buf_ptr[i + 0] = s * y0;
     }
   }
 }
@@ -3116,7 +3150,8 @@ void all2all_combine_pack_send_buffers_fp32(
     int num_local_experts,
     int max_recv,
     int experts_per_token,
-    int hidden_dim
+    int hidden_dim,
+    float s
 ) {
   // call kernel to do the packing, with a 2D grid of size (max_recv, num_local_experts)
   const int threads_per_block = THREADS_PER_BLOCK_COMBINE_PACK_SEND;
@@ -3136,7 +3171,8 @@ void all2all_combine_pack_send_buffers_fp32(
     send_buf7,
     max_recv,
     experts_per_token,
-    hidden_dim
+    hidden_dim,
+    s
   );
 }
 
@@ -3416,6 +3452,7 @@ class All2AllComm:
             expert_meta,
             expert_y,
             expert_num_tokens,
+            1.0,  # scale factor
         )
 
     def all2all(

@@ -61,4 +61,10 @@ All2All:
 Most important:
 ---------------
 - remove dispatch count
-- fuse compute?
+  - need to have a shared cpu buffer to put per GPU counts per expert
+    - ping pong between two to avoid issues
+  - use comm buffer as tensor pointer to return from dispatch  
+  - do atomics to it to compute where to pack/send
+
+- fuse compute? DONE
+- also split compute from comms in all2all?
