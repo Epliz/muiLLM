@@ -2923,7 +2923,6 @@ void all2all_compute_fp16(
 // Send kernels
 
 #define THREADS_PER_BLOCK_COMBINE_PACK_SEND 256
-#define TOKENS_PER_BLOCK_COMBINE_PACK_SEND 4
 
 void __global__ all2all_combine_pack_send_buffers_fp16_kernel(
     const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
@@ -2948,10 +2947,7 @@ void __global__ all2all_combine_pack_send_buffers_fp16_kernel(
     meta_ptr[3] = expert_idx;
   */
 
-  int warp_id = threadIdx.x / warpSize;
-  int lane_id = threadIdx.x % warpSize;
-
-  int token_idx = TOKENS_PER_BLOCK_COMBINE_PACK_SEND * blockIdx.x + warp_id;
+  int token_idx = blockIdx.x;
   int local_expert_idx = blockIdx.y;
 
   int num_local_tokens = expert_num_tokens[local_expert_idx];
@@ -2975,9 +2971,9 @@ void __global__ all2all_combine_pack_send_buffers_fp16_kernel(
   // write to send_buf
   half* send_buf_ptr = &send_buf[send_pos * hidden_dim];
   {
-    int i = 8 * lane_id;
+    int i = 8 * threadIdx.x;
     // vectorized part
-    for (; i + 7 < hidden_dim; i += 8 * warpSize) {
+    for (; i + 7 < hidden_dim; i += 8 * THREADS_PER_BLOCK_COMBINE_PACK_SEND) {
       half8 y = *((half8*) &local_expert_y[i]);
       *((half8*)&send_buf_ptr[i]) = y;
     }
@@ -3019,7 +3015,7 @@ void all2all_combine_pack_send_buffers_fp16(
 ) {
   // call kernel to do the packing, with a 2D grid of size (max_recv, num_local_experts)
   const int threads_per_block = THREADS_PER_BLOCK_COMBINE_PACK_SEND;
-  const dim3 blocks(DIV_ROUND_UP(max_recv, TOKENS_PER_BLOCK_COMBINE_PACK_SEND), num_local_experts);
+  const dim3 blocks(max_recv, num_local_experts);
 
   all2all_combine_pack_send_buffers_fp16_kernel<<<blocks, threads_per_block, 0, stream>>>(
     expert_num_tokens,
@@ -3061,10 +3057,8 @@ void __global__ all2all_combine_pack_send_buffers_fp32_kernel(
     meta_ptr[2] = token_idx;
     meta_ptr[3] = expert_idx;
   */
-  int warp_id = threadIdx.x / warpSize;
-  int lane_id = threadIdx.x % warpSize;
 
-  int token_idx = TOKENS_PER_BLOCK_COMBINE_PACK_SEND * blockIdx.x + warp_id;
+  int token_idx = blockIdx.x;
   int local_expert_idx = blockIdx.y;
 
   int num_local_tokens = expert_num_tokens[local_expert_idx];
@@ -3088,9 +3082,9 @@ void __global__ all2all_combine_pack_send_buffers_fp32_kernel(
   // write to send_buf
   float* send_buf_ptr = &send_buf[send_pos * hidden_dim];
   {
-    int i = 4 * lane_id;
+    int i = 4 * threadIdx.x;
     // vectorized part
-    for (; i + 3 < hidden_dim; i += 4 * warpSize) {
+    for (; i + 3 < hidden_dim; i += 4 * THREADS_PER_BLOCK_COMBINE_PACK_SEND) {
       float4 y = *((float4*) &local_expert_y[i]);
       *((float4*)&send_buf_ptr[i]) = y;
     }
@@ -3126,7 +3120,7 @@ void all2all_combine_pack_send_buffers_fp32(
 ) {
   // call kernel to do the packing, with a 2D grid of size (max_recv, num_local_experts)
   const int threads_per_block = THREADS_PER_BLOCK_COMBINE_PACK_SEND;
-  const dim3 blocks(DIV_ROUND_UP(max_recv, TOKENS_PER_BLOCK_COMBINE_PACK_SEND), num_local_experts);
+  const dim3 blocks(max_recv, num_local_experts);
 
   all2all_combine_pack_send_buffers_fp32_kernel<<<blocks, threads_per_block, 0, stream>>>(
     expert_num_tokens,
