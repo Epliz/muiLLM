@@ -161,7 +161,7 @@ __device__ void __do_inc_wait_value_p2p(
   if (threadIdx.x == 0) {
     // increment the value
     uint32_t value = atomicAdd_system((uint32_t*) signal, 1) + 1;
-    __threadfence_system();
+    //__threadfence_system();
 
     // wait for the other ranks
     // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
@@ -169,7 +169,7 @@ __device__ void __do_inc_wait_value_p2p(
     if (value < seq_no) {
       while (*signal < seq_no) {
         __builtin_amdgcn_s_sleep(64);
-        __threadfence_system();
+        //__threadfence_system();
       }
     }
   }
@@ -197,7 +197,6 @@ __device__ void __do_wait_value_p2p(
     // have seen the previous one
     while (*signal < seq_no) {
       __builtin_amdgcn_s_sleep(64);
-      __threadfence_system();
     }
   }
 }
