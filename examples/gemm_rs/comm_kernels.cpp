@@ -1328,16 +1328,17 @@ muillm_comm_error_t __muillm_reduce(
   void* dst
 );
 
-muillm_comm_error_t __muillm_reduce_chunk(
+muillm_comm_error_t __muillm_reduce_chunks(
   hipStream_t stream,
   // inputs
-  const void* src, // shape [local_size, scattered_M, N]
-  int scattered_chunk_count,
-  int scattered_chunk_offset,
+  const void* src, // shape [num_chunks, local_size, M, chunk_N]
+  int M,
+  int chunk_N,
+  int num_chunks,
   int local_size,
   muillm_comm_datatype_t datatype,
   // outputs
-  void* dst
+  void* dst // shape [M, chunk_N * num_chunks]
 );
 
 muillm_comm_error_t muillm_comm_reduce_scatter_ll(
@@ -1523,7 +1524,14 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
   if (true) {//(total_size >= REDUCE_SCATTER_CHUNKED_THRESHOLD) {
     muillm_comm_error_t error;
 
-    int half_N = N / 2;
+    int num_chunks = 2; // TODO: Generalize
+
+    if (N % num_chunks != 0) {
+      TORCH_CHECK(false, "N must be divisible by num_chunks");
+      return torch::Tensor();
+    }
+
+    int half_N = N / num_chunks;
     int second_half_N = N - half_N;
 
     // get first and seconds halves of the weights and biases
@@ -1539,8 +1547,7 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
       second_bias_half = std::make_optional(bias_.narrow(0, half_N, second_half_N));
     }
 
-    auto first_rs_output = torch::empty({scattered_M, half_N}, output_options);
-    auto second_rs_output = torch::empty({scattered_M, second_half_N}, output_options);
+    auto rs_output = torch::empty({scattered_M, N}, output_options);
 
     //
     // First make sure we have enough buffer space
@@ -1588,12 +1595,13 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
       // work on the second half
       second_output_half = torch::linear(input, second_weights_half, second_bias_half); // shape [M, second_half_N]
 
+      int scatter_offset = local_size * scattered_chunk_size;
       // scatter
       if ((error = __muillm_scatter_all_chunk(
         stream,
         second_output_half.data_ptr(),
         second_scattered_chunk_size, // size of this chunk
-        local_size * scattered_chunk_size, // offset of this chunk is the size of the gathered previous one
+        scatter_offset, // offset of this chunk is the size of the gathered previous one
         local_size,
         local_rank,
         buffer_set->buffers[0],
@@ -1620,6 +1628,8 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
         TORCH_CHECK(false, "an error happened when doing wait stream gpu barrier");
         return torch::Tensor();
       }
+
+      int scatter_offset = 0;
 
       // scatter
       if ((error = __muillm_scatter_all_chunk(
@@ -1666,34 +1676,20 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
 
     // Finally reduce the data on each GPU
     // We have two chunks to reduce
-    if ((error = __muillm_reduce_chunk(
+    if ((error = __muillm_reduce_chunks(
       stream,
       buffer_set->buffers[local_rank],
-      scattered_chunk_count,
-      0, // offset of this chunk
+      scattered_M,
+      half_N, // TODO change when num_chunks != 2
+      num_chunks,
       local_size,
       datatype,
-      first_rs_output.data_ptr()
+      rs_output.data_ptr()
     )) != MUILLM_COMM_SUCCESS) {
       std::cout<<"rank "<<local_rank<<" failed to reduce data"<<std::endl;
       TORCH_CHECK(false, "an error happened when reducing data");
       return torch::Tensor();
     }
-    if ((error = __muillm_reduce_chunk(
-      stream,
-      buffer_set->buffers[local_rank],
-      second_scattered_chunk_count,
-      local_size * scattered_chunk_count, // offset of this chunk
-      local_size,
-      datatype,
-      second_rs_output.data_ptr()
-    )) != MUILLM_COMM_SUCCESS) {
-      std::cout<<"rank "<<local_rank<<" failed to reduce data"<<std::endl;
-      TORCH_CHECK(false, "an error happened when reducing data");
-      return torch::Tensor();
-    }
-
-    auto rs_output = torch::cat({first_rs_output, second_rs_output}, 1); // shape [scattered_M, N]
 
     return rs_output;
   } else {

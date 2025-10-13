@@ -404,21 +404,39 @@ muillm_comm_error_t __muillm_scatter_all(
 #define REDUCE_PER_BLOCK (THREADS_PER_BLOCK * REDUCE_PER_THREAD)
 
 void __global__ reduce_x8_fp16_kernel(
-  const half* __restrict__ src0, // shape [scattered_M, N]
-  const half* __restrict__ src1, // shape [scattered_M, N]
-  const half* __restrict__ src2, // shape [scattered_M, N]
-  const half* __restrict__ src3, // shape [scattered_M, N]
-  const half* __restrict__ src4, // shape [scattered_M, N]
-  const half* __restrict__ src5, // shape [scattered_M, N]
-  const half* __restrict__ src6, // shape [scattered_M, N]
-  const half* __restrict__ src7, // shape [scattered_M, N]
-  half* __restrict__ dst,
-  int N
+  const half* __restrict__ src0, // shape [num_chunks, M, chunk_N]
+  const half* __restrict__ src1, // shape [num_chunks, M, chunk_N]
+  const half* __restrict__ src2, // shape [num_chunks, M, chunk_N]
+  const half* __restrict__ src3, // shape [num_chunks, M, chunk_N]
+  const half* __restrict__ src4, // shape [num_chunks, M, chunk_N]
+  const half* __restrict__ src5, // shape [num_chunks, M, chunk_N]
+  const half* __restrict__ src6, // shape [num_chunks, M, chunk_N]
+  const half* __restrict__ src7, // shape [num_chunks, M, chunk_N]
+  half* __restrict__ dst, // shape [M, num_chunks, chunk_N]
+  int M,
+  int chunk_N,
+  int num_chunks
 ) {
 
+  int row_idx = blockIdx.y;
+  int chunk_idx = blockIdx.z;
+
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+
+  // realign src and dst pointers according to the row and chunk we are working on
+  src0 += (chunk_idx * M + row_idx) * chunk_N;
+  src1 += (chunk_idx * M + row_idx) * chunk_N;
+  src2 += (chunk_idx * M + row_idx) * chunk_N;
+  src3 += (chunk_idx * M + row_idx) * chunk_N;
+  src4 += (chunk_idx * M + row_idx) * chunk_N;
+  src5 += (chunk_idx * M + row_idx) * chunk_N;
+  src6 += (chunk_idx * M + row_idx) * chunk_N;
+  src7 += (chunk_idx * M + row_idx) * chunk_N;
+
+  dst += (row_idx * num_chunks + chunk_idx) * chunk_N;
+
   // TODO: make copy more like for scatter
-  if (i + (REDUCE_PER_THREAD - 1) < N) {
+  if (i + (REDUCE_PER_THREAD - 1) < chunk_N) {
     // can reduce 8 elements
     half8* dst_h8_ptr = (half8*)(&dst[i]);
 
@@ -454,7 +472,7 @@ void __global__ reduce_x8_fp16_kernel(
   } else {
     // non vectorized reduce
     for (unsigned r = 0; r < REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < chunk_N) {
         half v0 = src0[i];
         half v1 = src1[i];
         half v2 = src2[i];
@@ -474,17 +492,31 @@ void __global__ reduce_x8_fp16_kernel(
 }
 
 void __global__ reduce_x4_fp16_kernel(
-  const half* __restrict__ src0, // shape [scattered_M, N]
-  const half* __restrict__ src1, // shape [scattered_M, N]
-  const half* __restrict__ src2, // shape [scattered_M, N]
-  const half* __restrict__ src3, // shape [scattered_M, N]
-  half* __restrict__ dst,
-  int N
+  const half* __restrict__ src0, // shape [num_chunks, M, chunk_N]
+  const half* __restrict__ src1, // shape [num_chunks, M, chunk_N]
+  const half* __restrict__ src2, // shape [num_chunks, M, chunk_N]
+  const half* __restrict__ src3, // shape [num_chunks, M, chunk_N]
+  half* __restrict__ dst, // shape [M, num_chunks, chunk_N]
+  int M,
+  int chunk_N,
+  int num_chunks
 ) {
 
+  int row_idx = blockIdx.y;
+  int chunk_idx = blockIdx.z;
+
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+
+  // realign src and dst pointers according to the row and chunk we are working on
+  src0 += (chunk_idx * M + row_idx) * chunk_N;
+  src1 += (chunk_idx * M + row_idx) * chunk_N;
+  src2 += (chunk_idx * M + row_idx) * chunk_N;
+  src3 += (chunk_idx * M + row_idx) * chunk_N;
+
+  dst += (row_idx * num_chunks + chunk_idx) * chunk_N;
+
   // TODO: make copy more like for scatter
-  if (i + (REDUCE_PER_THREAD - 1) < N) {
+  if (i + (REDUCE_PER_THREAD - 1) < chunk_N) {
     // can reduce 8 elements
     half8* dst_h8_ptr = (half8*)(&dst[i]);
 
@@ -512,7 +544,7 @@ void __global__ reduce_x4_fp16_kernel(
   } else {
     // non vectorized reduce
     for (unsigned r = 0; r < REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < chunk_N) {
         half v0 = src0[i];
         half v1 = src1[i];
         half v2 = src2[i];
@@ -529,15 +561,26 @@ void __global__ reduce_x4_fp16_kernel(
 
 
 void __global__ reduce_x2_fp16_kernel(
-  const half* __restrict__ src0, // shape [scattered_M, N]
-  const half* __restrict__ src1, // shape [scattered_M, N]
-  half* __restrict__ dst,
-  int N
+  const half* __restrict__ src0, // shape [num_chunks, M, chunk_N]
+  const half* __restrict__ src1, // shape [num_chunks, M, chunk_N]
+  half* __restrict__ dst, // shape [M, num_chunks, chunk_N]
+  int M,
+  int chunk_N,
+  int num_chunks
 ) {
 
+  int row_idx = blockIdx.y;
+  int chunk_idx = blockIdx.z;
+
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+
+  // realign src and dst pointers according to the row and chunk we are working on
+  src0 += (chunk_idx * M + row_idx) * chunk_N;
+  src1 += (chunk_idx * M + row_idx) * chunk_N;
+  dst += (row_idx * num_chunks + chunk_idx) * chunk_N;
+
   // TODO: make copy more like for scatter
-  if (i + (REDUCE_PER_THREAD - 1) < N) {
+  if (i + (REDUCE_PER_THREAD - 1) < chunk_N) {
     // can reduce 8 elements
     half8* dst_h8_ptr = (half8*)(&dst[i]);
 
@@ -561,7 +604,7 @@ void __global__ reduce_x2_fp16_kernel(
   } else {
     // non vectorized reduce
     for (unsigned r = 0; r < REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < chunk_N) {
         half v0 = src0[i];
         half v1 = src1[i];
 
@@ -577,27 +620,33 @@ void __global__ reduce_x2_fp16_kernel(
 muillm_comm_error_t __muillm_reduce_chunk_fp16(
   hipStream_t stream,
   // inputs
-  const half* src, // shape [local_size, scattered_M, N]
-  int scattered_chunk_count,
-  int scattered_chunk_offset,
+  const half* src, // shape [num_chunks, local_size, scattered_M, chunk_N]
+  int scattered_M,
+  int chunk_N,
+  int num_chunks,
   int local_size,
   // outputs
   half* dst
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(scattered_chunk_count, REDUCE_PER_BLOCK);
+  const int num_x_blocks = DIV_ROUND_UP(chunk_N, REDUCE_PER_BLOCK);
+  const int num_y_blocks = scattered_M;
+  const int num_z_blocks = num_chunks;
+  const dim3 num_blocks = dim3(num_x_blocks, num_y_blocks, num_z_blocks);
+
+  int scattered_chunk_count = scattered_M * chunk_N;
 
   if (local_size == 8) {
     // compute the src pointers by applying the offsets
-    const half* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
-    const half* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
-    const half* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
-    const half* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
-    const half* src4 = src + scattered_chunk_offset + (4 * scattered_chunk_count);
-    const half* src5 = src + scattered_chunk_offset + (5 * scattered_chunk_count);
-    const half* src6 = src + scattered_chunk_offset + (6 * scattered_chunk_count);
-    const half* src7 = src + scattered_chunk_offset + (7 * scattered_chunk_count);
+    const half* src0 = src + (0 * scattered_chunk_count);
+    const half* src1 = src + (1 * scattered_chunk_count);
+    const half* src2 = src + (2 * scattered_chunk_count);
+    const half* src3 = src + (3 * scattered_chunk_count);
+    const half* src4 = src + (4 * scattered_chunk_count);
+    const half* src5 = src + (5 * scattered_chunk_count);
+    const half* src6 = src + (6 * scattered_chunk_count);
+    const half* src7 = src + (7 * scattered_chunk_count);
 
     reduce_x8_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -609,14 +658,16 @@ muillm_comm_error_t __muillm_reduce_chunk_fp16(
       src6,
       src7,
       dst,
-      scattered_chunk_count
+      scattered_M * local_size, // we actually need M here
+      chunk_N,
+      num_chunks
     );
   } else if (local_size == 4) {
     // compute the src pointers by applying the offsets
-    const half* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
-    const half* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
-    const half* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
-    const half* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
+    const half* src0 = src + (0 * scattered_chunk_count);
+    const half* src1 = src + (1 * scattered_chunk_count);
+    const half* src2 = src + (2 * scattered_chunk_count);
+    const half* src3 = src + (3 * scattered_chunk_count);
 
     reduce_x4_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -624,18 +675,22 @@ muillm_comm_error_t __muillm_reduce_chunk_fp16(
       src2,
       src3,
       dst,
-      scattered_chunk_count
+      scattered_M * local_size, // we actually need M here
+      chunk_N,
+      num_chunks
     );
   } else if (local_size == 2) {
     // compute the src pointers by applying the offsets
-    const half* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
-    const half* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
+    const half* src0 = src + (0 * scattered_chunk_count);
+    const half* src1 = src + (1 * scattered_chunk_count);
 
     reduce_x2_fp16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       dst,
-      scattered_chunk_count
+      scattered_M * local_size, // we actually need M here
+      chunk_N,
+      num_chunks
     );
   } else {
     return MUILLM_COMM_UNSUPPORTED_SIZE;
@@ -646,21 +701,39 @@ muillm_comm_error_t __muillm_reduce_chunk_fp16(
 
 
 void __global__ reduce_x8_bf16_kernel(
-  const __hip_bfloat16* __restrict__ src0, // shape [scattered_M, N]
-  const __hip_bfloat16* __restrict__ src1, // shape [scattered_M, N]
-  const __hip_bfloat16* __restrict__ src2, // shape [scattered_M, N]
-  const __hip_bfloat16* __restrict__ src3, // shape [scattered_M, N]
-  const __hip_bfloat16* __restrict__ src4, // shape [scattered_M, N]
-  const __hip_bfloat16* __restrict__ src5, // shape [scattered_M, N]
-  const __hip_bfloat16* __restrict__ src6, // shape [scattered_M, N]
-  const __hip_bfloat16* __restrict__ src7, // shape [scattered_M, N]
-  __hip_bfloat16* __restrict__ dst,
-  int N
+  const __hip_bfloat16* __restrict__ src0, // shape [num_chunks, M, chunk_N]
+  const __hip_bfloat16* __restrict__ src1, // shape [num_chunks, M, chunk_N]
+  const __hip_bfloat16* __restrict__ src2, // shape [num_chunks, M, chunk_N]
+  const __hip_bfloat16* __restrict__ src3, // shape [num_chunks, M, chunk_N]
+  const __hip_bfloat16* __restrict__ src4, // shape [num_chunks, M, chunk_N]
+  const __hip_bfloat16* __restrict__ src5, // shape [num_chunks, M, chunk_N]
+  const __hip_bfloat16* __restrict__ src6, // shape [num_chunks, M, chunk_N]
+  const __hip_bfloat16* __restrict__ src7, // shape [num_chunks, M, chunk_N]
+  __hip_bfloat16* __restrict__ dst, // shape [M, num_chunks, chunk_N]
+  int M,
+  int chunk_N,
+  int num_chunks
 ) {
 
+  int row_idx = blockIdx.y;
+  int chunk_idx = blockIdx.z;
+
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+
+  // realign src and dst pointers according to the row and chunk we are working on
+  src0 += (chunk_idx * M + row_idx) * chunk_N;
+  src1 += (chunk_idx * M + row_idx) * chunk_N;
+  src2 += (chunk_idx * M + row_idx) * chunk_N;
+  src3 += (chunk_idx * M + row_idx) * chunk_N;
+  src4 += (chunk_idx * M + row_idx) * chunk_N;
+  src5 += (chunk_idx * M + row_idx) * chunk_N;
+  src6 += (chunk_idx * M + row_idx) * chunk_N;
+  src7 += (chunk_idx * M + row_idx) * chunk_N;
+
+  dst += (row_idx * num_chunks + chunk_idx) * chunk_N;
+
   // TODO: make copy more like for scatter
-  if (i + (REDUCE_PER_THREAD - 1) < N) {
+  if (i + (REDUCE_PER_THREAD - 1) < chunk_N) {
     // can reduce 8 elements
     __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
 
@@ -696,7 +769,7 @@ void __global__ reduce_x8_bf16_kernel(
   } else {
     // non vectorized reduce
     for (unsigned r = 0; r < REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < chunk_N) {
         __hip_bfloat16 v0 = src0[i];
         __hip_bfloat16 v1 = src1[i];
         __hip_bfloat16 v2 = src2[i];
@@ -716,17 +789,31 @@ void __global__ reduce_x8_bf16_kernel(
 }
 
 void __global__ reduce_x4_bf16_kernel(
-  const __hip_bfloat16* __restrict__ src0, // shape [scattered_M, N]
-  const __hip_bfloat16* __restrict__ src1, // shape [scattered_M, N]
-  const __hip_bfloat16* __restrict__ src2, // shape [scattered_M, N]
-  const __hip_bfloat16* __restrict__ src3, // shape [scattered_M, N]
-  __hip_bfloat16* __restrict__ dst,
-  int N
+  const __hip_bfloat16* __restrict__ src0, // shape [num_chunks, M, chunk_N]
+  const __hip_bfloat16* __restrict__ src1, // shape [num_chunks, M, chunk_N]
+  const __hip_bfloat16* __restrict__ src2, // shape [num_chunks, M, chunk_N]
+  const __hip_bfloat16* __restrict__ src3, // shape [num_chunks, M, chunk_N]
+  __hip_bfloat16* __restrict__ dst, // shape [M, num_chunks, chunk_N]
+  int M,
+  int chunk_N,
+  int num_chunks
 ) {
 
+  int row_idx = blockIdx.y;
+  int chunk_idx = blockIdx.z;
+
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+
+  // realign src and dst pointers according to the row and chunk we are working on
+  src0 += (chunk_idx * M + row_idx) * chunk_N;
+  src1 += (chunk_idx * M + row_idx) * chunk_N;
+  src2 += (chunk_idx * M + row_idx) * chunk_N;
+  src3 += (chunk_idx * M + row_idx) * chunk_N;
+
+  dst += (row_idx * num_chunks + chunk_idx) * chunk_N;
+
   // TODO: make copy more like for scatter
-  if (i + (REDUCE_PER_THREAD - 1) < N) {
+  if (i + (REDUCE_PER_THREAD - 1) < chunk_N) {
     // can reduce 8 elements
     __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
 
@@ -754,7 +841,7 @@ void __global__ reduce_x4_bf16_kernel(
   } else {
     // non vectorized reduce
     for (unsigned r = 0; r < REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < chunk_N) {
         __hip_bfloat16 v0 = src0[i];
         __hip_bfloat16 v1 = src1[i];
         __hip_bfloat16 v2 = src2[i];
@@ -771,15 +858,27 @@ void __global__ reduce_x4_bf16_kernel(
 
 
 void __global__ reduce_x2_bf16_kernel(
-  const __hip_bfloat16* __restrict__ src0, // shape [scattered_M, N]
-  const __hip_bfloat16* __restrict__ src1, // shape [scattered_M, N]
-  __hip_bfloat16* __restrict__ dst,
-  int N
+  const __hip_bfloat16* __restrict__ src0, // shape [num_chunks, M, chunk_N]
+  const __hip_bfloat16* __restrict__ src1, // shape [num_chunks, M, chunk_N]
+  __hip_bfloat16* __restrict__ dst, // shape [M, num_chunks, chunk_N]
+  int M,
+  int chunk_N,
+  int num_chunks
 ) {
 
+  int row_idx = blockIdx.y;
+  int chunk_idx = blockIdx.z;
+
   unsigned i = blockIdx.x * REDUCE_PER_BLOCK + (threadIdx.x * REDUCE_PER_THREAD);
+
+  // realign src and dst pointers according to the row and chunk we are working on
+  src0 += (chunk_idx * M + row_idx) * chunk_N;
+  src1 += (chunk_idx * M + row_idx) * chunk_N;
+
+  dst += (row_idx * num_chunks + chunk_idx) * chunk_N;
+
   // TODO: make copy more like for scatter
-  if (i + (REDUCE_PER_THREAD - 1) < N) {
+  if (i + (REDUCE_PER_THREAD - 1) < chunk_N) {
     // can reduce 8 elements
     __hip_bfloat168* dst_h8_ptr = (__hip_bfloat168*)(&dst[i]);
 
@@ -803,7 +902,7 @@ void __global__ reduce_x2_bf16_kernel(
   } else {
     // non vectorized reduce
     for (unsigned r = 0; r < REDUCE_PER_THREAD; r++) {
-      if (i < N) {
+      if (i < chunk_N) {
         __hip_bfloat16 v0 = src0[i];
         __hip_bfloat16 v1 = src1[i];
 
@@ -819,27 +918,33 @@ void __global__ reduce_x2_bf16_kernel(
 muillm_comm_error_t __muillm_reduce_chunk_bf16(
   hipStream_t stream,
   // inputs
-  const __hip_bfloat16* src, // shape [local_size, scattered_M, N]
-  int scattered_chunk_count,
-  int scattered_chunk_offset,
+  const __hip_bfloat16* src, // shape [num_chunks, local_size, scattered_M, chunk_N]
+  int scattered_M,
+  int chunk_N,
+  int num_chunks,
   int local_size,
   // outputs
   __hip_bfloat16* dst
 ) {
 
   const int threads_per_blocks = THREADS_PER_BLOCK;
-  const int num_blocks = DIV_ROUND_UP(scattered_chunk_count, REDUCE_PER_BLOCK);
+  const int num_x_blocks = DIV_ROUND_UP(chunk_N, REDUCE_PER_BLOCK);
+  const int num_y_blocks = scattered_M;
+  const int num_z_blocks = num_chunks;
+  const dim3 num_blocks = dim3(num_x_blocks, num_y_blocks, num_z_blocks);
+
+  int scattered_chunk_count = scattered_M * chunk_N;
 
   if (local_size == 8) {
     // compute the src pointers by applying the offsets
-    const __hip_bfloat16* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
-    const __hip_bfloat16* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
-    const __hip_bfloat16* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
-    const __hip_bfloat16* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
-    const __hip_bfloat16* src4 = src + scattered_chunk_offset + (4 * scattered_chunk_count);
-    const __hip_bfloat16* src5 = src + scattered_chunk_offset + (5 * scattered_chunk_count);
-    const __hip_bfloat16* src6 = src + scattered_chunk_offset + (6 * scattered_chunk_count);
-    const __hip_bfloat16* src7 = src + scattered_chunk_offset + (7 * scattered_chunk_count);
+    const __hip_bfloat16* src0 = src + (0 * scattered_chunk_count);
+    const __hip_bfloat16* src1 = src + (1 * scattered_chunk_count);
+    const __hip_bfloat16* src2 = src + (2 * scattered_chunk_count);
+    const __hip_bfloat16* src3 = src + (3 * scattered_chunk_count);
+    const __hip_bfloat16* src4 = src + (4 * scattered_chunk_count);
+    const __hip_bfloat16* src5 = src + (5 * scattered_chunk_count);
+    const __hip_bfloat16* src6 = src + (6 * scattered_chunk_count);
+    const __hip_bfloat16* src7 = src + (7 * scattered_chunk_count);
 
     reduce_x8_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -851,14 +956,16 @@ muillm_comm_error_t __muillm_reduce_chunk_bf16(
       src6,
       src7,
       dst,
-      scattered_chunk_count
+      scattered_M * local_size, // we actually need M
+      chunk_N,
+      num_chunks
     );
   } else if (local_size == 4) {
     // compute the src pointers by applying the offsets
-    const __hip_bfloat16* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
-    const __hip_bfloat16* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
-    const __hip_bfloat16* src2 = src + scattered_chunk_offset + (2 * scattered_chunk_count);
-    const __hip_bfloat16* src3 = src + scattered_chunk_offset + (3 * scattered_chunk_count);
+    const __hip_bfloat16* src0 = src + (0 * scattered_chunk_count);
+    const __hip_bfloat16* src1 = src + (1 * scattered_chunk_count);
+    const __hip_bfloat16* src2 = src + (2 * scattered_chunk_count);
+    const __hip_bfloat16* src3 = src + (3 * scattered_chunk_count);
 
     reduce_x4_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
@@ -866,18 +973,22 @@ muillm_comm_error_t __muillm_reduce_chunk_bf16(
       src2,
       src3,
       dst,
-      scattered_chunk_count
+      scattered_M * local_size, // we actually need M
+      chunk_N,
+      num_chunks
     );
   } else if (local_size == 2) {
     // compute the src pointers by applying the offsets
-    const __hip_bfloat16* src0 = src + scattered_chunk_offset + (0 * scattered_chunk_count);
-    const __hip_bfloat16* src1 = src + scattered_chunk_offset + (1 * scattered_chunk_count);
+    const __hip_bfloat16* src0 = src + (0 * scattered_chunk_count);
+    const __hip_bfloat16* src1 = src + (1 * scattered_chunk_count);
 
     reduce_x2_bf16_kernel<<<num_blocks, threads_per_blocks, 0, stream>>>(
       src0,
       src1,
       dst,
-      scattered_chunk_count
+      scattered_M * local_size, // we actually need M
+      chunk_N,
+      num_chunks
     );
   } else {
     return MUILLM_COMM_UNSUPPORTED_SIZE;
@@ -886,23 +997,25 @@ muillm_comm_error_t __muillm_reduce_chunk_bf16(
   return MUILLM_COMM_SUCCESS;
 }
 
-muillm_comm_error_t __muillm_reduce_chunk(
+muillm_comm_error_t __muillm_reduce_chunks(
   hipStream_t stream,
   // inputs
-  const void* src, // shape [local_size, scattered_M, N]
-  int scattered_chunk_count,
-  int scattered_chunk_offset,
+  const void* src, // shape [num_chunks, local_size, scattered_M, chunk_N]
+  int scattered_M,
+  int chunk_N,
+  int num_chunks,
   int local_size,
   muillm_comm_datatype_t datatype,
   // outputs
-  void* dst
+  void* dst // shape [M, chunk_N * num_chunks]
 ) {
   if (datatype == MUILLM_COMM_FP16) {
     return __muillm_reduce_chunk_fp16(
       stream,
       (const half*) src,
-      scattered_chunk_count,
-      scattered_chunk_offset,
+      scattered_M,
+      chunk_N,
+      num_chunks,
       local_size,
       (half*) dst
     );
@@ -910,8 +1023,9 @@ muillm_comm_error_t __muillm_reduce_chunk(
     return __muillm_reduce_chunk_bf16(
       stream,
       (const __hip_bfloat16*) src,
-      scattered_chunk_count,
-      scattered_chunk_offset,
+      scattered_M,
+      chunk_N,
+      num_chunks,
       local_size,
       (__hip_bfloat16*) dst
     );
@@ -930,11 +1044,12 @@ muillm_comm_error_t __muillm_reduce(
   // outputs
   void* dst
 ) {
-  return __muillm_reduce_chunk(
+  return __muillm_reduce_chunks(
     stream,
     src,
+    1, // M
     scattered_count,
-    0, // offset
+    1, // num_chunks
     local_size,
     datatype,
     dst
