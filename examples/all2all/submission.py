@@ -2097,47 +2097,42 @@ torch::Tensor all2all_comm_multi_stream(
   int max_recv
 ) {
 
-  muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms_;
+  // split the inputs into two halves
+  int num_tokens = x.size(0);
+  int half_max_recv = max_recv / 2;
 
-  int local_rank = comm->local_rank;
+  int first_half_num_tokens = num_tokens / 2;
+  int second_half_num_tokens = num_tokens - first_half_num_tokens;
 
-  // First dispatch
-  auto dispatch_outputs = all2all_comm_dispatch(
+  auto x1 = x.narrow(0, 0, first_half_num_tokens);
+  auto x2 = x.narrow(0, first_half_num_tokens, second_half_num_tokens);
+
+  auto indices1 = indices.narrow(0, 0, first_half_num_tokens);
+  auto indices2 = indices.narrow(0, first_half_num_tokens, second_half_num_tokens);
+
+  auto weights1 = weights.narrow(0, 0, first_half_num_tokens);
+  auto weights2 = weights.narrow(0, first_half_num_tokens, second_half_num_tokens);
+
+  torch::Tensor out1 = all2all_comm_single_stream(
     comms_,
-    x,
-    indices,
+    x1,
+    indices1,
+    weights1,
     num_local_experts,
-    max_recv
+    half_max_recv
   );
 
-  auto expert_num_tokens = std::get<0>(dispatch_outputs);
-  auto expert_x = std::get<1>(dispatch_outputs);
-  auto expert_meta = std::get<2>(dispatch_outputs);
-
-  // Nota:
-  // I am not sure if fusing compute in combine is in the spirit of the
-  // competition, but I am pretty the top submissions will be doing it.
-  bool fuse_compute_in_combine = true;
-
-  if (!fuse_compute_in_combine) {
-    // Then compute
-    expert_x = all2all_compute(
-      expert_num_tokens,
-      expert_x,
-      comm->rank
-    );
-  }
-
-  // Finally combine
-  float s = fuse_compute_in_combine ? (1.0f + local_rank) : 1.0f;
-  return all2all_comm_combine(
+  torch::Tensor out2 = all2all_comm_single_stream(
     comms_,
-    weights,
-    expert_meta,
-    expert_x,
-    expert_num_tokens,
-    s
+    x2,
+    indices2,
+    weights2,
+    num_local_experts,
+    half_max_recv
   );
+
+  // Concatenate the outputs
+  return torch::cat({out1, out2}, 0);
 }
 
 #define ALL2ALL_COMM_MULTI_STREAM_THRESHOLD 64
