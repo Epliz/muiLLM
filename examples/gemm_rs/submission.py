@@ -619,7 +619,8 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
     int local_rank,
     const muillm_comm_local_socket_t* local_socket,
     muillm_comm_p2p_t** comm_ptr,
-    hipStream_t stream
+    hipStream_t stream,
+    at::cuda::CUDAStream second_stream
 );
 
 muillm_comm_error_t muillm_comm_p2p_destroy_comm(
@@ -1485,7 +1486,19 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
 
   auto device = input.device();
   at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(device.index());
+
   at::cuda::CUDAStream second_stream = comm->second_stream;
+  // check if the second stream is still good to use
+  if (hipStreamQuery(second_stream) == hipErrorInvalidResourceHandle) {
+    std::cout<<"rank "<<comm->local_rank<<" had an invalid second stream, recreating it..."<<std::endl;
+    // reset it to the current stream device
+    auto device_index = stream.device_index();
+    second_stream = at::cuda::getStreamFromPool(false, device_index);
+    comm->second_stream = second_stream;
+
+    // just to be safe
+    at::cuda::setCurrentCUDAStream(stream);
+  }
 
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
