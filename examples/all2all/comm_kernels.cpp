@@ -1768,8 +1768,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch_on
     expert_num_tokens.zero_();
   }
 
-  HIP_CHECK(local_rank, hipGetLastError());
-  HIP_CHECK(local_rank, hipDeviceSynchronize());
+  // HIP_CHECK(local_rank, hipGetLastError());
+  // HIP_CHECK(local_rank, hipDeviceSynchronize());
 
   const uint32_t* uncached_val = &counters[local_rank]; // total_recv
   uint32_t* cached_val = current_counter_set->local_count_cache;

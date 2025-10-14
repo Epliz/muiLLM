@@ -1783,8 +1783,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch_on
     expert_num_tokens.zero_();
   }
 
-  HIP_CHECK(local_rank, hipGetLastError());
-  HIP_CHECK(local_rank, hipDeviceSynchronize());
+  // HIP_CHECK(local_rank, hipGetLastError());
+  // HIP_CHECK(local_rank, hipDeviceSynchronize());
 
   const uint32_t* uncached_val = &counters[local_rank]; // total_recv
   uint32_t* cached_val = current_counter_set->local_count_cache;
@@ -2629,8 +2629,8 @@ __global__ void __muillm_inc_value_p2p_kernel(
 
 muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal) {
   __muillm_inc_value_p2p_kernel<<<1, 1, 0, stream>>>(signal);
-  HIP_CHECK(hipGetLastError());
-  HIP_CHECK(hipDeviceSynchronize());
+  // HIP_CHECK(hipGetLastError());
+  // HIP_CHECK(hipDeviceSynchronize());
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -2664,8 +2664,8 @@ __global__ void __muillm_inc_wait_value_p2p_kernel(
 
 muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
   __muillm_inc_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
-  HIP_CHECK(hipGetLastError());
-  HIP_CHECK(hipDeviceSynchronize());
+  // HIP_CHECK(hipGetLastError());
+  // HIP_CHECK(hipDeviceSynchronize());
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -2690,8 +2690,8 @@ muillm_comm_error_t __mui_stream_inc_wait_value_cache_val(
   uint32_t* __restrict__ cached_val
 ) {
   __muillm_inc_wait_value_cache_val_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no, uncached_val, cached_val);
-  HIP_CHECK(hipGetLastError());
-  HIP_CHECK(hipDeviceSynchronize());
+  // HIP_CHECK(hipGetLastError());
+  // HIP_CHECK(hipDeviceSynchronize());
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -2739,8 +2739,8 @@ muillm_comm_error_t __muillm_gpu_copy(void* dst, const void* src, size_t count, 
     count
   );
 
-  HIP_CHECK(hipGetLastError());
-  HIP_CHECK(hipDeviceSynchronize());
+  // HIP_CHECK(hipGetLastError());
+  // HIP_CHECK(hipDeviceSynchronize());
   if (hipPeekAtLastError() != hipSuccess) {
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
@@ -2828,8 +2828,8 @@ void all2all_dispatch_compute_send_counts(
     local_size,
     local_rank
   );
-  HIP_CHECK(hipGetLastError());
-  HIP_CHECK(hipDeviceSynchronize());
+  // HIP_CHECK(hipGetLastError());
+  // HIP_CHECK(hipDeviceSynchronize());
 }
 
 void __global__ all2all_dispatch_pack_send_buffers_fp32_kernel(
@@ -3162,8 +3162,8 @@ void all2all_dispatch_unpack_fp16(
     max_recv,
     local_expert_offset
   );
-  HIP_CHECK(hipGetLastError());
-  HIP_CHECK(hipDeviceSynchronize());
+  // HIP_CHECK(hipGetLastError());
+  // HIP_CHECK(hipDeviceSynchronize());
 }
 
 #define DISPATCH_UNPACK_FP32_ELEMENTS_PER_THREAD 4
@@ -3262,8 +3262,8 @@ void all2all_dispatch_unpack_fp32(
     max_recv,
     local_expert_offset
   );
-  HIP_CHECK(hipGetLastError());
-  HIP_CHECK(hipDeviceSynchronize());
+  // HIP_CHECK(hipGetLastError());
+  // HIP_CHECK(hipDeviceSynchronize());
 }
 
 #define COMPUTE_PER_THREAD_FP32 4
@@ -3329,8 +3329,8 @@ void all2all_compute_fp32(
     hidden_dim,
     s
   );
-  HIP_CHECK(hipGetLastError());
-  HIP_CHECK(hipDeviceSynchronize());
+  // HIP_CHECK(hipGetLastError());
+  // HIP_CHECK(hipDeviceSynchronize());
 }
 
 #define COMPUTE_PER_THREAD_FP16 8
@@ -3399,8 +3399,8 @@ void all2all_compute_fp16(
     hidden_dim,
     s
   );
-  HIP_CHECK(hipGetLastError());
-  HIP_CHECK(hipDeviceSynchronize());
+  // HIP_CHECK(hipGetLastError());
+  // HIP_CHECK(hipDeviceSynchronize());
 }
 
 //
@@ -3537,8 +3537,8 @@ void all2all_combine_pack_send_buffers_fp16(
     hidden_dim,
     s
   );
-  HIP_CHECK(hipGetLastError());
-  HIP_CHECK(hipDeviceSynchronize());
+  // HIP_CHECK(hipGetLastError());
+  // HIP_CHECK(hipDeviceSynchronize());
 }
 
 void __global__ all2all_combine_pack_send_buffers_fp32_kernel(
@@ -3647,8 +3647,8 @@ void all2all_combine_pack_send_buffers_fp32(
     hidden_dim,
     s
   );
-  HIP_CHECK(hipGetLastError());
-  HIP_CHECK(hipDeviceSynchronize());
+  // HIP_CHECK(hipGetLastError());
+  // HIP_CHECK(hipDeviceSynchronize());
 }
 
 #define COMBINE_WRITE_BACK_THREADS_PER_BLOCK 256
@@ -3722,8 +3722,8 @@ void all2all_combine_unpack_fp32(
       hidden_dim,
       experts_per_token
     );
-    HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
+    // HIP_CHECK(hipGetLastError());
+    // HIP_CHECK(hipDeviceSynchronize());
   }
 }
 
@@ -3794,8 +3794,8 @@ void all2all_combine_unpack_fp16(
       hidden_dim,
       experts_per_token
     );
-    HIP_CHECK(hipGetLastError());
-    HIP_CHECK(hipDeviceSynchronize());
+    // HIP_CHECK(hipGetLastError());
+    // HIP_CHECK(hipDeviceSynchronize());
   }
 }
 """
