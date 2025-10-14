@@ -279,6 +279,29 @@ void all2all_dispatch_compute_send_counts(
   );
 }
 
+void __global__ all2all_zero_counters_kernel(
+  uint32_t* __restrict__ next_local_counters,
+  int local_size
+) {
+  int idx = threadIdx.x;
+  if (idx < local_size) {
+    next_local_counters[idx] = 0;
+  }
+}
+
+void all2all_zero_counters(
+  hipStream_t stream,
+  uint32_t* __restrict__ next_local_counters,
+  int local_size
+) {
+  const int threads_per_block = THREADS_PER_BLOCK;
+  const int blocks = 1;
+  all2all_zero_counters_kernel<<<blocks, threads_per_block, 0, stream>>>(
+    next_local_counters,
+    local_size
+  );
+}
+
 void __global__ all2all_dispatch_pack_send_buffers_fp32_kernel(
   const float* __restrict__ x,
   const int32_t* __restrict__ indices,
@@ -1149,6 +1172,10 @@ void all2all_combine_unpack_fp32(
   const int threads_per_block = COMBINE_WRITE_BACK_THREADS_PER_BLOCK;
   const int blocks = num_tokens;
 
+  if (num_tokens == 0) {
+    return;
+  }
+
   all2all_combine_write_back_fp32_kernel<<<blocks, threads_per_block, 0, stream>>>(
     recv_buf,
     weights,
@@ -1216,6 +1243,10 @@ void all2all_combine_unpack_fp16(
 ) {
   const int threads_per_block = COMBINE_WRITE_BACK_THREADS_PER_BLOCK;
   const int blocks = num_tokens;
+
+  if (num_tokens == 0) {
+    return;
+  }
 
   all2all_combine_write_back_fp16_kernel<<<blocks, threads_per_block, 0, stream>>>(
     recv_buf,

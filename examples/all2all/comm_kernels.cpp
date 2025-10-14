@@ -1374,6 +1374,12 @@ void all2all_dispatch_compute_send_counts(
     int local_rank
 );
 
+void all2all_zero_counters(
+  hipStream_t stream,
+  uint32_t* __restrict__ next_local_counters,
+  int local_size
+);
+
 void all2all_dispatch_pack_send_buffers_fp32(
     hipStream_t stream,
     const float* __restrict__ x,
@@ -1545,18 +1551,29 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   uint32_t* counters = (uint32_t*)current_counter_set->counters;
   uint32_t* next_counters = (uint32_t*) next_counter_set->counters;
 
-  all2all_dispatch_compute_send_counts(
-    stream,
-    (const int32_t*)indices.data_ptr(),
-    (uint32_t*)send_offsets.data_ptr(),
-    counters,
-    next_counters,
-    num_local_experts,
-    num_tokens,
-    num_experts_per_token,
-    local_size,
-    local_rank
-  );
+  if (num_tokens > 0) {
+    all2all_dispatch_compute_send_counts(
+      stream,
+      (const int32_t*)indices.data_ptr(),
+      (uint32_t*)send_offsets.data_ptr(),
+      counters,
+      next_counters,
+      num_local_experts,
+      num_tokens,
+      num_experts_per_token,
+      local_size,
+      local_rank
+    );
+  } else {
+    // if there is no token, we just zero the next counters
+    if (local_rank == 0) {
+      all2all_zero_counters(
+        stream,
+        next_counters,
+        local_size
+      );
+    }
+  }
 
 
   // we will zero expert_num_tokens in the dispatch pack send kernels
@@ -1573,56 +1590,61 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   //
   int buff_meta_offset = aligned_size_data;
 
-  if (dtype == torch::kFloat32) {
-    // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
-    all2all_dispatch_pack_send_buffers_fp32(
-      stream,
-      (const float*)x.data_ptr(),
-      (const int32_t*)indices.data_ptr(),
-      (uint32_t*)send_offsets.data_ptr(),
-      (uint32_t*)expert_num_tokens.data_ptr(),
-      (float*)buffer_set->buffers[0], // send_buf0
-      (float*)buffer_set->buffers[1], // send_buf1
-      (float*)buffer_set->buffers[2], // send_buf2
-      (float*)buffer_set->buffers[3], // send_buf3
-      (float*)buffer_set->buffers[4], // send_buf4
-      (float*)buffer_set->buffers[5], // send_buf5
-      (float*)buffer_set->buffers[6], // send_buf6
-      (float*)buffer_set->buffers[7], // send_buf7
-      num_local_experts,
-      num_tokens,
-      num_experts_per_token,
-      hidden_dim,
-      buff_meta_offset,
-      local_size,
-      local_rank
-    );
-  } else if (dtype == torch::kFloat16) {
-    // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
-    all2all_dispatch_pack_send_buffers_fp16(
-      stream,
-      (const half*)x.data_ptr(),
-      (const int32_t*)indices.data_ptr(),
-      (uint32_t*)send_offsets.data_ptr(),
-      (uint32_t*)expert_num_tokens.data_ptr(),
-      (half*)buffer_set->buffers[0], // send_buf0
-      (half*)buffer_set->buffers[1], // send_buf1
-      (half*)buffer_set->buffers[2], // send_buf2
-      (half*)buffer_set->buffers[3], // send_buf3
-      (half*)buffer_set->buffers[4], // send_buf4
-      (half*)buffer_set->buffers[5], // send_buf5
-      (half*)buffer_set->buffers[6], // send_buf6
-      (half*)buffer_set->buffers[7], // send_buf7
-      num_local_experts,
-      num_tokens,
-      num_experts_per_token,
-      hidden_dim,
-      buff_meta_offset,
-      local_size,
-      local_rank
-    );
+  if (num_tokens > 0) {
+    if (dtype == torch::kFloat32) {
+      // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
+      all2all_dispatch_pack_send_buffers_fp32(
+        stream,
+        (const float*)x.data_ptr(),
+        (const int32_t*)indices.data_ptr(),
+        (uint32_t*)send_offsets.data_ptr(),
+        (uint32_t*)expert_num_tokens.data_ptr(),
+        (float*)buffer_set->buffers[0], // send_buf0
+        (float*)buffer_set->buffers[1], // send_buf1
+        (float*)buffer_set->buffers[2], // send_buf2
+        (float*)buffer_set->buffers[3], // send_buf3
+        (float*)buffer_set->buffers[4], // send_buf4
+        (float*)buffer_set->buffers[5], // send_buf5
+        (float*)buffer_set->buffers[6], // send_buf6
+        (float*)buffer_set->buffers[7], // send_buf7
+        num_local_experts,
+        num_tokens,
+        num_experts_per_token,
+        hidden_dim,
+        buff_meta_offset,
+        local_size,
+        local_rank
+      );
+    } else if (dtype == torch::kFloat16) {
+      // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
+      all2all_dispatch_pack_send_buffers_fp16(
+        stream,
+        (const half*)x.data_ptr(),
+        (const int32_t*)indices.data_ptr(),
+        (uint32_t*)send_offsets.data_ptr(),
+        (uint32_t*)expert_num_tokens.data_ptr(),
+        (half*)buffer_set->buffers[0], // send_buf0
+        (half*)buffer_set->buffers[1], // send_buf1
+        (half*)buffer_set->buffers[2], // send_buf2
+        (half*)buffer_set->buffers[3], // send_buf3
+        (half*)buffer_set->buffers[4], // send_buf4
+        (half*)buffer_set->buffers[5], // send_buf5
+        (half*)buffer_set->buffers[6], // send_buf6
+        (half*)buffer_set->buffers[7], // send_buf7
+        num_local_experts,
+        num_tokens,
+        num_experts_per_token,
+        hidden_dim,
+        buff_meta_offset,
+        local_size,
+        local_rank
+      );
+    } else {
+      TORCH_CHECK(false, "unsupported data type");
+    }
   } else {
-    TORCH_CHECK(false, "unsupported data type");
+    // if there is no token, we just zero the expert_num_tokens
+    expert_num_tokens.zero_();
   }
 
 
