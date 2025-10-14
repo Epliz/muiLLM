@@ -2173,7 +2173,6 @@ __global__ void __muillm_inc_value_p2p_kernel(
 ) {
   if (threadIdx.x == 0) {
     atomicAdd_system(signal, 1);
-    __threadfence_system();
   }
 }
 
@@ -2195,7 +2194,10 @@ __device__ void __do_inc_wait_value_p2p(
     // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
     // have seen the previous one
     if (value < seq_no) {
-      while (*signal < seq_no) __threadfence_system();
+      while (*signal < seq_no) {
+        // sleep to avoid congesting the bus
+        __builtin_amdgcn_s_sleep(64);
+      }
     }
   }
 }
