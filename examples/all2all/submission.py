@@ -1377,11 +1377,14 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, muillm_com
       }
     }
 
+    //std::cout<<"rank "<<local_rank<<" ctx "<<ctx<<" doing gpu barrier on signal "<<ctx->signal<<" with seq_no "<<seq_no<<std::endl;
+
     // write the values
     if ((muillm_error = __mui_stream_inc_wait_value(stream, ctx->signal, seq_no)) != MUILLM_COMM_SUCCESS) {
       std::cout<<"rank "<<local_rank<<" gpu barrier failed because __mui_stream_inc_wait_value failed"<<std::endl;
       return muillm_error;
     }
+    //HIP_CHECK(local_rank, hipDeviceSynchronize()); // synchronize to see better interleaving
   } else {
     std::cout<<"rank "<<local_rank<<" gpu barrier failed because there is no signal memory"<<std::endl;
     return MUILLM_COMM_UNKNOWN_ERROR;
@@ -1428,11 +1431,15 @@ static muillm_comm_error_t __mui_gpu_barrier_cache_val(
       }
     }
 
+    //std::cout<<"rank "<<local_rank<<" ctx "<<ctx<<" doing caching gpu barrier on signal "<<ctx->signal<<" with seq_no "<<seq_no<<std::endl;
+
     // write the values
     if ((muillm_error = __mui_stream_inc_wait_value_cache_val(stream, ctx->signal, seq_no, uncached_val, cached_val)) != MUILLM_COMM_SUCCESS) {
       std::cout<<"rank "<<local_rank<<" caching gpu barrier failed because __mui_stream_inc_wait_value failed"<<std::endl;
       return muillm_error;
     }
+
+    //HIP_CHECK(local_rank, hipDeviceSynchronize()); // synchronize to see better interleaving
   } else {
     std::cout<<"rank "<<local_rank<<" caching gpu barrier failed because there is no signal memory"<<std::endl;
     return MUILLM_COMM_UNKNOWN_ERROR;
