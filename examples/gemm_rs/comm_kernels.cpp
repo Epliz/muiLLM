@@ -1604,26 +1604,26 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
 
       int scatter_offset = local_size * scattered_chunk_size;
       // scatter
-      if ((error = __muillm_scatter_all_chunk(
-        stream,
-        second_output_half.data_ptr(),
-        second_scattered_chunk_size, // size of this chunk
-        scatter_offset, // offset of this chunk is the size of the gathered previous one
-        local_size,
-        local_rank,
-        buffer_set->buffers[0],
-        buffer_set->buffers[1],
-        buffer_set->buffers[2],
-        buffer_set->buffers[3],
-        buffer_set->buffers[4],
-        buffer_set->buffers[5],
-        buffer_set->buffers[6],
-        buffer_set->buffers[7]
-      )) != MUILLM_COMM_SUCCESS) {
-        std::cout<<"rank "<<local_rank<<" failed to scatter data to other GPUs"<<std::endl;
-        TORCH_CHECK(false, "an error happened when scattering data to other GPUs");
-        return torch::Tensor();
-      }
+      // if ((error = __muillm_scatter_all_chunk(
+      //   stream,
+      //   second_output_half.data_ptr(),
+      //   second_scattered_chunk_size, // size of this chunk
+      //   scatter_offset, // offset of this chunk is the size of the gathered previous one
+      //   local_size,
+      //   local_rank,
+      //   buffer_set->buffers[0],
+      //   buffer_set->buffers[1],
+      //   buffer_set->buffers[2],
+      //   buffer_set->buffers[3],
+      //   buffer_set->buffers[4],
+      //   buffer_set->buffers[5],
+      //   buffer_set->buffers[6],
+      //   buffer_set->buffers[7]
+      // )) != MUILLM_COMM_SUCCESS) {
+      //   std::cout<<"rank "<<local_rank<<" failed to scatter data to other GPUs"<<std::endl;
+      //   TORCH_CHECK(false, "an error happened when scattering data to other GPUs");
+      //   return torch::Tensor();
+      // }
     }
 
     { // Spawn work for the second stream
@@ -1638,27 +1638,27 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
 
       int scatter_offset = 0;
 
-      // scatter
-      if ((error = __muillm_scatter_all_chunk(
-        second_stream,
-        output_half.data_ptr(),
-        scattered_chunk_size, // size of this chunk
-        0, // offset of this chunk
-        local_size,
-        local_rank,
-        buffer_set->buffers[0],
-        buffer_set->buffers[1],
-        buffer_set->buffers[2],
-        buffer_set->buffers[3],
-        buffer_set->buffers[4],
-        buffer_set->buffers[5],
-        buffer_set->buffers[6],
-        buffer_set->buffers[7]
-      )) != MUILLM_COMM_SUCCESS) {
-        std::cout<<"rank "<<local_rank<<" failed to scatter data to other GPUs"<<std::endl;
-        TORCH_CHECK(false, "an error happened when scattering data to other GPUs");
-        return torch::Tensor();
-      }
+      // // scatter
+      // if ((error = __muillm_scatter_all_chunk(
+      //   second_stream,
+      //   output_half.data_ptr(),
+      //   scattered_chunk_size, // size of this chunk
+      //   0, // offset of this chunk
+      //   local_size,
+      //   local_rank,
+      //   buffer_set->buffers[0],
+      //   buffer_set->buffers[1],
+      //   buffer_set->buffers[2],
+      //   buffer_set->buffers[3],
+      //   buffer_set->buffers[4],
+      //   buffer_set->buffers[5],
+      //   buffer_set->buffers[6],
+      //   buffer_set->buffers[7]
+      // )) != MUILLM_COMM_SUCCESS) {
+      //   std::cout<<"rank "<<local_rank<<" failed to scatter data to other GPUs"<<std::endl;
+      //   TORCH_CHECK(false, "an error happened when scattering data to other GPUs");
+      //   return torch::Tensor();
+      // }
 
       // signal we are done with the transfers
       if (__mui_signal_stream_gpu_barrier(comm, second_stream) != MUILLM_COMM_SUCCESS) {
