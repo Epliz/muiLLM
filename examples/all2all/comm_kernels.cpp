@@ -2385,11 +2385,13 @@ torch::Tensor all2all_comm_multi_stream(
 
   int local_rank = comm->local_rank;
 
+  int max_tokens = max_recv / comm->local_size;
+
   // split the inputs into two halves
   int num_tokens = x.size(0);
-  int half_max_recv = max_recv / 2;
 
-  int first_half_num_tokens = num_tokens / 2;
+  // pack as close as possible to max_tokens / 2 in the first half
+  int first_half_num_tokens = std::min(num_tokens, max_tokens / 2);
   int second_half_num_tokens = num_tokens - first_half_num_tokens;
 
   auto x1 = x.narrow(0, 0, first_half_num_tokens);
@@ -2416,7 +2418,7 @@ torch::Tensor all2all_comm_multi_stream(
     x1,
     indices1,
     num_local_experts,
-    half_max_recv
+    max_recv
   );
 
   //std::cout<<"rank "<<comm->rank<<" second dispatch"<<std::endl;
@@ -2433,7 +2435,7 @@ torch::Tensor all2all_comm_multi_stream(
     x2,
     indices2,
     num_local_experts,
-    half_max_recv
+    max_recv
   );
 
   auto expert_num_tokens1 = std::get<0>(dispatch_outputs1);
