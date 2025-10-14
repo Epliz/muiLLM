@@ -597,8 +597,7 @@ typedef struct muillm_comm_p2p: muillm_comm {
 
   at::cuda::CUDAStream second_stream;
 
-  // local stream signal memory to synchronize GPUs
-  uint32_t* stream_signal_host;
+  // local stream signal memory on GPU to synchronize stream
   uint32_t* stream_signal;
 
   uint32_t signal_seq_no;
@@ -983,7 +982,6 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   comm->signal = nullptr;
   comm->signal_seq_no = 0;
 
-  comm->stream_signal_host = nullptr;
   comm->stream_signal = nullptr;
   comm->stream_signal_seq_no = 0;
 
@@ -1041,13 +1039,11 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   }
 
   // allocate signal memory
-  __allocate_locked_cpu_mem(
-    sizeof(uint64_t), // alloc 8 bytes even though we use only 4
-    (void**) &comm->stream_signal_host,
-    (void**) &comm->stream_signal
-  );
+  if (hipMalloc((void**) &comm->stream_signal, sizeof(uint64_t)) != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
 
-  if (comm->stream_signal_host == nullptr || comm->stream_signal == nullptr) {
+  if (comm->stream_signal == nullptr) {
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
   // initialize to 0
@@ -1140,14 +1136,11 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
   }
 
   // free stream signal memory
-  if (comm->stream_signal_host != nullptr) {
-    __deallocate_locked_cpu_mem(
-      comm,
-      comm->stream_signal_host
-    );
-    comm->stream_signal_host = nullptr;
-    comm->stream_signal = nullptr;
+  if (hipFree(comm->stream_signal) != hipSuccess) {
+    std::cout<<"rank "<<local_rank<<" failed to free stream signal memory"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
   }
+  comm->stream_signal = nullptr;
 
   // destroy cache flush event
   if (hipEventDestroy(comm->cache_flush_event) != hipSuccess) {
@@ -1177,7 +1170,7 @@ muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal)
 
 muillm_comm_error_t __mui_stream_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no);
 
-muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no);
+muillm_comm_error_t __mui_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no);
 
 static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_t stream) {
   int local_size = comm->local_size;
@@ -1204,7 +1197,7 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
     }
 
     // write the values
-    if ((muillm_error = __mui_stream_inc_wait_value(stream, comm->signal, seq_no)) != MUILLM_COMM_SUCCESS) {
+    if ((muillm_error = __mui_inc_wait_value(stream, comm->signal, seq_no)) != MUILLM_COMM_SUCCESS) {
       std::cout<<"rank "<<local_rank<<" gpu barrier failed because __mui_stream_inc_wait_value failed"<<std::endl;
       return muillm_error;
     }
@@ -1879,20 +1872,6 @@ typedef struct __hip_bfloat168 {
   __hip_bfloat16 x, y, z, w, a, b, c, d;
 } __hip_bfloat168;
 
-
-__global__ void __muillm_inc_value_p2p_kernel(
-  uint32_t* signal
-) {
-  if (threadIdx.x == 0) {
-    atomicAdd_system(signal, 1);
-  }
-}
-
-muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal) {
-  __muillm_inc_value_p2p_kernel<<<1, 1, 0, stream>>>(signal);
-  return MUILLM_COMM_SUCCESS;
-}
-
 __device__ void __do_inc_wait_value_p2p(
   volatile uint32_t* signal,
   uint32_t seq_no
@@ -1921,12 +1900,25 @@ __global__ void __muillm_inc_wait_value_p2p_kernel(
   __do_inc_wait_value_p2p(signal, seq_no);
 }
 
-muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
+muillm_comm_error_t __mui_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
   __muillm_inc_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
   return MUILLM_COMM_SUCCESS;
 }
 
-__device__ void __do_wait_value_p2p(
+__global__ void __muillm_stream_inc_value_p2p_kernel(
+  uint32_t* signal
+) {
+  if (threadIdx.x == 0) {
+    atomicAdd(signal, 1);
+  }
+}
+
+muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal) {
+  __muillm_stream_inc_value_p2p_kernel<<<1, 1, 0, stream>>>(signal);
+  return MUILLM_COMM_SUCCESS;
+}
+
+__device__ void __do_stream_wait_value_p2p(
   volatile uint32_t* signal,
   uint32_t seq_no
 ) {
@@ -1935,20 +1927,22 @@ __device__ void __do_wait_value_p2p(
     // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
     // have seen the previous one
     while (*signal < seq_no) {
-      __builtin_amdgcn_s_sleep(64);
+      // wait a bit more than if we are cross GPU syncs as the memory is local so faster
+      // and we don't want to overload the GPU on this kernel
+      __builtin_amdgcn_s_sleep(128);
     }
   }
 }
 
-__global__ void __muillm_wait_value_p2p_kernel(
+__global__ void __muillm_stream_wait_value_p2p_kernel(
   volatile uint32_t* signal,
   uint32_t seq_no
 ) {
-  __do_wait_value_p2p(signal, seq_no);
+  __do_stream_wait_value_p2p(signal, seq_no);
 }
 
 muillm_comm_error_t __mui_stream_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
-  __muillm_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
+  __muillm_stream_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
   return MUILLM_COMM_SUCCESS;
 }
 

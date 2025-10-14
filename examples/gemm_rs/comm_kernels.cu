@@ -140,20 +140,6 @@ typedef struct __hip_bfloat168 {
   __hip_bfloat16 x, y, z, w, a, b, c, d;
 } __hip_bfloat168;
 
-
-__global__ void __muillm_inc_value_p2p_kernel(
-  uint32_t* signal
-) {
-  if (threadIdx.x == 0) {
-    atomicAdd_system(signal, 1);
-  }
-}
-
-muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal) {
-  __muillm_inc_value_p2p_kernel<<<1, 1, 0, stream>>>(signal);
-  return MUILLM_COMM_SUCCESS;
-}
-
 __device__ void __do_inc_wait_value_p2p(
   volatile uint32_t* signal,
   uint32_t seq_no
@@ -182,12 +168,25 @@ __global__ void __muillm_inc_wait_value_p2p_kernel(
   __do_inc_wait_value_p2p(signal, seq_no);
 }
 
-muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
+muillm_comm_error_t __mui_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
   __muillm_inc_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
   return MUILLM_COMM_SUCCESS;
 }
 
-__device__ void __do_wait_value_p2p(
+__global__ void __muillm_stream_inc_value_p2p_kernel(
+  uint32_t* signal
+) {
+  if (threadIdx.x == 0) {
+    atomicAdd(signal, 1);
+  }
+}
+
+muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal) {
+  __muillm_stream_inc_value_p2p_kernel<<<1, 1, 0, stream>>>(signal);
+  return MUILLM_COMM_SUCCESS;
+}
+
+__device__ void __do_stream_wait_value_p2p(
   volatile uint32_t* signal,
   uint32_t seq_no
 ) {
@@ -196,20 +195,22 @@ __device__ void __do_wait_value_p2p(
     // we need the comparison to be >= as one GPU might already increment the value before all the other GPUs
     // have seen the previous one
     while (*signal < seq_no) {
-      __builtin_amdgcn_s_sleep(64);
+      // wait a bit more than if we are cross GPU syncs as the memory is local so faster
+      // and we don't want to overload the GPU on this kernel
+      __builtin_amdgcn_s_sleep(128);
     }
   }
 }
 
-__global__ void __muillm_wait_value_p2p_kernel(
+__global__ void __muillm_stream_wait_value_p2p_kernel(
   volatile uint32_t* signal,
   uint32_t seq_no
 ) {
-  __do_wait_value_p2p(signal, seq_no);
+  __do_stream_wait_value_p2p(signal, seq_no);
 }
 
 muillm_comm_error_t __mui_stream_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
-  __muillm_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
+  __muillm_stream_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
   return MUILLM_COMM_SUCCESS;
 }
 
