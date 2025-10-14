@@ -58,6 +58,16 @@ muillm_error_t muillm_detect_gpu_properties(
 
 #include <cstring>
 
+#define HIP_CHECK(rank, call) \
+    do { \
+        hipError_t err = call; \
+        if (err != hipSuccess) { \
+            std::cerr << "Rank " << rank << " HIP error at " << __FILE__ << ":" << __LINE__ \
+                      << " - " << hipGetErrorString(err) << std::endl; \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
+
 muillm_error_t muillm_detect_gpu_properties(
     int device,
     muillm_gpu_info_t* gpu_info
@@ -532,7 +542,7 @@ typedef struct muillm_comm_p2p_counter_set {
   uint32_t* local_count_cache;
 } muillm_comm_p2p_counter_set_t;
 
-typedef struct muillm_comm_p2p: muillm_comm {
+typedef struct muillm_comm_p2p_stream_context {
 
   // reduction buffer sets
   muillm_comm_p2p_buffer_set_t* first_buffers;
@@ -555,8 +565,22 @@ typedef struct muillm_comm_p2p: muillm_comm {
 
   // indicator whether we can skip the cache flush event
   bool cant_skip_cache_flush_event;
+} muillm_comm_p2p_stream_context_t;
+
+#define MUILLM_COMM_P2P_NUM_STREAM_CONTEXTS 2
+
+typedef struct muillm_comm_p2p: muillm_comm {
+  muillm_comm_p2p_stream_context_t* stream_contexts[MUILLM_COMM_P2P_NUM_STREAM_CONTEXTS];
+
   muillm_gpu_info_t* gpu_info;
 } muillm_comm_p2p_t;
+
+muillm_comm_error_t muillm_comm_p2p_init_stream_context(
+    muillm_comm_p2p_t* comm,
+    bool cant_skip_cache_flush_event,
+    muillm_comm_p2p_stream_context_t** ctx_ptr,
+    hipStream_t stream
+);
 
 muillm_comm_error_t muillm_comm_p2p_init_comm(
     int world_size,
@@ -592,10 +616,11 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
 
 static muillm_comm_error_t __mui_gpu_barrier(
   muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_stream_context_t* ctx,
   hipStream_t stream
 );
 
-#define MUILLM_COMM_INITIAL_BUFFER_CAPACITY (256 * 1024 * 1024) // 256MiB
+#define MUILLM_COMM_INITIAL_BUFFER_CAPACITY (128 * 1024 * 1024) // 128MiB
 
 static muillm_comm_error_t __free_buffer_set(
   muillm_comm_p2p_t* comm,
@@ -845,8 +870,25 @@ static muillm_comm_error_t __ensure_buffer_set_capacity(
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t muillm_comm_p2p_get_stream_context(
+  muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_stream_context_t** ctx_ptr
+) {
+  muillm_comm_p2p_stream_context_t* first_context = comm->stream_contexts[0];
+  *ctx_ptr = first_context;
+
+  // rotate the contexts
+  for (int i = 0; i < MUILLM_COMM_P2P_NUM_STREAM_CONTEXTS - 1; i++) {
+    comm->stream_contexts[i] = comm->stream_contexts[i + 1];
+  }
+  comm->stream_contexts[MUILLM_COMM_P2P_NUM_STREAM_CONTEXTS - 1] = first_context;
+
+  return MUILLM_COMM_SUCCESS;
+}
+
 muillm_comm_error_t muillm_comm_p2p_get_buffer_set(
   muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_stream_context_t* ctx,
   size_t capacity,
   muillm_comm_p2p_buffer_set_t** buffer_set,
   hipStream_t stream
@@ -854,48 +896,51 @@ muillm_comm_error_t muillm_comm_p2p_get_buffer_set(
   
   muillm_comm_error_t muillm_error;
 
-  if ((muillm_error = __ensure_buffer_set_capacity(comm, comm->first_buffers, capacity, stream)) != MUILLM_COMM_SUCCESS) {
+  if ((muillm_error = __ensure_buffer_set_capacity(comm, ctx->first_buffers, capacity, stream)) != MUILLM_COMM_SUCCESS) {
     return muillm_error;
   }
 
   // always return the current first buffer set
-  *buffer_set = comm->first_buffers;
+  *buffer_set = ctx->first_buffers;
 
   // swap buffer sets for next time
-  muillm_comm_p2p_buffer_set_t* tmp = comm->first_buffers;
-  comm->first_buffers = comm->second_buffers;
-  comm->second_buffers = tmp;
+  muillm_comm_p2p_buffer_set_t* tmp = ctx->first_buffers;
+  ctx->first_buffers = ctx->second_buffers;
+  ctx->second_buffers = tmp;
 
   return MUILLM_COMM_SUCCESS;
 }
 
 muillm_comm_error_t muillm_comm_p2p_get_buffer_set(
   muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_stream_context_t* ctx,
   size_t count,
   muillm_comm_datatype_t datatype,
   muillm_comm_p2p_buffer_set_t** buffer_set,
   hipStream_t stream
 ) {
   size_t size = __comm_size(datatype, count);
-  return muillm_comm_p2p_get_buffer_set(comm, size, buffer_set, stream);
+  return muillm_comm_p2p_get_buffer_set(comm, ctx, size, buffer_set, stream);
 }
 
 muillm_comm_error_t muillm_comm_p2p_get_counter_set(
   muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_stream_context_t* ctx,
   muillm_comm_p2p_counter_set_t** counter_set
 ) {
   
   muillm_comm_error_t muillm_error;
 
+
   // always return the current first buffer set
-  *counter_set = comm->first_counters;
+  *counter_set = ctx->first_counters;
 
   // swap buffer sets for next time
-  muillm_comm_p2p_counter_set_t* tmp = comm->first_counters;
-  comm->first_counters = comm->second_counters;
-  comm->second_counters = comm->third_counters;
-  comm->third_counters = comm->fourth_counters;
-  comm->fourth_counters = tmp;
+  muillm_comm_p2p_counter_set_t* tmp = ctx->first_counters;
+  ctx->first_counters = ctx->second_counters;
+  ctx->second_counters = ctx->third_counters;
+  ctx->third_counters = ctx->fourth_counters;
+  ctx->fourth_counters = tmp;
 
   return MUILLM_COMM_SUCCESS;
 }
@@ -903,13 +948,14 @@ muillm_comm_error_t muillm_comm_p2p_get_counter_set(
 
 muillm_comm_error_t muillm_comm_p2p_get_next_counter_set(
   muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_stream_context_t* ctx,
   muillm_comm_p2p_counter_set_t** counter_set
 ) {
   
   muillm_comm_error_t muillm_error;
 
   // always return the current first buffer set
-  *counter_set = comm->second_counters;
+  *counter_set = ctx->second_counters;
 
   return MUILLM_COMM_SUCCESS;
 }
@@ -977,6 +1023,75 @@ static muillm_comm_error_t __init_p2p_recv(
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t muillm_comm_p2p_init_stream_context(
+    muillm_comm_p2p_t* comm,
+    bool cant_skip_cache_flush_event,
+    muillm_comm_p2p_stream_context_t** ctx_ptr,
+    hipStream_t stream
+) {
+  muillm_comm_error_t muillm_error;
+
+  // create the ctx object
+  muillm_comm_p2p_stream_context_t* ctx = new muillm_comm_p2p_stream_context_t;
+
+  ctx->signal_host = nullptr;
+  ctx->signal = nullptr;
+  ctx->signal_seq_no = 0;
+
+  // by default, do not skip the cache flush
+  // but MI300 and successors don't need it apparently
+  ctx->cant_skip_cache_flush_event = cant_skip_cache_flush_event;
+
+  // allocate cache flush event
+  if (hipEventCreateWithFlags(&ctx->cache_flush_event, hipEventDisableTiming | hipEventReleaseToSystem) != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // allocate signal memory
+  __allocate_locked_shared_cpu_mem(
+    comm,
+    sizeof(uint64_t), // alloc 8 bytese even though we use only 4
+    (void**) &ctx->signal_host,
+    (void**) &ctx->signal
+  );
+
+  if (ctx->signal_host == nullptr || ctx->signal == nullptr) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+  // initialize to 0
+  if (hipMemset(ctx->signal, 0, sizeof(uint64_t)) != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // initialize buffer sets
+  if ((muillm_error = __init_buffer_set(comm, &ctx->first_buffers, stream)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+
+  if ((muillm_error = __init_buffer_set(comm, &ctx->second_buffers, stream)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+
+  // initialize counter sets
+  if ((muillm_error = __allocate_counter_set(comm, &ctx->first_counters)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+  if ((muillm_error = __allocate_counter_set(comm, &ctx->second_counters)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+  if ((muillm_error = __allocate_counter_set(comm, &ctx->third_counters)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+  if ((muillm_error = __allocate_counter_set(comm, &ctx->fourth_counters)) != MUILLM_COMM_SUCCESS) {
+    return muillm_error;
+  }
+
+  // return the comm object
+  *ctx_ptr = ctx;
+
+  return MUILLM_COMM_SUCCESS;
+}
+
 muillm_comm_error_t muillm_comm_p2p_init_comm(
   int world_size,
   int local_size,
@@ -1004,10 +1119,6 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   comm->local_size = local_size;
   comm->rank = rank;
   comm->local_rank = local_rank;
-
-  comm->signal_host = nullptr;
-  comm->signal = nullptr;
-  comm->signal_seq_no = 0;
 
   comm->process_group = local_socket->process_group;
 
@@ -1039,50 +1150,19 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
 
   // by default, do not skip the cache flush
   // but MI300 and successors don't need it apparently
-  comm->cant_skip_cache_flush_event = comm->gpu_info->arch < MUILLM_GPU_ARCH_MI300;
+  bool cant_skip_cache_flush_event = comm->gpu_info->arch < MUILLM_GPU_ARCH_MI300;
 
-  // allocate cache flush event
-  if (hipEventCreateWithFlags(&comm->cache_flush_event, hipEventDisableTiming | hipEventReleaseToSystem) != hipSuccess) {
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
-
-  // allocate signal memory
-  __allocate_locked_shared_cpu_mem(
-    comm,
-    sizeof(uint64_t), // alloc 8 bytese even though we use only 4
-    (void**) &comm->signal_host,
-    (void**) &comm->signal
-  );
-
-  if (comm->signal_host == nullptr || comm->signal == nullptr) {
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
-  // initialize to 0
-  if (hipMemset(comm->signal, 0, sizeof(uint64_t)) != hipSuccess) {
-    return MUILLM_COMM_UNKNOWN_ERROR;
-  }
-
-  // initialize buffer sets
-  if ((muillm_error = __init_buffer_set(comm, &comm->first_buffers, stream)) != MUILLM_COMM_SUCCESS) {
-    return muillm_error;
-  }
-
-  if ((muillm_error = __init_buffer_set(comm, &comm->second_buffers, stream)) != MUILLM_COMM_SUCCESS) {
-    return muillm_error;
-  }
-
-  // initialize counter sets
-  if ((muillm_error = __allocate_counter_set(comm, &comm->first_counters)) != MUILLM_COMM_SUCCESS) {
-    return muillm_error;
-  }
-  if ((muillm_error = __allocate_counter_set(comm, &comm->second_counters)) != MUILLM_COMM_SUCCESS) {
-    return muillm_error;
-  }
-  if ((muillm_error = __allocate_counter_set(comm, &comm->third_counters)) != MUILLM_COMM_SUCCESS) {
-    return muillm_error;
-  }
-  if ((muillm_error = __allocate_counter_set(comm, &comm->fourth_counters)) != MUILLM_COMM_SUCCESS) {
-    return muillm_error;
+  // allocate the stream contexts
+  for (int i = 0; i < MUILLM_COMM_P2P_NUM_STREAM_CONTEXTS; i++) {
+    comm->stream_contexts[i] = nullptr;
+    if ((muillm_error = muillm_comm_p2p_init_stream_context(
+          comm,
+          cant_skip_cache_flush_event,
+          &comm->stream_contexts[i],
+          stream
+        )) != MUILLM_COMM_SUCCESS) {
+      return muillm_error;
+    }
   }
 
   // set the device
@@ -1105,6 +1185,72 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   return MUILLM_COMM_SUCCESS;
 }
 
+muillm_comm_error_t muillm_comm_p2p_destroy_stream_context(
+    muillm_comm_p2p_t* comm,
+    muillm_comm_p2p_stream_context_t* ctx
+) {
+  int local_size = comm->local_size;
+  int local_rank = comm->local_rank;
+
+  muillm_comm_error_t error;
+
+  // free buffer sets
+  if ((error = __free_buffer_set(comm, ctx->first_buffers, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free first buffer set"<<std::endl;
+    return error;
+  }
+  delete ctx->first_buffers;
+
+  if ((error = __free_buffer_set(comm, ctx->second_buffers, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free second buffer set"<<std::endl;
+    return error;
+  }
+  delete ctx->second_buffers;
+
+  // free counter sets
+  if ((error = __free_counter_set(comm, ctx->first_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free first counter set"<<std::endl;
+    return error;
+  }
+  delete ctx->first_counters;
+  if ((error = __free_counter_set(comm, ctx->second_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free second counter set"<<std::endl;
+    return error;
+  }
+  delete ctx->second_counters;
+  if ((error = __free_counter_set(comm, ctx->third_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free third counter set"<<std::endl;
+    return error;
+  }
+  delete ctx->third_counters;
+  if ((error = __free_counter_set(comm, ctx->fourth_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to free fourth counter set"<<std::endl;
+    return error;
+  }
+  delete ctx->fourth_counters;
+
+  // free signal memory
+  if (ctx->signal_host != nullptr) {
+    __deallocate_locked_shared_cpu_mem(
+      comm,
+      ctx->signal_host
+    );
+    ctx->signal_host = nullptr;
+    ctx->signal = nullptr;
+  }
+
+  // destroy cache flush event
+  if (hipEventDestroy(ctx->cache_flush_event) != hipSuccess) {
+    std::cout<<"rank "<<local_rank<<" failed to destroy cache flush event"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // delete the ctx object
+  delete ctx;
+
+  return MUILLM_COMM_SUCCESS;
+}
+
 muillm_comm_error_t muillm_comm_p2p_destroy_comm(
     muillm_comm_p2p_t* comm
 ) {
@@ -1112,6 +1258,12 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
   int local_rank = comm->local_rank;
 
   muillm_comm_error_t error;
+
+  muillm_comm_p2p_stream_context_t* ctx;
+  if ((error = muillm_comm_p2p_get_stream_context(comm, &ctx)) != MUILLM_COMM_SUCCESS) {
+    std::cout<<"rank "<<local_rank<<" failed to get stream context"<<std::endl;
+    return error;
+  }
 
   // we need to synchronize the ranks and block the  CPU so that we can deallocate
   // the previous receive buffers
@@ -1121,7 +1273,7 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
   }
 
   // gpu barrier
-  if ((error = __mui_gpu_barrier(comm, /*stream*/ 0)) != MUILLM_COMM_SUCCESS) {
+  if ((error = __mui_gpu_barrier(comm, ctx, /*stream*/ 0)) != MUILLM_COMM_SUCCESS) {
     std::cout<<"rank "<<local_rank<<" failed to do gpu barrier"<<std::endl;
     return error;
   }
@@ -1137,55 +1289,15 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
     return error;
   }
 
-  // free buffer sets
-  if ((error = __free_buffer_set(comm, comm->first_buffers, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
-    std::cout<<"rank "<<local_rank<<" failed to free first buffer set"<<std::endl;
-    return error;
-  }
-  delete comm->first_buffers;
-
-  if ((error = __free_buffer_set(comm, comm->second_buffers, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
-    std::cout<<"rank "<<local_rank<<" failed to free second buffer set"<<std::endl;
-    return error;
-  }
-  delete comm->second_buffers;
-
-  // free counter sets
-  if ((error = __free_counter_set(comm, comm->first_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
-    std::cout<<"rank "<<local_rank<<" failed to free first counter set"<<std::endl;
-    return error;
-  }
-  delete comm->first_counters;
-  if ((error = __free_counter_set(comm, comm->second_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
-    std::cout<<"rank "<<local_rank<<" failed to free second counter set"<<std::endl;
-    return error;
-  }
-  delete comm->second_counters;
-  if ((error = __free_counter_set(comm, comm->third_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
-    std::cout<<"rank "<<local_rank<<" failed to free third counter set"<<std::endl;
-    return error;
-  }
-  delete comm->third_counters;
-  if ((error = __free_counter_set(comm, comm->fourth_counters, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
-    std::cout<<"rank "<<local_rank<<" failed to free fourth counter set"<<std::endl;
-    return error;
-  }
-  delete comm->fourth_counters;
-
-  // free signal memory
-  if (comm->signal_host != nullptr) {
-    __deallocate_locked_shared_cpu_mem(
-      comm,
-      comm->signal_host
-    );
-    comm->signal_host = nullptr;
-    comm->signal = nullptr;
-  }
-
-  // destroy cache flush event
-  if (hipEventDestroy(comm->cache_flush_event) != hipSuccess) {
-    std::cout<<"rank "<<local_rank<<" failed to destroy cache flush event"<<std::endl;
-    return MUILLM_COMM_UNKNOWN_ERROR;
+  // destroy stream contexts
+  for (int i = 0; i < MUILLM_COMM_P2P_NUM_STREAM_CONTEXTS; i++) {
+    if (comm->stream_contexts[i] != nullptr) {
+      if ((error = muillm_comm_p2p_destroy_stream_context(comm, comm->stream_contexts[i])) != MUILLM_COMM_SUCCESS) {
+        std::cout<<"rank "<<local_rank<<" failed to destroy stream context "<<i<<std::endl;
+        return error;
+      }
+      comm->stream_contexts[i] = nullptr;
+    }
   }
 
   // close local socket
@@ -1210,22 +1322,22 @@ muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal)
 
 muillm_comm_error_t __mui_stream_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no);
 
-static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_t stream) {
+static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, muillm_comm_p2p_stream_context_t* ctx, hipStream_t stream) {
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
 
   hipError_t hip_error;
   muillm_comm_error_t muillm_error;
 
-  if (comm->signal != nullptr) {
-    comm->signal_seq_no += local_size;
-    uint64_t seq_no = comm->signal_seq_no;
+  if (ctx->signal != nullptr) {
+    ctx->signal_seq_no += local_size;
+    uint64_t seq_no = ctx->signal_seq_no;
 
     // GPU barrier: all GPUs wait on each other
-    if (comm->cant_skip_cache_flush_event) {
+    if (ctx->cant_skip_cache_flush_event) {
       // on MI100, we get a crash if not putting this event here
       // record an event to flush caches
-      if (hipEventRecord(comm->cache_flush_event, stream) != hipSuccess) {
+      if (hipEventRecord(ctx->cache_flush_event, stream) != hipSuccess) {
         std::cout<<"rank "<<local_rank<<" gpu barrier failed because hipEventRecord failed"<<std::endl;
         hipError_t err = hipGetLastError();
         const char* errStr = hipGetErrorString(err);
@@ -1235,7 +1347,7 @@ static muillm_comm_error_t __mui_gpu_barrier(muillm_comm_p2p_t* comm, hipStream_
     }
 
     // write the values
-    if ((muillm_error = __mui_stream_inc_wait_value(stream, comm->signal, seq_no)) != MUILLM_COMM_SUCCESS) {
+    if ((muillm_error = __mui_stream_inc_wait_value(stream, ctx->signal, seq_no)) != MUILLM_COMM_SUCCESS) {
       std::cout<<"rank "<<local_rank<<" gpu barrier failed because __mui_stream_inc_wait_value failed"<<std::endl;
       return muillm_error;
     }
@@ -1257,6 +1369,7 @@ muillm_comm_error_t __mui_stream_inc_wait_value_cache_val(
 
 static muillm_comm_error_t __mui_gpu_barrier_cache_val(
   muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_stream_context_t* ctx,
   hipStream_t stream,
   const uint32_t* __restrict__ uncached_val,
   uint32_t* __restrict__ cached_val
@@ -1267,15 +1380,15 @@ static muillm_comm_error_t __mui_gpu_barrier_cache_val(
   hipError_t hip_error;
   muillm_comm_error_t muillm_error;
 
-  if (comm->signal != nullptr) {
-    comm->signal_seq_no += local_size;
-    uint64_t seq_no = comm->signal_seq_no;
+  if (ctx->signal != nullptr) {
+    ctx->signal_seq_no += local_size;
+    uint64_t seq_no = ctx->signal_seq_no;
 
     // GPU barrier: all GPUs wait on each other
-    if (comm->cant_skip_cache_flush_event) {
+    if (ctx->cant_skip_cache_flush_event) {
       // on MI100, we get a crash if not putting this event here
       // record an event to flush caches
-      if (hipEventRecord(comm->cache_flush_event, stream) != hipSuccess) {
+      if (hipEventRecord(ctx->cache_flush_event, stream) != hipSuccess) {
         std::cout<<"rank "<<local_rank<<" caching gpu barrier failed because hipEventRecord failed"<<std::endl;
         hipError_t err = hipGetLastError();
         const char* errStr = hipGetErrorString(err);
@@ -1285,7 +1398,7 @@ static muillm_comm_error_t __mui_gpu_barrier_cache_val(
     }
 
     // write the values
-    if ((muillm_error = __mui_stream_inc_wait_value_cache_val(stream, comm->signal, seq_no, uncached_val, cached_val)) != MUILLM_COMM_SUCCESS) {
+    if ((muillm_error = __mui_stream_inc_wait_value_cache_val(stream, ctx->signal, seq_no, uncached_val, cached_val)) != MUILLM_COMM_SUCCESS) {
       std::cout<<"rank "<<local_rank<<" caching gpu barrier failed because __mui_stream_inc_wait_value failed"<<std::endl;
       return muillm_error;
     }
@@ -1451,20 +1564,19 @@ void all2all_dispatch_unpack_fp32(
 // expert_num_tokens: shape [num_local_experts]
 // expert_y: shape [num_local_experts, max_recv, hidden_dim]
 // expert_meta: shape [num_local_experts, max_recv, META_DIM] (expert_id, src_rank, src_token_id, topk_offset)
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
-  void* comms,
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch_on_stream(
+  muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_stream_context_t* ctx,
+  at::cuda::CUDAStream stream,
   torch::Tensor& x, // shape [num_tokens, hidden_dim]
   torch::Tensor& indices, // shape [num_tokens, experts_per_token]
   int num_local_experts,
   int max_recv
 ) {
-  muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms;
-
   CHECK_INPUT(x);
   CHECK_INPUT(indices);
 
   auto device = x.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
@@ -1494,6 +1606,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
     TORCH_CHECK(false, "datatype must be float16, bfloat16 or float32");
   }
 
+  // set the stream
+  at::cuda::setCurrentCUDAStream(stream);
+
   // TODO: an approach where we place the data in the buffers, sync GPUs, then read from the buffers
   // would probably be better due to less GPU syncs
 
@@ -1522,13 +1637,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   muillm_comm_p2p_counter_set_t* next_counter_set = nullptr;
 
   // we have to do this call before flipping the buffer sets with muillm_comm_p2p_get_buffer_set
-  if (muillm_comm_p2p_get_next_counter_set(comm, &next_counter_set) != MUILLM_COMM_SUCCESS) {
+  if (muillm_comm_p2p_get_next_counter_set(comm, ctx, &next_counter_set) != MUILLM_COMM_SUCCESS) {
     TORCH_CHECK(false, "an error happened when getting next counter set");
   }
 
   // get the current counter set
   muillm_comm_p2p_counter_set_t* current_counter_set = nullptr;
-  if (muillm_comm_p2p_get_counter_set(comm, &current_counter_set) != MUILLM_COMM_SUCCESS) {
+  if (muillm_comm_p2p_get_counter_set(comm, ctx, &current_counter_set) != MUILLM_COMM_SUCCESS) {
     TORCH_CHECK(false, "an error happened when getting current counter set");
   }
 
@@ -1536,7 +1651,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   muillm_comm_p2p_buffer_set_t* buffer_set = nullptr;
 
   // this call flips the buffer sets
-  if ((muillm_error = muillm_comm_p2p_get_buffer_set(comm, capacity, &buffer_set, stream)) != MUILLM_COMM_SUCCESS) {
+  if ((muillm_error = muillm_comm_p2p_get_buffer_set(comm, ctx, capacity, &buffer_set, stream)) != MUILLM_COMM_SUCCESS) {
     TORCH_CHECK(false, "an error happened when getting buffer set");
   }
 
@@ -1571,65 +1686,81 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   //
   int buff_meta_offset = aligned_size_data;
 
-  if (dtype == torch::kFloat32) {
-    // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
-    all2all_dispatch_pack_send_buffers_fp32(
-      stream,
-      (const float*)x.data_ptr(),
-      (const int32_t*)indices.data_ptr(),
-      (uint32_t*)send_offsets.data_ptr(),
-      (uint32_t*)expert_num_tokens.data_ptr(),
-      (float*)buffer_set->buffers[0], // send_buf0
-      (float*)buffer_set->buffers[1], // send_buf1
-      (float*)buffer_set->buffers[2], // send_buf2
-      (float*)buffer_set->buffers[3], // send_buf3
-      (float*)buffer_set->buffers[4], // send_buf4
-      (float*)buffer_set->buffers[5], // send_buf5
-      (float*)buffer_set->buffers[6], // send_buf6
-      (float*)buffer_set->buffers[7], // send_buf7
-      num_local_experts,
-      num_tokens,
-      num_experts_per_token,
-      hidden_dim,
-      buff_meta_offset,
-      local_size,
-      local_rank
-    );
-  } else if (dtype == torch::kFloat16) {
-    // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
-    all2all_dispatch_pack_send_buffers_fp16(
-      stream,
-      (const half*)x.data_ptr(),
-      (const int32_t*)indices.data_ptr(),
-      (uint32_t*)send_offsets.data_ptr(),
-      (uint32_t*)expert_num_tokens.data_ptr(),
-      (half*)buffer_set->buffers[0], // send_buf0
-      (half*)buffer_set->buffers[1], // send_buf1
-      (half*)buffer_set->buffers[2], // send_buf2
-      (half*)buffer_set->buffers[3], // send_buf3
-      (half*)buffer_set->buffers[4], // send_buf4
-      (half*)buffer_set->buffers[5], // send_buf5
-      (half*)buffer_set->buffers[6], // send_buf6
-      (half*)buffer_set->buffers[7], // send_buf7
-      num_local_experts,
-      num_tokens,
-      num_experts_per_token,
-      hidden_dim,
-      buff_meta_offset,
-      local_size,
-      local_rank
-    );
+  // print the pointers for debugging
+  std::cout<<"rank "<<local_rank<<" num_local_experts "<<num_local_experts<<" num_tokens "<<num_tokens<<" num_experts_per_token "<<num_experts_per_token<<" hidden_dim "<<hidden_dim<<" max_recv "<<max_recv<<" max_total_recv "<<max_total_recv<<" total_send "<<total_send<<std::endl;
+  std::cout<<"rank "<<local_rank<<" buffer pointers: ";
+  for (int i = 0; i < 8; i++) {
+    std::cout<<" "<<buffer_set->buffers[i];
+  }
+  std::cout<<std::endl;
+
+  if (num_tokens > 0) {
+    if (dtype == torch::kFloat32) {
+      // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
+      all2all_dispatch_pack_send_buffers_fp32(
+        stream,
+        (const float*)x.data_ptr(),
+        (const int32_t*)indices.data_ptr(),
+        (uint32_t*)send_offsets.data_ptr(),
+        (uint32_t*)expert_num_tokens.data_ptr(),
+        (float*)buffer_set->buffers[0], // send_buf0
+        (float*)buffer_set->buffers[1], // send_buf1
+        (float*)buffer_set->buffers[2], // send_buf2
+        (float*)buffer_set->buffers[3], // send_buf3
+        (float*)buffer_set->buffers[4], // send_buf4
+        (float*)buffer_set->buffers[5], // send_buf5
+        (float*)buffer_set->buffers[6], // send_buf6
+        (float*)buffer_set->buffers[7], // send_buf7
+        num_local_experts,
+        num_tokens,
+        num_experts_per_token,
+        hidden_dim,
+        buff_meta_offset,
+        local_size,
+        local_rank
+      );
+    } else if (dtype == torch::kFloat16) {
+      // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
+      all2all_dispatch_pack_send_buffers_fp16(
+        stream,
+        (const half*)x.data_ptr(),
+        (const int32_t*)indices.data_ptr(),
+        (uint32_t*)send_offsets.data_ptr(),
+        (uint32_t*)expert_num_tokens.data_ptr(),
+        (half*)buffer_set->buffers[0], // send_buf0
+        (half*)buffer_set->buffers[1], // send_buf1
+        (half*)buffer_set->buffers[2], // send_buf2
+        (half*)buffer_set->buffers[3], // send_buf3
+        (half*)buffer_set->buffers[4], // send_buf4
+        (half*)buffer_set->buffers[5], // send_buf5
+        (half*)buffer_set->buffers[6], // send_buf6
+        (half*)buffer_set->buffers[7], // send_buf7
+        num_local_experts,
+        num_tokens,
+        num_experts_per_token,
+        hidden_dim,
+        buff_meta_offset,
+        local_size,
+        local_rank
+      );
+    } else {
+      TORCH_CHECK(false, "unsupported data type");
+    }
   } else {
-    TORCH_CHECK(false, "unsupported data type");
+    // zero tokens to process
+    // we still need to zero out expert_num_tokens
+    expert_num_tokens.zero_();
   }
 
+  HIP_CHECK(local_rank, hipGetLastError());
+  HIP_CHECK(local_rank, hipDeviceSynchronize());
 
   const uint32_t* uncached_val = &counters[local_rank]; // total_recv
   uint32_t* cached_val = current_counter_set->local_count_cache;
   //
   // We wait for all the GPUs to be done with sending data
   //
-  if ((muillm_error = __mui_gpu_barrier_cache_val(comm, stream, uncached_val, cached_val)) != MUILLM_COMM_SUCCESS) {
+  if ((muillm_error = __mui_gpu_barrier_cache_val(comm, ctx, stream, uncached_val, cached_val)) != MUILLM_COMM_SUCCESS) {
     TORCH_CHECK(false, "an error happened when doing dispatch barrier 2");
   }
 
@@ -1694,6 +1825,39 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
 }
 
 
+// dispatch
+// outputs:
+// expert_num_tokens: shape [num_local_experts]
+// expert_y: shape [num_local_experts, max_recv, hidden_dim]
+// expert_meta: shape [num_local_experts, max_recv, META_DIM] (expert_id, src_rank, src_token_id, topk_offset)
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
+  void* comms,
+  torch::Tensor& x, // shape [num_tokens, hidden_dim]
+  torch::Tensor& indices, // shape [num_tokens, experts_per_token]
+  int num_local_experts,
+  int max_recv
+) {
+  muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms;
+  muillm_comm_p2p_stream_context_t* ctx = nullptr;
+
+  if (muillm_comm_p2p_get_stream_context(comm, &ctx) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when getting stream context");
+  }
+
+  auto device = x.device();
+  at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  return all2all_comm_dispatch_on_stream(
+    comm,
+    ctx,
+    stream,
+    x,
+    indices,
+    num_local_experts,
+    max_recv
+  );
+}
+
 void all2all_compute_fp32(
   hipStream_t stream,
   const int32_t* __restrict__ expert_num_tokens,
@@ -1717,7 +1881,8 @@ void all2all_compute_fp16(
 );
 
 // output: expert_y shape [num_local_experts, max_recv, hidden_dim]
-at::Tensor all2all_compute(
+at::Tensor all2all_compute_on_stream(
+  at::cuda::CUDAStream stream,
   torch::Tensor& expert_num_tokens, // shape [num_local_experts]
   torch::Tensor& expert_x, // shape [num_local_experts, max_recv, hidden_dim]
   int rank
@@ -1725,13 +1890,15 @@ at::Tensor all2all_compute(
   CHECK_INPUT(expert_x);
 
   auto device = expert_x.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   int num_local_experts = expert_x.size(0);
   int max_recv = expert_x.size(1);
   int hidden_dim = expert_x.size(2);
 
   auto dtype = expert_x.dtype();
+
+  // set the stream
+  at::cuda::setCurrentCUDAStream(stream);
 
   auto expert_y_options = at::TensorOptions()
                             .dtype(dtype)
@@ -1768,6 +1935,22 @@ at::Tensor all2all_compute(
   }
 
   return expert_y;
+}
+
+at::Tensor all2all_compute(
+  torch::Tensor& expert_num_tokens, // shape [num_local_experts]
+  torch::Tensor& expert_x, // shape [num_local_experts, max_recv, hidden_dim]
+  int rank
+) {
+  auto device = expert_x.device();
+  at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  return all2all_compute_on_stream(
+    stream,
+    expert_num_tokens,
+    expert_x,
+    rank
+  );
 }
 
 void all2all_combine_pack_send_buffers_fp16(
@@ -1831,15 +2014,16 @@ void all2all_combine_unpack_fp16(
 );
 
 // combine
-torch::Tensor all2all_comm_combine(
-  void* comms,
+torch::Tensor all2all_comm_combine_on_stream(
+  muillm_comm_p2p_t* comm,
+  muillm_comm_p2p_stream_context_t* ctx,
+  at::cuda::CUDAStream stream,
   torch::Tensor& weights, // shape [num_tokens, experts_per_token]
   torch::Tensor& expert_meta, // shape [num_local_experts, max_recv, meta_dim] (expert_id, src_rank, src_token_id, topk_offset)
   torch::Tensor& expert_y, // shape [num_local_experts, max_recv, hidden_dim]
   torch::Tensor& expert_num_tokens, // shape [num_local_experts]
   float s = 1.0f
 ) {
-  muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms;
 
   CHECK_INPUT(weights);
   CHECK_INPUT(expert_meta);
@@ -1847,7 +2031,6 @@ torch::Tensor all2all_comm_combine(
   CHECK_INPUT(expert_num_tokens);
 
   auto device = expert_meta.device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index());
 
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
@@ -1890,6 +2073,9 @@ torch::Tensor all2all_comm_combine(
     TORCH_CHECK(false, "datatype must be float16, bfloat16 or float32");
   }
 
+  // set the stream
+  at::cuda::setCurrentCUDAStream(stream);
+
   // TODO: an approach where we place the data in the buffers, sync GPUs, then read from the buffers
   // would probably be better due to less GPU syncs
 
@@ -1918,7 +2104,7 @@ torch::Tensor all2all_comm_combine(
   muillm_comm_p2p_buffer_set_t* buffer_set = nullptr;
 
   // this call flips the buffer sets
-  if ((muillm_error = muillm_comm_p2p_get_buffer_set(comm, capacity, &buffer_set, stream)) != MUILLM_COMM_SUCCESS) {
+  if ((muillm_error = muillm_comm_p2p_get_buffer_set(comm, ctx, capacity, &buffer_set, stream)) != MUILLM_COMM_SUCCESS) {
     TORCH_CHECK(false, "an error happened when getting buffer set");
   }
 
@@ -1975,7 +2161,7 @@ torch::Tensor all2all_comm_combine(
   //
   // We wait for all the GPUs to be done with sending data
   //
-  if ((muillm_error = __mui_gpu_barrier(comm, stream)) != MUILLM_COMM_SUCCESS) {
+  if ((muillm_error = __mui_gpu_barrier(comm, ctx, stream)) != MUILLM_COMM_SUCCESS) {
     TORCH_CHECK(false, "an error happened when doing combine barrier 2");
   }
 
@@ -2019,6 +2205,36 @@ torch::Tensor all2all_comm_combine(
   return out_tokens;
 }
 
+torch::Tensor all2all_comm_combine(
+  void* comms,
+  torch::Tensor& weights, // shape [num_tokens, experts_per_token]
+  torch::Tensor& expert_meta, // shape [num_local_experts, max_recv, meta_dim] (expert_id, src_rank, src_token_id, topk_offset)
+  torch::Tensor& expert_y, // shape [num_local_experts, max_recv, hidden_dim]
+  torch::Tensor& expert_num_tokens, // shape [num_local_experts]
+  float s = 1.0f
+) {
+  muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms;
+  muillm_comm_p2p_stream_context_t* ctx = nullptr;
+
+  if (muillm_comm_p2p_get_stream_context(comm, &ctx) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when getting stream context");
+  }
+
+  auto device = expert_meta.device();
+  at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  return all2all_comm_combine_on_stream(
+    comm,
+    ctx,
+    stream,
+    weights,
+    expert_meta,
+    expert_y,
+    expert_num_tokens,
+    s
+  );
+}
+
 torch::Tensor all2all_comm_single_stream(
   void* comms_,
   torch::Tensor& x, // shape [num_tokens, hidden_dim]
@@ -2029,12 +2245,22 @@ torch::Tensor all2all_comm_single_stream(
 ) {
 
   muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms_;
+  muillm_comm_p2p_stream_context_t* ctx = nullptr;
+
+  if (muillm_comm_p2p_get_stream_context(comm, &ctx) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when getting stream context");
+  }
+
+  auto device = x.device();
+  at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(device.index());
 
   int local_rank = comm->local_rank;
 
   // First dispatch
-  auto dispatch_outputs = all2all_comm_dispatch(
-    comms_,
+  auto dispatch_outputs = all2all_comm_dispatch_on_stream(
+    comm,
+    ctx,
+    stream,
     x,
     indices,
     num_local_experts,
@@ -2052,7 +2278,8 @@ torch::Tensor all2all_comm_single_stream(
 
   if (!fuse_compute_in_combine) {
     // Then compute
-    expert_x = all2all_compute(
+    expert_x = all2all_compute_on_stream(
+      stream,
       expert_num_tokens,
       expert_x,
       comm->rank
@@ -2061,8 +2288,10 @@ torch::Tensor all2all_comm_single_stream(
 
   // Finally combine
   float s = fuse_compute_in_combine ? (1.0f + local_rank) : 1.0f;
-  return all2all_comm_combine(
-    comms_,
+  return all2all_comm_combine_on_stream(
+    comm,
+    ctx,
+    stream,
     weights,
     expert_meta,
     expert_x,
@@ -2082,6 +2311,25 @@ torch::Tensor all2all_comm_multi_stream(
 
   muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms_;
 
+  std::cout<<"rank "<<comm->rank<<" all2all multi stream start"<<std::endl;
+
+  muillm_comm_p2p_stream_context_t* first_ctx = nullptr;
+  muillm_comm_p2p_stream_context_t* second_ctx = nullptr;
+
+  if (muillm_comm_p2p_get_stream_context(comm, &first_ctx) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when getting stream context");
+  }
+
+  if (muillm_comm_p2p_get_stream_context(comm, &second_ctx) != MUILLM_COMM_SUCCESS) {
+    TORCH_CHECK(false, "an error happened when getting stream context");
+  }
+  
+  // todo: use different streams
+  auto device = x.device();
+  at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(device.index());
+  // TODO: use different streams
+  at::cuda::CUDAStream first_stream = stream;
+  at::cuda::CUDAStream second_stream = stream;
 
   int local_rank = comm->local_rank;
 
@@ -2102,16 +2350,22 @@ torch::Tensor all2all_comm_multi_stream(
   auto weights2 = weights.narrow(0, first_half_num_tokens, second_half_num_tokens);
 
   // First dispatch
-  auto dispatch_outputs1 = all2all_comm_dispatch(
-    comms_,
+  std::cout<<"rank "<<comm->rank<<" first dispatch"<<std::endl;
+  auto dispatch_outputs1 = all2all_comm_dispatch_on_stream(
+    comm,
+    first_ctx,
+    first_stream,
     x1,
     indices1,
     num_local_experts,
     half_max_recv
   );
 
-  auto dispatch_outputs2 = all2all_comm_dispatch(
-    comms_,
+  std::cout<<"rank "<<comm->rank<<" second dispatch"<<std::endl;
+  auto dispatch_outputs2 = all2all_comm_dispatch_on_stream(
+    comm,
+    second_ctx,
+    second_stream,
     x2,
     indices2,
     num_local_experts,
@@ -2133,13 +2387,17 @@ torch::Tensor all2all_comm_multi_stream(
 
   if (!fuse_compute_in_combine) {
     // Then compute
-    expert_x1 = all2all_compute(
+    std::cout<<"rank "<<comm->rank<<" first compute"<<std::endl;
+    expert_x1 = all2all_compute_on_stream(
+      first_stream,
       expert_num_tokens1,
       expert_x1,
       comm->rank
     );
 
-    expert_x2 = all2all_compute(
+  std::cout<<"rank "<<comm->rank<<" second compute"<<std::endl;
+    expert_x2 = all2all_compute_on_stream(
+      second_stream,
       expert_num_tokens2,
       expert_x2,
       comm->rank
@@ -2148,8 +2406,11 @@ torch::Tensor all2all_comm_multi_stream(
 
   // Finally combine
   float s = fuse_compute_in_combine ? (1.0f + local_rank) : 1.0f;
-  torch::Tensor out1 = all2all_comm_combine(
-    comms_,
+  std::cout<<"rank "<<comm->rank<<" first combine"<<std::endl;
+  torch::Tensor out1 = all2all_comm_combine_on_stream(
+    comm,
+    first_ctx,
+    first_stream,
     weights1,
     expert_meta1,
     expert_x1,
@@ -2157,14 +2418,22 @@ torch::Tensor all2all_comm_multi_stream(
     s
   );
 
-  torch::Tensor out2 = all2all_comm_combine(
-    comms_,
+  std::cout<<"rank "<<comm->rank<<" second combine"<<std::endl;
+  torch::Tensor out2 = all2all_comm_combine_on_stream(
+    comm,
+    second_ctx,
+    second_stream,
     weights2,
     expert_meta2,
     expert_x2,
     expert_num_tokens2,
     s
   );
+
+  std::cout<<"rank "<<comm->rank<<" all2all multi stream done"<<std::endl;
+  // TODO: sync streams
+
+  at::cuda::setCurrentCUDAStream(stream);
 
   // Concatenate the outputs
   return torch::cat({out1, out2}, 0);
@@ -2184,7 +2453,7 @@ torch::Tensor all2all_comm(
   int experts_per_token = indices.size(1);
   int tot_tokens = num_tokens * experts_per_token;
 
-  if (num_tokens < ALL2ALL_COMM_MULTI_STREAM_THRESHOLD) {
+  if (false) { //(num_tokens < ALL2ALL_COMM_MULTI_STREAM_THRESHOLD) {
     return all2all_comm_single_stream(
       comms_,
       x,
