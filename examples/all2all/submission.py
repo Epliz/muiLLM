@@ -3068,7 +3068,7 @@ def custom_kernel(data: input_t) -> output_t:
 
     # Everything combined into a single call:
     ata_comms = ata.comms
-    return ata_comms.comm_kernels.all2all_comm(
+    y = ata_comms.comm_kernels.all2all_comm(
         ata_comms.comms,
         rank_data.x,
         rank_data.indices,
@@ -3076,3 +3076,8 @@ def custom_kernel(data: input_t) -> output_t:
         ata.num_local_experts,
         ata.max_recv,
     )
+
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    return y
