@@ -543,6 +543,7 @@ typedef struct muillm_comm_p2p_counter_set {
 } muillm_comm_p2p_counter_set_t;
 
 typedef struct muillm_comm_p2p_stream_context {
+  hipStream_t stream;
 
   // reduction buffer sets
   muillm_comm_p2p_buffer_set_t* first_buffers;
@@ -1034,6 +1035,11 @@ muillm_comm_error_t muillm_comm_p2p_init_stream_context(
   // create the ctx object
   muillm_comm_p2p_stream_context_t* ctx = new muillm_comm_p2p_stream_context_t;
 
+  // create an additional non blocking stream
+  if (hipStreamCreateWithFlags(&ctx->stream, hipStreamNonBlocking) != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
   ctx->signal_host = nullptr;
   ctx->signal = nullptr;
   ctx->signal_seq_no = 0;
@@ -1193,6 +1199,16 @@ muillm_comm_error_t muillm_comm_p2p_destroy_stream_context(
   int local_rank = comm->local_rank;
 
   muillm_comm_error_t error;
+
+  // destroy the stream afters synchronizing
+  if (hipStreamSynchronize(ctx->stream) != hipSuccess) {
+    std::cout<<"rank "<<local_rank<<" failed to synchronize stream"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+  if (hipStreamDestroy(ctx->stream) != hipSuccess) {
+    std::cout<<"rank "<<local_rank<<" failed to destroy stream"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
 
   // free buffer sets
   if ((error = __free_buffer_set(comm, ctx->first_buffers, /*sync*/ false)) != MUILLM_COMM_SUCCESS) {
@@ -2343,9 +2359,9 @@ torch::Tensor all2all_comm_multi_stream(
   // todo: use different streams
   auto device = x.device();
   at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(device.index());
-  // TODO: use different streams
+
   at::cuda::CUDAStream first_stream = stream;
-  at::cuda::CUDAStream second_stream = at::cuda::getStreamFromPool(false, device.index());
+  at::cuda::CUDAStream second_stream = at::cuda::getStreamFromExternal(second_ctx->stream, device.index());
 
   int local_rank = comm->local_rank;
 
