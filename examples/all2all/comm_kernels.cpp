@@ -1380,29 +1380,6 @@ void all2all_zero_counters(
   int local_size
 );
 
-void all2all_dispatch_pack_send_buffers_fp32(
-    hipStream_t stream,
-    const float* __restrict__ x,
-    const int32_t* __restrict__ indices,
-    uint32_t* __restrict__ send_offsets,
-    uint32_t* __restrict__ expert_num_tokens,
-    float* __restrict__ send_buf0, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf1, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf2, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf3, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf4, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf5, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf6, // shape [total_send, hidden_dim]
-    float* __restrict__ send_buf7, // shape [total_send, hidden_dim]
-    int num_local_experts,
-    int num_tokens,
-    int num_experts_per_token,
-    int hidden_dim,
-    int buff_meta_offset,
-    int local_size,
-    int local_rank
-);
-
 void all2all_dispatch_pack_send_buffers_fp16(
     hipStream_t stream,
     const half* __restrict__ x,
@@ -1591,31 +1568,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   int buff_meta_offset = aligned_size_data;
 
   if (num_tokens > 0) {
-    if (dtype == torch::kFloat32) {
-      // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
-      all2all_dispatch_pack_send_buffers_fp32(
-        stream,
-        (const float*)x.data_ptr(),
-        (const int32_t*)indices.data_ptr(),
-        (uint32_t*)send_offsets.data_ptr(),
-        (uint32_t*)expert_num_tokens.data_ptr(),
-        (float*)buffer_set->buffers[0], // send_buf0
-        (float*)buffer_set->buffers[1], // send_buf1
-        (float*)buffer_set->buffers[2], // send_buf2
-        (float*)buffer_set->buffers[3], // send_buf3
-        (float*)buffer_set->buffers[4], // send_buf4
-        (float*)buffer_set->buffers[5], // send_buf5
-        (float*)buffer_set->buffers[6], // send_buf6
-        (float*)buffer_set->buffers[7], // send_buf7
-        num_local_experts,
-        num_tokens,
-        num_experts_per_token,
-        hidden_dim,
-        buff_meta_offset,
-        local_size,
-        local_rank
-      );
-    } else if (dtype == torch::kFloat16) {
+    if (dtype == torch::kFloat16) {
       // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
       all2all_dispatch_pack_send_buffers_fp16(
         stream,
@@ -1681,21 +1634,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   void* recv_buf = buffer_set->buffers[local_rank];
   int32_t* recv_meta = (int32_t*) ((uint8_t*)recv_buf + buff_meta_offset);
 
-  if (dtype == at::kFloat) {
-    all2all_dispatch_unpack_fp32(
-      stream,
-      (const float*) recv_buf,
-      (const int32_t*) recv_meta,
-      (int32_t*) expert_num_tokens.data_ptr(),
-      (float*) expert_x.data_ptr(),
-      (int32_t*) expert_meta.data_ptr(),
-      cached_val,
-      hidden_dim,
-      max_recv,
-      local_expert_offset,
-      max_total_recv
-    );
-  } else if (dtype == at::kHalf) {
+  if (dtype == at::kHalf) {
     all2all_dispatch_unpack_fp16(
       stream,
       (const half*) recv_buf,
@@ -1716,18 +1655,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch(
   // return expert_num_tokens, expert_x, expert_meta
   return std::make_tuple(expert_num_tokens, expert_x, expert_meta);
 }
-
-
-void all2all_compute_fp32(
-  hipStream_t stream,
-  const int32_t* __restrict__ expert_num_tokens,
-  const float* __restrict__ expert_x,
-  float* __restrict__ expert_y,
-  int num_local_experts,
-  int max_recv,
-  int hidden_dim,
-  int rank
-);
 
 void all2all_compute_fp16(
   hipStream_t stream,
@@ -1765,18 +1692,7 @@ at::Tensor all2all_compute(
 
   auto expert_y = torch::empty({num_local_experts, max_recv, hidden_dim}, expert_y_options);
 
-  if (dtype == at::kFloat) {
-    all2all_compute_fp32(
-      stream,
-      (const int32_t*) expert_num_tokens.data_ptr(),
-      (const float*) expert_x.data_ptr(),
-      (float*) expert_y.data_ptr(),
-      num_local_experts,
-      max_recv,
-      hidden_dim,
-      rank
-    );
-  } else if (dtype == at::kHalf) {
+  if (dtype == at::kHalf) {
     all2all_compute_fp16(
       stream,
       (const int32_t*) expert_num_tokens.data_ptr(),
@@ -1812,36 +1728,6 @@ void all2all_combine_pack_send_buffers_fp16(
     int experts_per_token,
     int hidden_dim,
     float s
-);
-
-void all2all_combine_pack_send_buffers_fp32(
-    hipStream_t stream,
-    const int32_t* __restrict__ expert_num_tokens, // shape [num_local_experts]
-    const int32_t* __restrict__ expert_meta, // shape [num_local_experts, max_recv, META_DIM]
-    const float* __restrict__ expert_y, // shape [num_local_experts, max_recv, hidden_dim]
-    float* __restrict__ send_buf0, // shape [max_num_tokens, experts_per_token, hidden_dim]
-    float* __restrict__ send_buf1, // shape [max_num_tokens, experts_per_token, hidden_dim]
-    float* __restrict__ send_buf2, // shape [max_num_tokens, experts_per_token, hidden_dim]
-    float* __restrict__ send_buf3, // shape [max_num_tokens, experts_per_token, hidden_dim]
-    float* __restrict__ send_buf4, // shape [max_num_tokens, experts_per_token, hidden_dim]
-    float* __restrict__ send_buf5, // shape [max_num_tokens, experts_per_token, hidden_dim]
-    float* __restrict__ send_buf6, // shape [max_num_tokens, experts_per_token, hidden_dim]
-    float* __restrict__ send_buf7, // shape [max_num_tokens, experts_per_token, hidden_dim]
-    int num_local_experts,
-    int max_recv,
-    int experts_per_token,
-    int hidden_dim,
-    float s
-);
-
-void all2all_combine_unpack_fp32(
-    hipStream_t stream,
-    const float* __restrict__ recv_buf, // shape [num_tokens, experts_per_token, hidden_dim]
-    const float* __restrict__ weights, // shape [num_tokens, experts_per_token]
-    float* __restrict__ output, // shape [max_num_tokens, hidden_dim]
-    int hidden_dim,
-    int num_tokens,
-    int experts_per_token
 );
 
 void all2all_combine_unpack_fp16(
@@ -1971,27 +1857,6 @@ torch::Tensor all2all_comm_combine(
       hidden_dim,
       s
     );
-  } else if (dtype == torch::kFloat32) {
-    // buffers will be nullptr if local_size < 8, but it's ok to pass nullptr to the kernel
-    all2all_combine_pack_send_buffers_fp32(
-      stream,
-      (const int32_t*) expert_num_tokens.data_ptr(),
-      (const int32_t*) expert_meta.data_ptr(),
-      (const float*) expert_y.data_ptr(),
-      (float*) buffer_set->buffers[0],
-      (float*) buffer_set->buffers[1],
-      (float*) buffer_set->buffers[2],
-      (float*) buffer_set->buffers[3],
-      (float*) buffer_set->buffers[4],
-      (float*) buffer_set->buffers[5],
-      (float*) buffer_set->buffers[6],
-      (float*) buffer_set->buffers[7],
-      num_local_experts,
-      max_recv,
-      num_experts_per_token,
-      hidden_dim,
-      s
-    );
   } else {
     TORCH_CHECK(false, "datatype must be float16 for now");
   }
@@ -2016,17 +1881,7 @@ torch::Tensor all2all_comm_combine(
 
   void* recv_buf = buffer_set->buffers[local_rank];
 
-  if (dtype == at::kFloat) {
-    all2all_combine_unpack_fp32(
-      stream,
-      (const float*) recv_buf,
-      (const float*) weights.data_ptr(),
-      (float*) out_tokens.data_ptr(),
-      hidden_dim,
-      num_tokens,
-      num_experts_per_token
-    );
-  } else if (dtype == at::kHalf) {
+  if (dtype == at::kHalf) {
     all2all_combine_unpack_fp16(
       stream,
       (const half*) recv_buf,
