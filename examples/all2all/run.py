@@ -227,9 +227,9 @@ def init_process(rank, size, shape, run_type, fn, backend="nccl"):
     os.environ["RANK"] = str(rank)
     os.environ["LOCAL_RANK"] = str(rank)
 
-    # if rank == 0:
-    #     os.environ["HSA_TOOLS_LIB"] = "/opt/rocm/lib/librocm-debug-agent.so.2"
-    #     os.environ["HSA_ENABLE_DEBUG"] = "1"
+    if rank == 0:
+        os.environ["HSA_TOOLS_LIB"] = "/opt/rocm/lib/librocm-debug-agent.so.2"
+        os.environ["HSA_ENABLE_DEBUG"] = "1"
 
     local_size = torch.cuda.device_count()
     print(f"(rank {rank}) local_size = {local_size}")
