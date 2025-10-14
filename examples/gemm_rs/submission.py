@@ -1753,6 +1753,16 @@ COMM_KERNELS_CUDA_CODE = """
 #include <iostream>
 #include <algorithm>
 
+#define HIP_CHECK(call) \
+    do { \
+        hipError_t err = call; \
+        if (err != hipSuccess) { \
+            std::cerr << "HIP error at " << __FILE__ << ":" << __LINE__ \
+                      << " - " << hipGetErrorString(err) << std::endl; \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
+
 #define MUILLM_MAX_GPUS 8
 
 typedef enum muillm_comm_error {
@@ -1916,6 +1926,8 @@ __global__ void __muillm_inc_wait_value_p2p_kernel(
 
 muillm_comm_error_t __mui_inc_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
   __muillm_inc_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
+  HIP_CHECK(hipGetLastError());
+  HIP_CHECK(hipDeviceSynchronize());
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -1929,6 +1941,8 @@ __global__ void __muillm_stream_inc_value_p2p_kernel(
 
 muillm_comm_error_t __mui_stream_inc_value(hipStream_t stream, uint32_t* signal) {
   __muillm_stream_inc_value_p2p_kernel<<<1, 1, 0, stream>>>(signal);
+  HIP_CHECK(hipGetLastError());
+  HIP_CHECK(hipDeviceSynchronize());
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -1957,6 +1971,8 @@ __global__ void __muillm_stream_wait_value_p2p_kernel(
 
 muillm_comm_error_t __mui_stream_wait_value(hipStream_t stream, uint32_t* signal, uint32_t seq_no) {
   __muillm_stream_wait_value_p2p_kernel<<<1, 1, 0, stream>>>(signal, seq_no);
+  HIP_CHECK(hipGetLastError());
+  HIP_CHECK(hipDeviceSynchronize());
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -2004,6 +2020,8 @@ muillm_comm_error_t __muillm_gpu_copy(void* dst, const void* src, size_t count, 
     (uint8_t*) dst,
     count
   );
+  HIP_CHECK(hipGetLastError());
+  HIP_CHECK(hipDeviceSynchronize());
 
   if (hipPeekAtLastError() != hipSuccess) {
     return MUILLM_COMM_UNKNOWN_ERROR;
@@ -2108,6 +2126,8 @@ muillm_comm_error_t __muillm_scatter_all_chunk(
     local_rank
   );
 
+  HIP_CHECK(hipGetLastError());
+  HIP_CHECK(hipDeviceSynchronize());
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -2442,6 +2462,8 @@ muillm_comm_error_t __muillm_reduce_chunk_fp16(
     return MUILLM_COMM_UNSUPPORTED_SIZE;
   }
 
+  HIP_CHECK(hipGetLastError());
+  HIP_CHECK(hipDeviceSynchronize());
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -2740,6 +2762,8 @@ muillm_comm_error_t __muillm_reduce_chunk_bf16(
     return MUILLM_COMM_UNSUPPORTED_SIZE;
   }
 
+  HIP_CHECK(hipGetLastError());
+  HIP_CHECK(hipDeviceSynchronize());
   return MUILLM_COMM_SUCCESS;
 }
 
@@ -2827,6 +2851,8 @@ class All2AllCommKernels:
                     "all2all_comm_destroy",
                     "all2all_comm_gemm_reduce_scatter",
                 ],
+                extra_cflags=["-g"],
+                extra_cuda_cflags=["-g"],
                 extra_include_paths=[
                     os.path.join(_TORCH_PATH, "include", "torch", "csrc")
                 ],
@@ -2977,10 +3003,19 @@ def custom_kernel(data: input_t) -> output_t:
     world_size = torch.distributed.get_world_size()
     rank = torch.distributed.get_rank()
 
+    print(
+        f"rank {rank} executing on input shape {input.shape} weight shape {weight.shape}",
+        flush=True,
+    )
+
     comms = get_global_all2all_comm(rank=rank, world_size=world_size)
 
-    return comms.gemm_reduce_scatter(
+    y = comms.gemm_reduce_scatter(
         input=input,
         weight=weight,
         bias=bias,
     )
+
+    print(f"rank {rank} finished", flush=True)
+
+    return y
