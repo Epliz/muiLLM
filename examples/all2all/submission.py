@@ -825,7 +825,7 @@ static muillm_comm_error_t __ensure_buffer_set_capacity(
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
 
-  std::cout<<"rank "<<local_rank<<" reallocating buffers for capacity "<<capacity<<"..."<<std::endl;
+  //std::cout<<"rank "<<local_rank<<" reallocating buffers for capacity "<<capacity<<"..."<<std::endl;
 
   muillm_comm_error_t error;
 
@@ -3331,7 +3331,7 @@ class All2AllCommKernels:
         import time
 
         start_time = time.time()
-        print("Loading All2All comm kernels...")
+        # print("Loading All2All comm kernels...")
 
         try:
             self.comm_kernels = load_inline(
@@ -3359,10 +3359,10 @@ class All2AllCommKernels:
             print(e)
             self.comm_kernels = None
         end_time = time.time()
-        print(
-            f"All2All comm kernels loaded in {end_time - start_time:.2f} seconds.",
-            flush=True,
-        )
+        # print(
+        #     f"All2All comm kernels loaded in {end_time - start_time:.2f} seconds.",
+        #     flush=True,
+        # )
 
 
 _global_comm_kernels = None
@@ -3381,10 +3381,10 @@ class All2AllComm:
         self.world_size = world_size
 
         # measure the time to initialize the comms
-        import time
+        # import time
 
-        start_time = time.time()
-        print(f"Initializing All2AllComm on rank {rank}...")
+        # start_time = time.time()
+        # print(f"Initializing All2AllComm on rank {rank}...")
 
         self.comm_kernels = get_global_comm_kernels()
 
@@ -3404,11 +3404,11 @@ class All2AllComm:
         if self.comms is None:
             raise ValueError("All2AllComm initialization failed.")
 
-        end_time = time.time()
-        print(
-            f"All2AllComm initialized in {end_time - start_time:.2f} seconds on rank {rank}.",
-            flush=True,
-        )
+        # end_time = time.time()
+        # print(
+        #     f"All2AllComm initialized in {end_time - start_time:.2f} seconds on rank {rank}.",
+        #     flush=True,
+        # )
 
     def destroy(self):
         if self.comm_kernels is not None and self.comms is not None:

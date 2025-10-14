@@ -810,7 +810,7 @@ static muillm_comm_error_t __ensure_buffer_set_capacity(
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
 
-  std::cout<<"rank "<<local_rank<<" reallocating buffers for capacity "<<capacity<<"..."<<std::endl;
+  //std::cout<<"rank "<<local_rank<<" reallocating buffers for capacity "<<capacity<<"..."<<std::endl;
 
   muillm_comm_error_t error;
 
