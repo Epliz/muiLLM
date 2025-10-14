@@ -1690,20 +1690,20 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
 
     // Finally reduce the data on each GPU
     // We have two chunks to reduce
-    if ((error = __muillm_reduce_chunks(
-      stream,
-      buffer_set->buffers[local_rank],
-      scattered_M,
-      half_N, // TODO change when num_chunks != 2
-      num_chunks,
-      local_size,
-      datatype,
-      rs_output.data_ptr()
-    )) != MUILLM_COMM_SUCCESS) {
-      std::cout<<"rank "<<local_rank<<" failed to reduce data"<<std::endl;
-      TORCH_CHECK(false, "an error happened when reducing data");
-      return torch::Tensor();
-    }
+    // if ((error = __muillm_reduce_chunks(
+    //   stream,
+    //   buffer_set->buffers[local_rank],
+    //   scattered_M,
+    //   half_N, // TODO change when num_chunks != 2
+    //   num_chunks,
+    //   local_size,
+    //   datatype,
+    //   rs_output.data_ptr()
+    // )) != MUILLM_COMM_SUCCESS) {
+    //   std::cout<<"rank "<<local_rank<<" failed to reduce data"<<std::endl;
+    //   TORCH_CHECK(false, "an error happened when reducing data");
+    //   return torch::Tensor();
+    // }
 
     return rs_output;
   } else {
