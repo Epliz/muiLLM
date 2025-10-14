@@ -575,11 +575,6 @@ typedef struct muillm_comm_p2p_buffer_set {
 
 
 typedef struct muillm_comm_p2p: muillm_comm {
-
-  muillm_comm_p2p(at::cuda::CUDAStream second_stream): second_stream(second_stream) {
-
-  }
-
   // reduction buffer sets
   muillm_comm_p2p_buffer_set_t* first_buffers;
   muillm_comm_p2p_buffer_set_t* second_buffers;
@@ -588,7 +583,7 @@ typedef struct muillm_comm_p2p: muillm_comm {
   uint32_t* signal_host;
   uint32_t* signal;
 
-  at::cuda::CUDAStream second_stream;
+  hipStream_t second_stream;
 
   // local stream signal memory on GPU to synchronize stream
   uint32_t* stream_signal;
@@ -612,8 +607,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
     int local_rank,
     const muillm_comm_local_socket_t* local_socket,
     muillm_comm_p2p_t** comm_ptr,
-    hipStream_t stream,
-    at::cuda::CUDAStream second_stream
+    hipStream_t stream
 );
 
 muillm_comm_error_t muillm_comm_p2p_destroy_comm(
@@ -950,8 +944,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   int local_rank,
   const muillm_comm_local_socket_t* local_socket,
   muillm_comm_p2p_t** comm_ptr,
-  hipStream_t stream,
-  at::cuda::CUDAStream second_stream
+  hipStream_t stream
 ) {
   if (world_size != local_size) {
     // we currently ony support single machine, so
@@ -964,7 +957,7 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
   muillm_comm_method_t transfer_method = MUILLM_COMM_METHOD_P2P_TRANSFER;
 
   // create the comm object
-  muillm_comm_p2p_t* comm = new muillm_comm_p2p_t(second_stream);
+  muillm_comm_p2p_t* comm = new muillm_comm_p2p_t();
   comm->transfer_method = transfer_method;
 
   comm->world_size = world_size;
@@ -978,6 +971,11 @@ muillm_comm_error_t muillm_comm_p2p_init_comm(
 
   comm->stream_signal = nullptr;
   comm->stream_signal_seq_no = 0;
+
+  // create the second stream
+  if (hipStreamCreateWithFlags(&comm->second_stream, hipStreamNonBlocking) != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
 
   comm->process_group = local_socket->process_group;
 
@@ -1097,6 +1095,12 @@ muillm_comm_error_t muillm_comm_p2p_destroy_comm(
 
   // synchronize to make sure no GPU is going to reference the previous memory
   if (hipDeviceSynchronize() != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
+  // destroy the second stream
+  if (hipStreamDestroy(comm->second_stream) != hipSuccess) {
+    std::cout<<"rank "<<local_rank<<" failed to destroy second stream"<<std::endl;
     return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
@@ -1434,9 +1438,7 @@ void* all2all_comm_init(
     return (void*) nullptr;
   }
 
-  at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
-  auto device_index = stream.device_index();
-  at::cuda::CUDAStream second_stream = at::cuda::getStreamFromPool(false, device_index);
+  hipStream_t stream = at::cuda::getCurrentCUDAStream();
 
   muillm_comm_p2p_t* comm_ptr = nullptr;
   muillm_error = muillm_comm_p2p_init_comm(
@@ -1446,8 +1448,7 @@ void* all2all_comm_init(
     local_rank,
     &local_socket,
     (muillm_comm_p2p_t**) &comm_ptr,
-    stream,
-    second_stream
+    stream
   );
 
   TORCH_CHECK(muillm_error == MUILLM_COMM_SUCCESS, "an error happened when initializing mui comm");
@@ -1480,18 +1481,18 @@ torch::Tensor all2all_comm_gemm_reduce_scatter(
   auto device = input.device();
   at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(device.index());
 
-  at::cuda::CUDAStream second_stream = comm->second_stream;
-  // check if the second stream is still good to use
-  if (hipStreamQuery(second_stream) == hipErrorInvalidResourceHandle) {
-    std::cout<<"rank "<<comm->local_rank<<" had an invalid second stream, recreating it..."<<std::endl;
-    // reset it to the current stream device
-    auto device_index = stream.device_index();
-    second_stream = at::cuda::getStreamFromPool(false, device_index);
-    comm->second_stream = second_stream;
-
-    // just to be safe
-    at::cuda::setCurrentCUDAStream(stream);
+  // check if the second stream is still OK
+  if (hipStreamQuery(comm->second_stream) == hipErrorInvalidResourceHandle) {
+      // re-create the second stream
+    if (hipStreamCreateWithFlags(&comm->second_stream, hipStreamNonBlocking) != hipSuccess) {
+      TORCH_CHECK(false, "an error happened when creating second stream");
+      return torch::Tensor();
+    }
   }
+
+  at::cuda::CUDAStream second_stream = at::cuda::getStreamFromExternal(comm->second_stream, device.index());
+  // just to be safe
+  at::cuda::setCurrentCUDAStream(stream);
 
   int local_size = comm->local_size;
   int local_rank = comm->local_rank;
