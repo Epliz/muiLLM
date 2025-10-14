@@ -1673,18 +1673,34 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch_on
   uint32_t* counters = (uint32_t*)current_counter_set->counters;
   uint32_t* next_counters = (uint32_t*) next_counter_set->counters;
 
-  all2all_dispatch_compute_send_counts(
-    stream,
-    (const int32_t*)indices.data_ptr(),
-    (uint32_t*)send_offsets.data_ptr(),
-    counters,
-    next_counters,
-    num_local_experts,
-    num_tokens,
-    num_experts_per_token,
-    local_size,
-    local_rank
-  );
+  if (num_tokens > 0) {
+    all2all_dispatch_compute_send_counts(
+      stream,
+      (const int32_t*)indices.data_ptr(),
+      (uint32_t*)send_offsets.data_ptr(),
+      counters,
+      next_counters,
+      num_local_experts,
+      num_tokens,
+      num_experts_per_token,
+      local_size,
+      local_rank
+    );
+  } else {
+    // zero tokens to process
+    if (local_rank == 0) {
+      // we still need to zero out the next local counter
+      // but we don't need to zero out the send_offsets as they are not used
+      if (hipMemsetAsync(
+            next_counters, // local counter to clear
+            0,
+            sizeof(uint32_t) * local_size,
+            stream
+          ) != hipSuccess) {
+        TORCH_CHECK(false, "an error happened when doing hipMemsetAsync to zero out next local counter");
+      }
+    }
+  }
 
 
   // we will zero expert_num_tokens in the dispatch pack send kernels
@@ -1701,13 +1717,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> all2all_comm_dispatch_on
   //
   int buff_meta_offset = aligned_size_data;
 
-  // print the pointers for debugging
-  std::cout<<"rank "<<local_rank<<" num_local_experts "<<num_local_experts<<" num_tokens "<<num_tokens<<" num_experts_per_token "<<num_experts_per_token<<" hidden_dim "<<hidden_dim<<" max_recv "<<max_recv<<" max_total_recv "<<max_total_recv<<" total_send "<<total_send<<std::endl;
-  std::cout<<"rank "<<local_rank<<" buffer pointers: ";
-  for (int i = 0; i < 8; i++) {
-    std::cout<<" "<<buffer_set->buffers[i];
-  }
-  std::cout<<std::endl;
+  // // print the pointers for debugging
+  // std::cout<<"rank "<<local_rank<<" num_local_experts "<<num_local_experts<<" num_tokens "<<num_tokens<<" num_experts_per_token "<<num_experts_per_token<<" hidden_dim "<<hidden_dim<<" max_recv "<<max_recv<<" max_total_recv "<<max_total_recv<<" total_send "<<total_send<<std::endl;
+  // std::cout<<"rank "<<local_rank<<" buffer pointers: ";
+  // for (int i = 0; i < 8; i++) {
+  //   std::cout<<" "<<buffer_set->buffers[i];
+  // }
+  // std::cout<<std::endl;
 
   if (num_tokens > 0) {
     if (dtype == torch::kFloat32) {
@@ -2326,7 +2342,7 @@ torch::Tensor all2all_comm_multi_stream(
 
   muillm_comm_p2p_t* comm = (muillm_comm_p2p_t*) comms_;
 
-  std::cout<<"rank "<<comm->rank<<" all2all multi stream start"<<std::endl;
+  // std::cout<<"rank "<<comm->rank<<" all2all multi stream start"<<std::endl;
 
   muillm_comm_p2p_stream_context_t* first_ctx = nullptr;
   muillm_comm_p2p_stream_context_t* second_ctx = nullptr;
@@ -2344,7 +2360,7 @@ torch::Tensor all2all_comm_multi_stream(
   at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream(device.index());
   // TODO: use different streams
   at::cuda::CUDAStream first_stream = stream;
-  at::cuda::CUDAStream second_stream = stream;
+  at::cuda::CUDAStream second_stream = at::cuda::getStreamFromPool(false, device.index());
 
   int local_rank = comm->local_rank;
 
@@ -2365,7 +2381,14 @@ torch::Tensor all2all_comm_multi_stream(
   auto weights2 = weights.narrow(0, first_half_num_tokens, second_half_num_tokens);
 
   // First dispatch
-  std::cout<<"rank "<<comm->rank<<" first dispatch"<<std::endl;
+  //std::cout<<"rank "<<comm->rank<<" first dispatch"<<std::endl;
+
+  // record an event on the main stream
+  // TODO: use something else than the cache_flush_event
+  if (hipEventRecord(first_ctx->cache_flush_event, first_stream) != hipSuccess) {
+    TORCH_CHECK(false, "an error happened when recording event");
+  }
+
   auto dispatch_outputs1 = all2all_comm_dispatch_on_stream(
     comm,
     first_ctx,
@@ -2376,7 +2399,13 @@ torch::Tensor all2all_comm_multi_stream(
     half_max_recv
   );
 
-  std::cout<<"rank "<<comm->rank<<" second dispatch"<<std::endl;
+  //std::cout<<"rank "<<comm->rank<<" second dispatch"<<std::endl;
+
+  // make the second stream wait for the event
+  if (hipStreamWaitEvent(second_stream, first_ctx->cache_flush_event, 0) != hipSuccess) {
+    TORCH_CHECK(false, "an error happened when waiting for event");
+  }
+
   auto dispatch_outputs2 = all2all_comm_dispatch_on_stream(
     comm,
     second_ctx,
@@ -2402,7 +2431,7 @@ torch::Tensor all2all_comm_multi_stream(
 
   if (!fuse_compute_in_combine) {
     // Then compute
-    std::cout<<"rank "<<comm->rank<<" first compute"<<std::endl;
+    //std::cout<<"rank "<<comm->rank<<" first compute"<<std::endl;
     expert_x1 = all2all_compute_on_stream(
       first_stream,
       expert_num_tokens1,
@@ -2410,7 +2439,7 @@ torch::Tensor all2all_comm_multi_stream(
       comm->rank
     );
 
-  std::cout<<"rank "<<comm->rank<<" second compute"<<std::endl;
+    //std::cout<<"rank "<<comm->rank<<" second compute"<<std::endl;
     expert_x2 = all2all_compute_on_stream(
       second_stream,
       expert_num_tokens2,
@@ -2421,7 +2450,7 @@ torch::Tensor all2all_comm_multi_stream(
 
   // Finally combine
   float s = fuse_compute_in_combine ? (1.0f + local_rank) : 1.0f;
-  std::cout<<"rank "<<comm->rank<<" first combine"<<std::endl;
+  //std::cout<<"rank "<<comm->rank<<" first combine"<<std::endl;
   torch::Tensor out1 = all2all_comm_combine_on_stream(
     comm,
     first_ctx,
@@ -2433,7 +2462,7 @@ torch::Tensor all2all_comm_multi_stream(
     s
   );
 
-  std::cout<<"rank "<<comm->rank<<" second combine"<<std::endl;
+  //std::cout<<"rank "<<comm->rank<<" second combine"<<std::endl;
   torch::Tensor out2 = all2all_comm_combine_on_stream(
     comm,
     second_ctx,
@@ -2445,10 +2474,20 @@ torch::Tensor all2all_comm_multi_stream(
     s
   );
 
-  std::cout<<"rank "<<comm->rank<<" all2all multi stream done"<<std::endl;
+  // make the second stream record an event to indicate it is done
+  if (hipEventRecord(second_ctx->cache_flush_event, second_stream) != hipSuccess) {
+    TORCH_CHECK(false, "an error happened when recording event");
+  }
+
+  //std::cout<<"rank "<<comm->rank<<" all2all multi stream done"<<std::endl;
   // TODO: sync streams
 
   at::cuda::setCurrentCUDAStream(stream);
+
+  // make the first stream wait for the second stream to be done
+  if (hipStreamWaitEvent(first_stream, second_ctx->cache_flush_event, 0) != hipSuccess) {
+    TORCH_CHECK(false, "an error happened when waiting for event");
+  }
 
   // Concatenate the outputs
   return torch::cat({out1, out2}, 0);
