@@ -576,6 +576,9 @@ typedef struct muillm_comm_p2p_stream_context {
 
   uint32_t signal_seq_no;
 
+  // event for synchronizing the stream
+  hipEvent_t stream_sync_event;
+
   // event to flush the caches
   hipEvent_t cache_flush_event;
 
@@ -1059,6 +1062,10 @@ muillm_comm_error_t muillm_comm_p2p_init_stream_context(
   ctx->signal = nullptr;
   ctx->signal_seq_no = 0;
 
+  if (hipEventCreateWithFlags(&ctx->stream_sync_event, hipEventDisableTiming | hipEventDisableSystemFence) != hipSuccess) {
+    return MUILLM_COMM_UNKNOWN_ERROR;
+  }
+
   // by default, do not skip the cache flush
   // but MI300 and successors don't need it apparently
   ctx->cant_skip_cache_flush_event = cant_skip_cache_flush_event;
@@ -1268,6 +1275,12 @@ muillm_comm_error_t muillm_comm_p2p_destroy_stream_context(
     );
     ctx->signal_host = nullptr;
     ctx->signal = nullptr;
+  }
+
+  // destroy stream sync event
+  if (hipEventDestroy(ctx->stream_sync_event) != hipSuccess) {
+    std::cout<<"rank "<<local_rank<<" failed to destroy stream sync event"<<std::endl;
+    return MUILLM_COMM_UNKNOWN_ERROR;
   }
 
   // destroy cache flush event
@@ -2407,8 +2420,7 @@ torch::Tensor all2all_comm_multi_stream(
   //std::cout<<"rank "<<comm->rank<<" first dispatch"<<std::endl;
 
   // record an event on the main stream
-  // TODO: use something else than the cache_flush_event
-  if (hipEventRecord(first_ctx->cache_flush_event, first_stream) != hipSuccess) {
+  if (hipEventRecord(first_ctx->stream_sync_event, first_stream) != hipSuccess) {
     TORCH_CHECK(false, "an error happened when recording event");
   }
 
@@ -2425,7 +2437,7 @@ torch::Tensor all2all_comm_multi_stream(
   //std::cout<<"rank "<<comm->rank<<" second dispatch"<<std::endl;
 
   // make the second stream wait for the event
-  if (hipStreamWaitEvent(second_stream, first_ctx->cache_flush_event, 0) != hipSuccess) {
+  if (hipStreamWaitEvent(second_stream, first_ctx->stream_sync_event, 0) != hipSuccess) {
     TORCH_CHECK(false, "an error happened when waiting for event");
   }
 
@@ -2498,7 +2510,7 @@ torch::Tensor all2all_comm_multi_stream(
   );
 
   // make the second stream record an event to indicate it is done
-  if (hipEventRecord(second_ctx->cache_flush_event, second_stream) != hipSuccess) {
+  if (hipEventRecord(second_ctx->stream_sync_event, second_stream) != hipSuccess) {
     TORCH_CHECK(false, "an error happened when recording event");
   }
 
@@ -2508,7 +2520,7 @@ torch::Tensor all2all_comm_multi_stream(
   at::cuda::setCurrentCUDAStream(stream);
 
   // make the first stream wait for the second stream to be done
-  if (hipStreamWaitEvent(first_stream, second_ctx->cache_flush_event, 0) != hipSuccess) {
+  if (hipStreamWaitEvent(first_stream, second_ctx->stream_sync_event, 0) != hipSuccess) {
     TORCH_CHECK(false, "an error happened when waiting for event");
   }
 
