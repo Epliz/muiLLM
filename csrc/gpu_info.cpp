@@ -62,8 +62,5 @@ muillm_error_t muillm_detect_gpu_properties(
   gpu_info->warp_size = properties.warpSize;
   gpu_info->simd_lanes = cu_count * simd_lanes_per_cu;
 
-  printf("detected CU count %d\n", cu_count);
-  printf("detected simd_lanes %d\n", gpu_info->simd_lanes);
-
   return MUILLM_SUCCESS;
 }

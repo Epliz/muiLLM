@@ -3,22 +3,28 @@
 
 #include <cuda_fp16.h>
 
-void muillm_l2norm_fp16(
+void muillm_rmsnorm_fp16(
   hipStream_t stream,
   unsigned B,
   unsigned K,
-  const half* x,
-  half* y,
-  float epislon
+  const half* __restrict__ W, // weight matrix - size K
+  const half* __restrict__ X, // input = size BxK
+  const half* __restrict__ RB, // optional residual = size BxK
+  half* __restrict__ Y, // output = size BxK
+  float epsilon,
+  float weight_offset
 );
 
-void muillm_l2norm_bf16(
+void muillm_rmsnorm_bf16(
   hipStream_t stream,
   unsigned B,
   unsigned K,
-  const __hip_bfloat16* x,
-  __hip_bfloat16* y,
-  float epislon
+  const __hip_bfloat16* __restrict__ W, // weight matrix - size K
+  const __hip_bfloat16* __restrict__ X, // input = size BxK
+  const __hip_bfloat16* __restrict__ RB, // optional residual = size BxK
+  __hip_bfloat16* __restrict__ Y, // output = size BxK
+  float epsilon,
+  float weight_offset
 );
 
 #define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
@@ -27,6 +33,7 @@ void muillm_l2norm_bf16(
 
 at::Tensor muillm_l2norm_forward(
     torch::Tensor x,
+    torch::Tensor residual, // optional
     float epsilon) {
   CHECK_INPUT(x);
 
@@ -50,27 +57,47 @@ at::Tensor muillm_l2norm_forward(
   auto y = torch::empty(output_sizes, output_options);
 
   if (dtype == torch::kBFloat16) {
-    muillm_l2norm_bf16(
+    muillm_rmsnorm_bf16(
         stream,
         B,
         K,
+        /* W */ nullptr,
         (__hip_bfloat16*)x.data_ptr(),
+        residual.defined() ? (__hip_bfloat16*)residual.data_ptr() : nullptr,
         (__hip_bfloat16*)y.data_ptr(),
-        epsilon
+        epsilon,
+        0.0f
     );
     return y;
   } else if (dtype == torch::kFloat16) {
-    muillm_l2norm_fp16(
+    muillm_rmsnorm_fp16(
           stream,
           B,
           K,
+          /* W */ nullptr,
           (const half*)x.data_ptr(),
+          residual.defined() ? (const half*)residual.data_ptr() : nullptr,
           (half*)y.data_ptr(),
-          epsilon
+          epsilon,
+          0.0f
       );
   } else {
     TORCH_CHECK(false, "muillm_l2norm_forward: unsupported dtype ");
   }
 
   return y;
+}
+
+// python trampoline implementation
+at::Tensor muillm_l2norm_forward_trampoline(
+    torch::Tensor x,
+    std::optional<torch::Tensor> residual_,
+    float epsilon
+) {
+  torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
+  return muillm_l2norm_forward(
+      x,
+      residual,
+      epsilon
+  );
 }

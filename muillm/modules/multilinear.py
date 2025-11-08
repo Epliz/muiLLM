@@ -1,4 +1,4 @@
-from typing import Iterable, List, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.engineconfig import (
     MuiEngineConfig,
@@ -10,10 +10,26 @@ from torch import Tensor
 import torch.nn as nn
 
 from muillm.modules.linear import MuiLinear
+from muillm.replacement.replacementcontext import MuiReplacementContext
+
+import muillm_ext
+
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
-from muillm.replacement.replacementcontext import MuiReplacementContext
+
+class _MuiMultiLinear(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, module, x):
+        output = muillm_ext.muillm_multilinear_module_forward(module, x)
+
+        ctx.save_for_backward(x)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
 
 
 def _all_or_none(it: Iterable[bool], exception_message) -> bool:
@@ -32,20 +48,24 @@ class MuiMultiLinear(MuiModule):
         in_features: int,
         out_features: List[int],
         bias: bool = True,
-        variance_epsilon: float = 0.0,
-        normalize: bool = False,
+        norm: Optional[MuiRMSNorm] = None,
         device=None,
         dtype=None,
     ) -> None:
         super().__init__(engine_config=engine_config)
+
+        self.cpp_engine = engine_config.cpp_engine
+        # the cpp module will be created at the end of all layer replacements
+        # (set the field here before potential OOM errors so that it can still be manipulated in
+        # the destructor)
+        self.cpp_module = None
 
         self.linear = MuiLinear(
             engine_config=engine_config,
             in_features=in_features,
             out_features=sum(out_features),
             bias=bias,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             device=device,
             dtype=dtype,
         )
@@ -65,9 +85,38 @@ class MuiMultiLinear(MuiModule):
 
             current_start = current_end
 
+        self.slices = list(zip(self.slice_starts, self.slice_ends))
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
     def finalize_init(self):
         # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
         self.linear.finalize_init()
+
+        if self.cpp_module is not None:
+            muillm_ext.muillm_multilinear_module_deinit(self.cpp_module)
+
+        if not self.dispatchable:
+            # cannot initialize the cpp module
+            self.cpp_module = None
+            return
+
+        self.cpp_module = muillm_ext.muillm_multilinear_module_init(
+            self.cpp_engine,
+            self.linear.cpp_module,
+            self.slices,
+        )
+
+    def _check_dispatchable(self):
+        self.dispatchable = self.linear.dispatchable
+
+    def finalize_deinit(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_multilinear_module_deinit(self.cpp_module)
+            self.cpp_module = None
 
     @staticmethod
     def replace(
@@ -126,24 +175,25 @@ class MuiMultiLinear(MuiModule):
             )
 
         normalize = prev_layernorm_module is not None
-        variance_epsilon = (
-            MuiRMSNorm._extract_eps(prev_layernorm_module) if normalize else 0.0
+        norm = (
+            MuiRMSNorm.replace(
+                replacement_context,
+                prev_layernorm_module,
+            )
+            if normalize
+            else None
         )
-        norm_weights = prev_layernorm_module.weight if normalize else None
 
         new_module = MuiMultiLinear(
             engine_config=engine_config,
             in_features=in_features,
             out_features=out_features,
             bias=has_bias,
-            variance_epsilon=variance_epsilon,
-            normalize=normalize,
+            norm=norm,
             dtype=dtype,
             device=device,
         )
-        new_module.copy_modules(
-            prev_modules=prev_modules, norm_weights=norm_weights, device=device
-        )
+        new_module.copy_modules(prev_modules=prev_modules, device=device)
 
         return new_module
 
@@ -175,7 +225,8 @@ class MuiMultiLinear(MuiModule):
 
     def replace_back(self) -> Tuple[List[nn.Linear], torch.Tensor]:
         # split back in different modules
-        norm_weights = self.linear.norm_weights
+        normalize = self.linear.norm is not None
+        norm_weights = self.linear.norm.weight if normalize else None
 
         linears = [
             self._get_linear_back(slice_start, slice_end)
@@ -187,8 +238,6 @@ class MuiMultiLinear(MuiModule):
     def copy_modules(
         self,
         prev_modules: List[Union[MuiLinear, nn.Linear]],
-        norm_weights: torch.Tensor = None,
-        variance_epsilon: float = 0.0,
         device=None,
     ):
         if device is None:
@@ -219,14 +268,13 @@ class MuiMultiLinear(MuiModule):
             )
             self.linear._set_bias(concat_biases, concat_biases_requires_grad)
 
-        if norm_weights is not None:
-            # the rescaling weights are not fused in the matrices due to instabilities
-            self.linear._set_norm_weights(norm_weights)
-
         # put ourselves on the right device
         self.to(device=device)
 
     def forward(self, input: Tensor) -> Tuple[Tensor, ...]:
+        if self.cpp_module is not None:
+            return _MuiMultiLinear.apply(self.cpp_module, input)
+
         all_outputs = self.linear(input)
 
         return tuple(

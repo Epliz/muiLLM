@@ -1,3 +1,4 @@
+#include "gateupmlpactivation.h"
 #include <hip/hip_fp16.h>
 
 #define GEMV_THREADS_PER_BLOCK 256
@@ -57,6 +58,18 @@ struct __align__(8) float8 {
   float d;
 };
 
+__device__ inline float8 operator+(const float8& a, const float b) {
+  float8 r;
+  r.x = a.x + b;
+  r.y = a.y + b;
+  r.z = a.z + b;
+  r.w = a.w + b;
+  r.a = a.a + b;
+  r.b = a.b + b;
+  r.c = a.c + b;
+  r.d = a.d + b;
+  return r;
+}
 
 static inline void __device__ dot2(float& acc, const float2& a, const float2& b) {
   acc += a.x * b.x;
@@ -154,17 +167,24 @@ static inline float __device__ silu(float x) {
   return x / (1.0f + expf(-x));
 }
 
+static inline float __device__ gelu_tanh(float x) {
+  // in python:
+  // 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))));
+
+  return 0.5f * x * (1.0f + tanhf(sqrtf(2.0f / M_PI) * (x * (1.0f + 0.044715f * x * x))));
+}
 
 #define FUSED_ROWS_PER_BLOCK 2
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilu_gemv_fp16_kernel(
+__global__ void muillm_gateupmlp_gemv_fp16_kernel(
     const half* __restrict__ GW, // weight matrix - size N x K
     const half* __restrict__ UW, // weight matrix - size N x K
     const half* __restrict__ X, // input = size K
     half* __restrict__ Y, // output - size N
     unsigned N,
-    unsigned K
+    unsigned K,
+    MuiGateUpMLPActivation activation
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
   int warpId = threadIdx.x / warpSize;
@@ -333,7 +353,16 @@ __global__ void muillm_gateupsilu_gemv_fp16_kernel(
     if (current_row < N) {
       float gacc = shared_gaccs[threadIdx.x]; // read the fully reduced value
       float uacc = shared_uaccs[threadIdx.x]; // read the fully reduced value
-      float acc= silu(gacc) * uacc;
+      float acc;
+      
+      if (activation == MuiGateUpMLPActivation::SILU) {
+        acc = silu(gacc) * uacc;
+      } else if (activation == MuiGateUpMLPActivation::GELU_TANH) {
+        acc = gelu_tanh(gacc) * uacc;
+      } else {
+        // unsupported activation
+        acc = 0.f;
+      }
 
       // write the output value
       Y[current_row] = __float2half(acc);
@@ -342,7 +371,7 @@ __global__ void muillm_gateupsilu_gemv_fp16_kernel(
 }
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilu_gemv_norm_inputs_fp16_kernel(
+__global__ void muillm_gateupmlp_gemv_norm_inputs_fp16_kernel(
     const half* __restrict__ NW, // input normalization weights matrix - size K
     const half* __restrict__ GW, // weight matrix - size N x K
     const half* __restrict__ UW, // weight matrix - size N x K
@@ -351,7 +380,9 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_fp16_kernel(
     unsigned N,
     unsigned K,
     float epsilon,
-    float scale
+    float weights_offset,
+    float scale,
+    MuiGateUpMLPActivation activation
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
   int warpId = threadIdx.x / warpSize;
@@ -400,7 +431,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_fp16_kernel(
         for (k = threadIdx.x * 8; k + 7 < K; k += (THREADS_PER_BLOCK * 8)) {
           // vectorized
           float8 x = __half82float8(*(const half8*)(addr(X, k)));
-          float8 nw = __half82float8(*(const half8*)(addr(NW, k)));
+          float8 nw = __half82float8(*(const half8*)(addr(NW, k))) + weights_offset;
 
           float8 gw0 = __half82float8(load_nontemporal_half8(addr(GW0, k)));
           float8 gw1 = __half82float8(load_nontemporal_half8(addr(GW1, k)));
@@ -428,7 +459,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_fp16_kernel(
         if (k + 3 < K) {
           // vectorized
           float4 x = __half42float4(*(const half4*)(addr(X, k)));
-          float4 nw = __half42float4(*(const half4*)(addr(NW, k)));
+          float4 nw = __half42float4(*(const half4*)(addr(NW, k))) + weights_offset;
 
           float4 gw0 = __half42float4(load_nontemporal_half4(addr(GW0, k)));
           float4 gw1 = __half42float4(load_nontemporal_half4(addr(GW1, k)));
@@ -454,7 +485,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_fp16_kernel(
         if (k + 1 < K) {
           // vectorized
           float2 x = __half22float2(*(const half2*)(addr(X, k)));
-          float2 nw = __half22float2(*(const half2*)(addr(NW, k)));
+          float2 nw = __half22float2(*(const half2*)(addr(NW, k))) + weights_offset;
 
           float2 gw0 = __half22float2(load_nontemporal_half2(addr(GW0, k)));
           float2 gw1 = __half22float2(load_nontemporal_half2(addr(GW1, k)));
@@ -479,7 +510,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_fp16_kernel(
         if (k < K) {
           // remainder
           float x = __half2float(*addr(X,k));
-          float nw = __half2float(*addr(NW,k));
+          float nw = __half2float(*addr(NW,k)) + weights_offset;
 
           float gw0 = __half2float(*addr(GW0,k));
           float gw1 = __half2float(*addr(GW1,k));
@@ -533,7 +564,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_fp16_kernel(
         if (i == 0) {
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
             float x =  __half2float(X[k]);
-            float nw = __half2float(NW[k]);
+            float nw = __half2float(NW[k]) + weights_offset;
 
             // accumuate the variance
             var_x += x * x;
@@ -549,7 +580,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_fp16_kernel(
         } else {
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
             float x =  __half2float(X[k]);
-            float nw = __half2float(NW[k]);
+            float nw = __half2float(NW[k]) + weights_offset;
 
             // don't accumulate the variance (we already have done it with i == 0)
 
@@ -595,7 +626,16 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_fp16_kernel(
     if (current_row < N) {
       float gacc = shared_gaccs[threadIdx.x] * rsqrt_var; // read the fully reduced value and scale
       float uacc = shared_uaccs[threadIdx.x] * rsqrt_var; // read the fully reduced value and scale
-      float acc= silu(gacc) * uacc;
+      float acc;
+      
+      if (activation == MuiGateUpMLPActivation::SILU) {
+        acc = silu(gacc) * uacc;
+      } else if (activation == MuiGateUpMLPActivation::GELU_TANH) {
+        acc = gelu_tanh(gacc) * uacc;
+      } else {
+        // unsupported activation
+        acc = 0.f;
+      }
 
       // write the output value
       Y[current_row] = __float2half(acc);
@@ -606,7 +646,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_fp16_kernel(
 #define SPLIT_ROWS_PER_BLOCK 4
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel(
+__global__ void muillm_gateupmlp_gemv_norm_inputs_split_fp16_kernel(
     const half* __restrict__ NW, // input normalization weights matrix - size K
     const half* __restrict__ GW, // weight matrix - size N x K
     const half* __restrict__ UW, // weight matrix - size N x K
@@ -616,6 +656,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel(
     unsigned N,
     unsigned K,
     float epsilon,
+    float weights_offset,
     float scale
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
@@ -665,7 +706,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel(
         for (k = threadIdx.x * 8; k + 7 < K; k += (THREADS_PER_BLOCK * 8)) {
           // vectorized
           float8 x = __half82float8(*(const half8*)(addr(X, k)));
-          float8 nw = __half82float8(*(const half8*)(addr(NW, k)));
+          float8 nw = __half82float8(*(const half8*)(addr(NW, k))) + weights_offset;
 
           float8 w0 = __half82float8(load_nontemporal_half8(addr(W0, k)));
           float8 w1 = __half82float8(load_nontemporal_half8(addr(W1, k)));
@@ -693,7 +734,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel(
         if (k + 3 < K) {
           // vectorized
           float4 x = __half42float4(*(const half4*)(addr(X, k)));
-          float4 nw = __half42float4(*(const half4*)(addr(NW, k)));
+          float4 nw = __half42float4(*(const half4*)(addr(NW, k))) + weights_offset;
 
           float4 w0 = __half42float4(load_nontemporal_half4(addr(W0, k)));
           float4 w1 = __half42float4(load_nontemporal_half4(addr(W1, k)));
@@ -719,7 +760,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel(
         if (k + 1 < K) {
           // vectorized
           float2 x = __half22float2(*(const half2*)(addr(X, k)));
-          float2 nw = __half22float2(*(const half2*)(addr(NW, k)));
+          float2 nw = __half22float2(*(const half2*)(addr(NW, k))) + weights_offset;
 
           float2 w0 = __half22float2(load_nontemporal_half2(addr(W0, k)));
           float2 w1 = __half22float2(load_nontemporal_half2(addr(W1, k)));
@@ -744,7 +785,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel(
         if (k < K) {
           // remainder
           float x = __half2float(*addr(X,k));
-          float nw = __half2float(*addr(NW,k));
+          float nw = __half2float(*addr(NW,k)) + weights_offset;
 
           float w0 = __half2float(*addr(W0,k));
           float w1 = __half2float(*addr(W1,k));
@@ -795,7 +836,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel(
         if (i == 0) {
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
             float x =  __half2float(X[k]);
-            float nw = __half2float(NW[k]);
+            float nw = __half2float(NW[k]) + weights_offset;
 
             // accumuate the variance
             var_x += x * x;
@@ -809,7 +850,7 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel(
         } else {
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
             float x =  __half2float(X[k]);
-            float nw = __half2float(NW[k]);
+            float nw = __half2float(NW[k]) + weights_offset;
 
             // don't accumulate the variance (we already have done it with i == 0)
 
@@ -856,12 +897,14 @@ __global__ void muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel(
   }
 }
 
-void muillm_gateupsilu_forward_fp16(
+void muillm_gateupmlp_forward_fp16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const half* norm_weights,
   float epsilon,
+  float norm_weights_offset,
   const half* gate_weights,
   const half* up_weights,
   const half* x,
@@ -886,7 +929,7 @@ void muillm_gateupsilu_forward_fp16(
     float scale = 1.f / K;
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilu_gemv_norm_inputs_fp16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_norm_inputs_fp16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
         norm_weights,
         gate_weights,
         up_weights,
@@ -895,10 +938,12 @@ void muillm_gateupsilu_forward_fp16(
         N,
         K,
         epsilon,
-        scale
+        norm_weights_offset,
+        scale,
+        activation
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilu_gemv_norm_inputs_fp16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_norm_inputs_fp16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
         norm_weights,
         gate_weights,
         up_weights,
@@ -907,10 +952,12 @@ void muillm_gateupsilu_forward_fp16(
         N,
         K,
         epsilon,
-        scale
+        norm_weights_offset,
+        scale,
+        activation
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilu_gemv_norm_inputs_fp16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_norm_inputs_fp16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
         norm_weights,
         gate_weights,
         up_weights,
@@ -919,44 +966,49 @@ void muillm_gateupsilu_forward_fp16(
         N,
         K,
         epsilon,
-        scale
+        norm_weights_offset,
+        scale,
+        activation
       );
     }
   } else {
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilu_gemv_fp16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_fp16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
         gate_weights,
         up_weights,
         x,
         y,
         N,
-        K
+        K,
+        activation
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilu_gemv_fp16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_fp16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
         gate_weights,
         up_weights,
         x,
         y,
         N,
-        K
+        K,
+        activation
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilu_gemv_fp16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_fp16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
         gate_weights,
         up_weights,
         x,
         y,
         N,
-        K
+        K,
+        activation
       );
     }
   }
 }
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilu_gemv_split_fp16_kernel(
+__global__ void muillm_gateupmlp_gemv_split_fp16_kernel(
     const half* __restrict__ GW, // weight matrix - size N x K
     const half* __restrict__ UW, // weight matrix - size N x K
     const half* __restrict__ X, // input = size K
@@ -1126,11 +1178,12 @@ __global__ void muillm_gateupsilu_gemv_split_fp16_kernel(
 }
 
 template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupsilu_combine_fp16_kernel(
+__global__ void muillm_gateupmlp_combine_fp16_kernel(
     const half* __restrict__ GY, // input - size N
     const half* __restrict__ UY, // input - size N
     half* __restrict__ Y, // output - size N
-    unsigned N
+    unsigned N,
+    MuiGateUpMLPActivation activation
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
   int warpId = threadIdx.x / warpSize;
@@ -1141,19 +1194,30 @@ __global__ void muillm_gateupsilu_combine_fp16_kernel(
   if (current_row < N) {
     float g = __half2float(GY[current_row]);
     float u = __half2float(UY[current_row]);
-    float y = silu(g) * u;
+    float y;
+
+    if (activation == MuiGateUpMLPActivation::SILU) {
+      y = silu(g) * u;
+    } else if (activation == MuiGateUpMLPActivation::GELU_TANH) {
+      y = gelu_tanh(g) * u;
+    } else {
+      // unsupported activation
+      y = 0.f;
+    }
 
     // write the output value
     Y[current_row] = __float2half(y);
   }
 }
 
-void muillm_gateupsilu_split_forward_fp16(
+void muillm_gateupmlp_split_forward_fp16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const half* norm_weights,
   float epsilon,
+  float norm_weights_offset,
   const half* gate_weights,
   const half* up_weights,
   const half* x,
@@ -1180,7 +1244,7 @@ void muillm_gateupsilu_split_forward_fp16(
     float scale = 1.f / K;
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel<64><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_norm_inputs_split_fp16_kernel<64><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
         norm_weights,
         gate_weights,
         up_weights,
@@ -1190,10 +1254,11 @@ void muillm_gateupsilu_split_forward_fp16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel<128><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_norm_inputs_split_fp16_kernel<128><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
         norm_weights,
         gate_weights,
         up_weights,
@@ -1203,10 +1268,11 @@ void muillm_gateupsilu_split_forward_fp16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilu_gemv_norm_inputs_split_fp16_kernel<256><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_norm_inputs_split_fp16_kernel<256><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
         norm_weights,
         gate_weights,
         up_weights,
@@ -1216,13 +1282,14 @@ void muillm_gateupsilu_split_forward_fp16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     }
   } else {
 
     if (threads_per_blocks == 64) {
-      muillm_gateupsilu_gemv_split_fp16_kernel<64><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_split_fp16_kernel<64><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
         gate_weights,
         up_weights,
         x,
@@ -1232,7 +1299,7 @@ void muillm_gateupsilu_split_forward_fp16(
         K
       );
     } else if (threads_per_blocks == 128) {
-      muillm_gateupsilu_gemv_split_fp16_kernel<128><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_split_fp16_kernel<128><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
         gate_weights,
         up_weights,
         x,
@@ -1242,7 +1309,7 @@ void muillm_gateupsilu_split_forward_fp16(
         K
       );
     } else if (threads_per_blocks == 256) {
-      muillm_gateupsilu_gemv_split_fp16_kernel<256><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
+      muillm_gateupmlp_gemv_split_fp16_kernel<256><<<dim3(num_blocks, 2), threads_per_blocks, 0, stream>>>(
         gate_weights,
         up_weights,
         x,
@@ -1257,25 +1324,28 @@ void muillm_gateupsilu_split_forward_fp16(
   // do final reduction
   const int num_blocks_combine = DIV_ROUND_UP(N, threads_per_blocks);
   if (threads_per_blocks == 64) {
-    muillm_gateupsilu_combine_fp16_kernel<64><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+    muillm_gateupmlp_combine_fp16_kernel<64><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
       gy,
       uy,
       y,
-      N
+      N,
+      activation
     );
   } else if (threads_per_blocks == 128) {
-    muillm_gateupsilu_combine_fp16_kernel<128><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+    muillm_gateupmlp_combine_fp16_kernel<128><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
       gy,
       uy,
       y,
-      N
+      N,
+      activation
     );
   } else if (threads_per_blocks == 256) {
-    muillm_gateupsilu_combine_fp16_kernel<256><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
+    muillm_gateupmlp_combine_fp16_kernel<256><<<num_blocks_combine, threads_per_blocks, 0, stream>>>(
       gy,
       uy,
       y,
-      N
+      N,
+      activation
     );
   }
 }

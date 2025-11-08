@@ -3,13 +3,14 @@
 
 #include <ATen/cuda/CUDAContext.h>
 
-at::Tensor muillm_parallel_gateupsilumoe_forward(
+at::Tensor muillm_parallel_gateupmlpmoe_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
     int num_shared_experts,
     int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
@@ -73,12 +74,13 @@ at::Tensor muillm_parallel_gateupsilumoe_forward(
       TORCH_CHECK(false, "failed to get reduction buffers");
     }
 
-    muillm_gateupsilumoe_forward_placed_output(
+    muillm_gateupmlpmoe_forward_placed_output(
       engine,
       num_shared_experts,
       num_dynamic_experts,
       norm_weights,
       epsilon,
+      norm_weights_offset,
       gate_weights,
       up_weights,
       down_weights,
@@ -102,12 +104,13 @@ at::Tensor muillm_parallel_gateupsilumoe_forward(
       TORCH_CHECK(false, "reduction failed");
     }
   } else {
-    muillm_gateupsilumoe_forward_placed_output(
+    muillm_gateupmlpmoe_forward_placed_output(
       engine,
       num_shared_experts,
       num_dynamic_experts,
       norm_weights,
       epsilon,
+      norm_weights_offset,
       gate_weights,
       up_weights,
       down_weights,
@@ -123,13 +126,14 @@ at::Tensor muillm_parallel_gateupsilumoe_forward(
   return output;
 }
 
-at::Tensor muillm_parallel_gateupsilumoe_split_forward(
+at::Tensor muillm_parallel_gateupmlpmoe_split_forward(
     muillm_engine_t* engine,
     muillm_comm_t* comm,
     int num_shared_experts,
     int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
@@ -193,12 +197,13 @@ at::Tensor muillm_parallel_gateupsilumoe_split_forward(
       TORCH_CHECK(false, "failed to get reduction buffers");
     }
 
-    muillm_gateupsilumoe_split_forward_placed_output(
+    muillm_gateupmlpmoe_split_forward_placed_output(
       engine,
       num_shared_experts,
       num_dynamic_experts,
       norm_weights,
       epsilon,
+      norm_weights_offset,
       gate_weights,
       up_weights,
       down_weights,
@@ -222,12 +227,13 @@ at::Tensor muillm_parallel_gateupsilumoe_split_forward(
       TORCH_CHECK(false, "reduction failed");
     }
   } else {
-    muillm_gateupsilumoe_split_forward_placed_output(
+    muillm_gateupmlpmoe_split_forward_placed_output(
       engine,
       num_shared_experts,
       num_dynamic_experts,
       norm_weights,
       epsilon,
+      norm_weights_offset,
       gate_weights,
       up_weights,
       down_weights,
@@ -243,13 +249,14 @@ at::Tensor muillm_parallel_gateupsilumoe_split_forward(
   return output;
 }
 
-at::Tensor muillm_parallel_gateupsilumoe_forward_trampoline(
+at::Tensor muillm_parallel_gateupmlpmoe_forward_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
   int num_shared_experts,
   int num_dynamic_experts,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
+  float norm_weights_offset,
   torch::Tensor gate_weights,
   torch::Tensor up_weights,
   torch::Tensor down_weights,
@@ -261,13 +268,14 @@ at::Tensor muillm_parallel_gateupsilumoe_forward_trampoline(
 ) {
   torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
-  return muillm_parallel_gateupsilumoe_forward(
+  return muillm_parallel_gateupmlpmoe_forward(
     engine.engine_ptr,
     comm.comm_ptr,
     num_shared_experts,
     num_dynamic_experts,
     norm_weights,
     epsilon,
+    norm_weights_offset,
     gate_weights,
     up_weights,
     down_weights,
@@ -279,13 +287,14 @@ at::Tensor muillm_parallel_gateupsilumoe_forward_trampoline(
   );
 }
 
-at::Tensor muillm_parallel_gateupsilumoe_split_forward_trampoline(
+at::Tensor muillm_parallel_gateupmlpmoe_split_forward_trampoline(
   muillm_engine_ptr engine,
   muillm_comm_ptr comm,
   int num_shared_experts,
   int num_dynamic_experts,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
+  float norm_weights_offset,
   torch::Tensor gate_weights,
   torch::Tensor up_weights,
   torch::Tensor down_weights,
@@ -297,13 +306,14 @@ at::Tensor muillm_parallel_gateupsilumoe_split_forward_trampoline(
 ) {
   torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
-  return muillm_parallel_gateupsilumoe_split_forward(
+  return muillm_parallel_gateupmlpmoe_split_forward(
     engine.engine_ptr,
     comm.comm_ptr,
     num_shared_experts,
     num_dynamic_experts,
     norm_weights,
     epsilon,
+    norm_weights_offset,
     gate_weights,
     up_weights,
     down_weights,

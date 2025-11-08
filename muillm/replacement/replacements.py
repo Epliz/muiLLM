@@ -1,17 +1,20 @@
-from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
+from muillm.modules.rope.rotaryembedding import MuiRotaryEmbedding
+from muillm.modules.decoder.gemma3decoder import MuiGemma3DecoderLayer
 from muillm.modules.decoder.llama4decoder import MuiLlama4TextDecoderLayer
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
+from muillm.modules.decoder.parallelgemma3decoder import MuiParallelGemma3DecoderLayer
 from muillm.modules.decoder.parallelllama4decoder import (
     MuiParallelLlama4TextDecoderLayer,
 )
 from muillm.modules.embedding import MuiEmbedding
-from muillm.modules.norm.l2norm import MuiL2Norm
-from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
-from muillm.modules.models.llama4.model import (
-    MuiLlama4ForCausalLM,
-    MuiLlama4ForConditionalGeneration,
-    MuiLlama4TextModel,
+from muillm.modules.models.gemma3.model import (
+    MuiGemma3ForCausalLM,
+    MuiGemma3ForConditionalGeneration,
+    MuiGemma3Model,
+    MuiGemma3TextModel,
 )
+from muillm.modules.norm.l2norm import MuiL2Norm
+
 
 from muillm.modules.moe.gateupdownmlpmoe import MuiGateUpDownMLPMoe
 from muillm.modules.moe.parallelgateupdownmlpmoe import MuiParallelGateUpDownMLPMoe
@@ -19,15 +22,30 @@ from muillm.modules.multilinear import MuiMultiLinear
 from muillm.modules.parallelgateupdownmlp import MuiParallelGateUpDownMLP
 from muillm.modules.parallellinear import MuiParallelLinear
 from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
-import torch
-import torch.nn as nn
+
+from muillm.modules.models.gemma3.model import (
+    MuiGemma3ForCausalLM,
+    MuiGemma3ForConditionalGeneration,
+    MuiGemma3Model,
+    MuiGemma3TextModel,
+)
+from muillm.modules.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
+from muillm.modules.models.llama.model import MuiLlamaForCausalLM, MuiLlamaModel
+from muillm.modules.models.llama4.model import (
+    MuiLlama4ForCausalLM,
+    MuiLlama4ForConditionalGeneration,
+    MuiLlama4TextModel,
+)
+
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.modules.linear import MuiLinear
 from muillm.modules.norm.rmsnorm import MuiRMSNorm
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
-from muillm.modules.models.mistral.model import MuiMistralModel, MuiMistralForCausalLM
 from muillm.memorymanagement.gc import trigger_gc
+
+import torch
+import torch.nn as nn
 
 from transformers.models.mistral.modeling_mistral import (
     MistralRotaryEmbedding,
@@ -44,6 +62,18 @@ from transformers.models.llama.modeling_llama import (
     LlamaRMSNorm,
     LlamaModel,
     LlamaForCausalLM,
+)
+
+from transformers.models.gemma3.modeling_gemma3 import (
+    Gemma3RotaryEmbedding,
+    Gemma3MLP,
+    Gemma3DecoderLayer,
+    Gemma3RMSNorm,
+    Gemma3Attention,
+    Gemma3TextModel,
+    Gemma3ForCausalLM,
+    Gemma3ForConditionalGeneration,
+    Gemma3Model,
 )
 
 from transformers.models.llama4.modeling_llama4 import (
@@ -71,12 +101,14 @@ _LAYER_REPLACEMENTS = {
     # MLPs
     MistralMLP: MuiGateUpDownMLP,
     LlamaMLP: MuiGateUpDownMLP,
+    Gemma3MLP: MuiGateUpDownMLP,
     Llama4TextMLP: MuiGateUpDownMLP,
     # MoE MLPS
     Llama4TextMoe: MuiGateUpDownMLPMoe,
     # Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
+    Gemma3RMSNorm: MuiRMSNorm,
     Llama4TextRMSNorm: MuiRMSNorm,
     Llama4TextL2Norm: MuiL2Norm,
     # Rotary embeddings
@@ -85,10 +117,15 @@ _LAYER_REPLACEMENTS = {
     # Decoders
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
+    Gemma3DecoderLayer: MuiGemma3DecoderLayer,
     MistralDecoderLayer: MuiDecoderLayer,
     LlamaDecoderLayer: MuiDecoderLayer,
     Llama4TextDecoderLayer: MuiLlama4TextDecoderLayer,
     # replacements for full models
+    Gemma3TextModel: MuiGemma3TextModel,
+    Gemma3ForCausalLM: MuiGemma3ForCausalLM,
+    Gemma3Model: MuiGemma3Model,
+    Gemma3ForConditionalGeneration: MuiGemma3ForConditionalGeneration,
     MistralModel: MuiMistralModel,
     LlamaModel: MuiLlamaModel,
     Llama4TextModel: MuiLlama4TextModel,
@@ -108,6 +145,7 @@ _TP_LAYER_REPLACEMENTS = {
     # MLPs
     MistralMLP: MuiParallelGateUpDownMLP,
     LlamaMLP: MuiParallelGateUpDownMLP,
+    Gemma3MLP: MuiParallelGateUpDownMLP,
     Llama4TextMLP: MuiParallelGateUpDownMLP,
     MuiGateUpDownMLP: MuiParallelGateUpDownMLP,
     # MoE MLPS
@@ -115,6 +153,7 @@ _TP_LAYER_REPLACEMENTS = {
     # Norm layers
     MistralRMSNorm: MuiRMSNorm,
     LlamaRMSNorm: MuiRMSNorm,
+    Gemma3RMSNorm: MuiRMSNorm,
     Llama4TextRMSNorm: MuiRMSNorm,
     Llama4TextL2Norm: MuiL2Norm,
     # Rotrary embeddings
@@ -122,10 +161,15 @@ _TP_LAYER_REPLACEMENTS = {
     LlamaRotaryEmbedding: MuiRotaryEmbedding,
     # We replace the full decoder all at once to avoid issues due to replacement order
     # (e.g. if replacing the MLP not as part of the decoder, we don't get the norm layer)
+    Gemma3DecoderLayer: MuiParallelGemma3DecoderLayer,
     MistralDecoderLayer: MuiParallelDecoderLayer,
     LlamaDecoderLayer: MuiParallelDecoderLayer,
     Llama4TextDecoderLayer: MuiParallelLlama4TextDecoderLayer,
     # replacements for full models
+    Gemma3TextModel: MuiGemma3TextModel,
+    Gemma3ForCausalLM: MuiGemma3ForCausalLM,
+    Gemma3Model: MuiGemma3Model,
+    Gemma3ForConditionalGeneration: MuiGemma3ForConditionalGeneration,
     MistralModel: MuiMistralModel,
     LlamaModel: MuiLlamaModel,
     Llama4TextModel: MuiLlama4TextModel,

@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Optional, Union
 from muillm.hftensorparallelism.hftensorparallelism import _to_local_module
 from muillm.memorymanagement.gc import trigger_gc
 from muillm.modules.module import MuiModule
@@ -12,6 +12,7 @@ import muillm_ext
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.llama4.modeling_llama4 import Llama4TextRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralRMSNorm
+from transformers.models.gemma3.modeling_gemma3 import Gemma3RMSNorm
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.torch.dtensor import to_local_tensor
@@ -20,8 +21,15 @@ from muillm.replacement.replacementcontext import MuiReplacementContext
 
 class _MuiRMSNorm(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inputs, weights, epsilon):
-        output = muillm_ext.muillm_rmsnorm_forward(weights, inputs, epsilon)
+    def forward(ctx, inputs, weights, epsilon, weight_offset, residual=None):
+        inputs = inputs.contiguous()
+        output = muillm_ext.muillm_rmsnorm_forward(
+            weights,
+            inputs,
+            residual=residual,
+            epsilon=epsilon,
+            weights_offset=weight_offset,
+        )
 
         ctx.save_for_backward(inputs, weights)
 
@@ -38,11 +46,14 @@ class MuiRMSNorm(MuiModule):
         engine_config: MuiEngineConfig,
         hidden_size,
         eps=1e-6,
+        weight_offset: float = 0,
         device=None,
         dtype=None,
     ) -> None:
         super().__init__(engine_config=engine_config)
+
         self.weight = nn.Parameter(torch.ones(hidden_size, device=device, dtype=dtype))
+        self.weight_offset = weight_offset
         self.variance_epsilon = eps
 
         # cache the flags checking if it is dispatchable
@@ -61,21 +72,46 @@ class MuiRMSNorm(MuiModule):
     @staticmethod
     def _extract_eps(
         prev_module: Union[
-            "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
+            "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Gemma3RMSNorm, Llama4TextRMSNorm
         ],
     ) -> float:
-        if isinstance(prev_module, Llama4TextRMSNorm):
-            # Llama4 RMSNorm has a different interface
+        if isinstance(prev_module, Llama4TextRMSNorm) or isinstance(
+            prev_module, Gemma3RMSNorm
+        ):
+            # Llama4 RMSNorm and Gemma3RMSNorm have a different interface
             return prev_module.eps
         else:
             # Mistral and Llama RMSNorm have the same interface
             return prev_module.variance_epsilon
 
     @staticmethod
+    def _extract_weights(
+        prev_module: Union[
+            "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Gemma3RMSNorm, Llama4TextRMSNorm
+        ],
+    ) -> nn.Parameter:
+        return prev_module.weight
+
+    @staticmethod
+    def _extract_weight_offset(
+        prev_module: Union[
+            "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Gemma3RMSNorm, Llama4TextRMSNorm
+        ],
+    ) -> float:
+        if isinstance(prev_module, MuiRMSNorm):
+            return prev_module.weight_offset
+        elif isinstance(prev_module, Gemma3RMSNorm):
+            # Gemma3RMSNorm has a weight offset of 1.0
+            return 1.0
+        else:
+            # others don't have a weight offset
+            return 0.0
+
+    @staticmethod
     def replace(
         replacement_context: MuiReplacementContext,
         prev_module: Union[
-            "MuiRMSNorm", LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
+            "MuiRMSNorm", Gemma3RMSNorm, LlamaRMSNorm, MistralRMSNorm, Llama4TextRMSNorm
         ],
     ) -> "MuiRMSNorm":
         engine_config = replacement_context.engine_config
@@ -102,15 +138,19 @@ class MuiRMSNorm(MuiModule):
         hidden_size = prev_module.weight.shape[0]
 
         eps = MuiRMSNorm._extract_eps(prev_module)
+        weight_offset = MuiRMSNorm._extract_weight_offset(prev_module)
 
         new_module = MuiRMSNorm(
             engine_config=engine_config,
             hidden_size=hidden_size,
             eps=eps,
+            weight_offset=weight_offset,
             dtype=prev_module.weight.dtype,
             device=device,
         )
-        new_module.copy_module(prev_module.weight, device=device)
+
+        prev_weights = MuiRMSNorm._extract_weights(prev_module)
+        new_module.copy_module(prev_weights, device=device)
 
         return new_module
 
@@ -131,10 +171,12 @@ class MuiRMSNorm(MuiModule):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
         if self.dispatchable:
             # we support the type
-            return _MuiRMSNorm.apply(input, self.weight, self.variance_epsilon)
+            return _MuiRMSNorm.apply(
+                input, self.weight, self.variance_epsilon, self.weight_offset, residual
+            )
         else:
             # non-fused implementation
             input_dtype = input.dtype
@@ -143,4 +185,15 @@ class MuiRMSNorm(MuiModule):
             hidden_states = hidden_states * torch.rsqrt(
                 variance + self.variance_epsilon
             )
-            return self.weight * hidden_states.to(input_dtype)
+
+            offseted_weights = (
+                self.weight + self.weight_offset
+                if self.weight_offset != 0
+                else self.weight
+            )
+            h = offseted_weights * hidden_states.to(input_dtype)
+
+            if residual is not None:
+                h = h + residual
+
+            return h

@@ -9,10 +9,12 @@
 
 // Python trampoline
 
-at::Tensor muillm_gateupsilu_forward_trampoline(
+at::Tensor muillm_gateupmlp_forward_trampoline(
   muillm_engine_ptr engine,
+  int activation,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
+  float norm_weights_offset,
   torch::Tensor gate_weights,
   torch::Tensor up_weights,
   torch::Tensor down_weights,
@@ -20,10 +22,12 @@ at::Tensor muillm_gateupsilu_forward_trampoline(
   torch::Tensor x) {
   torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
-  return muillm_gateupsilu_forward(
+  return muillm_gateupmlp_forward(
       engine.engine_ptr,
+      static_cast<MuiGateUpMLPActivation>(activation),
       norm_weights,
       epsilon,
+      norm_weights_offset,
       gate_weights,
       up_weights,
       down_weights,
@@ -32,10 +36,12 @@ at::Tensor muillm_gateupsilu_forward_trampoline(
   );
 }
 
-at::Tensor muillm_gateupsilu_split_forward_trampoline(
+at::Tensor muillm_gateupmlp_split_forward_trampoline(
   muillm_engine_ptr engine,
+  int activation,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
+  float norm_weights_offset,
   torch::Tensor gate_weights,
   torch::Tensor up_weights,
   torch::Tensor down_weights,
@@ -43,10 +49,12 @@ at::Tensor muillm_gateupsilu_split_forward_trampoline(
   torch::Tensor x) {
   torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
   torch::Tensor residual = residual_.has_value() ? residual_.value() : torch::Tensor();
-  return muillm_gateupsilu_split_forward(
+  return muillm_gateupmlp_split_forward(
       engine.engine_ptr,
+      static_cast<MuiGateUpMLPActivation>(activation),
       norm_weights,
       epsilon,
+      norm_weights_offset,
       gate_weights,
       up_weights,
       down_weights,
@@ -59,12 +67,14 @@ at::Tensor muillm_gateupsilu_split_forward_trampoline(
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
-void muillm_gateupsilu_forward_fp16(
+void muillm_gateupmlp_forward_fp16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const half* norm_weights,
   float epsilon,
+  float norm_weights_offset,
   const half* gate_weights,
   const half* up_weights,
   const half* x,
@@ -72,12 +82,14 @@ void muillm_gateupsilu_forward_fp16(
   int simd_lanes
 );
 
-void muillm_gateupsilu_forward_bf16(
+void muillm_gateupmlp_forward_bf16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const __hip_bfloat16* norm_weights,
   float epsilon,
+  float norm_weights_offset,
   const __hip_bfloat16* gate_weights,
   const __hip_bfloat16* up_weights,
   const __hip_bfloat16* x,
@@ -85,10 +97,12 @@ void muillm_gateupsilu_forward_bf16(
   int simd_lanes
 );
 
-void muillm_gateupsilu_forward_placed_output(
+void muillm_gateupmlp_forward_placed_output(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
@@ -126,12 +140,14 @@ void muillm_gateupsilu_forward_placed_output(
   int simd_lanes = engine->gpu_infos[0]->simd_lanes;
 
   if (dtype == torch::kFloat16) {
-    muillm_gateupsilu_forward_fp16(
+    muillm_gateupmlp_forward_fp16(
         stream,
+        activation,
         N,
         K,
         normalize ? (const half*)norm_weights.data_ptr() : nullptr,
         epsilon,
+        norm_weights_offset,
         (const half*)gate_weights.data_ptr(),
         (const half*)up_weights.data_ptr(),
         (const half*)x.data_ptr(),
@@ -139,12 +155,14 @@ void muillm_gateupsilu_forward_placed_output(
         simd_lanes
     );
   } else if (dtype == torch::kBFloat16) {
-    muillm_gateupsilu_forward_bf16(
+    muillm_gateupmlp_forward_bf16(
         stream,
+        activation,
         N,
         K,
         normalize ? (const __hip_bfloat16*)norm_weights.data_ptr() : nullptr,
         epsilon,
+        norm_weights_offset,
         (const __hip_bfloat16*)gate_weights.data_ptr(),
         (const __hip_bfloat16*)up_weights.data_ptr(),
         (const __hip_bfloat16*)x.data_ptr(),
@@ -152,7 +170,7 @@ void muillm_gateupsilu_forward_placed_output(
         simd_lanes
     );
   } else {
-    TORCH_CHECK(false, "Unsupported dtype for gateupsilu");
+    TORCH_CHECK(false, "Unsupported dtype for gateupmlp");
   }
 
   // down proj
@@ -161,7 +179,8 @@ void muillm_gateupsilu_forward_placed_output(
   muillm_linear_activ_forward_placed_output(
       engine,
       undef_tensor /*norm_weights*/,
-      epsilon,
+      0.f, /* epsilon */
+      0.f, /* norm_weights_offset */
       down_weights,
       mui_activation::Identity,
       undef_tensor /*mul_bias*/,
@@ -173,10 +192,12 @@ void muillm_gateupsilu_forward_placed_output(
   );
 }
 
-at::Tensor muillm_gateupsilu_forward(
+at::Tensor muillm_gateupmlp_forward(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
@@ -203,10 +224,12 @@ at::Tensor muillm_gateupsilu_forward(
 
   void* output_ptr = output.data_ptr();
 
-  muillm_gateupsilu_forward_placed_output(
+  muillm_gateupmlp_forward_placed_output(
     engine,
+    activation,
     norm_weights,
     epsilon,
+    norm_weights_offset,
     gate_weights,
     up_weights,
     down_weights,
@@ -218,12 +241,14 @@ at::Tensor muillm_gateupsilu_forward(
   return output;
 }
 
-void muillm_gateupsilu_split_forward_fp16(
+void muillm_gateupmlp_split_forward_fp16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const half* norm_weights,
   float epsilon,
+  float norm_weights_offset,
   const half* gate_weights,
   const half* up_weights,
   const half* x,
@@ -233,12 +258,14 @@ void muillm_gateupsilu_split_forward_fp16(
   int simd_lanes
 );
 
-void muillm_gateupsilu_split_forward_bf16(
+void muillm_gateupmlp_split_forward_bf16(
   hipStream_t stream,
+  MuiGateUpMLPActivation activation,
   unsigned N,
   unsigned K,
   const __hip_bfloat16* norm_weights,
   float epsilon,
+  float norm_weights_offset,
   const __hip_bfloat16* gate_weights,
   const __hip_bfloat16* up_weights,
   const __hip_bfloat16* x,
@@ -248,10 +275,12 @@ void muillm_gateupsilu_split_forward_bf16(
   int simd_lanes
 );
 
-void muillm_gateupsilu_split_forward_placed_output(
+void muillm_gateupmlp_split_forward_placed_output(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
@@ -294,12 +323,14 @@ void muillm_gateupsilu_split_forward_placed_output(
   int simd_lanes = engine->gpu_infos[0]->simd_lanes;
 
   if (dtype == torch::kFloat16) {
-    muillm_gateupsilu_split_forward_fp16(
+    muillm_gateupmlp_split_forward_fp16(
         stream,
+        activation,
         N,
         K,
         normalize ? (const half*)norm_weights.data_ptr() : nullptr,
         epsilon,
+        norm_weights_offset,
         (const half*)gate_weights.data_ptr(),
         (const half*)up_weights.data_ptr(),
         (const half*)x.data_ptr(),
@@ -309,12 +340,14 @@ void muillm_gateupsilu_split_forward_placed_output(
         simd_lanes
     );
   } else if (dtype == torch::kBFloat16) {
-    muillm_gateupsilu_split_forward_bf16(
+    muillm_gateupmlp_split_forward_bf16(
         stream,
+        activation,
         N,
         K,
         normalize ? (const __hip_bfloat16*)norm_weights.data_ptr() : nullptr,
         epsilon,
+        norm_weights_offset,
         (const __hip_bfloat16*)gate_weights.data_ptr(),
         (const __hip_bfloat16*)up_weights.data_ptr(),
         (const __hip_bfloat16*)x.data_ptr(),
@@ -324,7 +357,7 @@ void muillm_gateupsilu_split_forward_placed_output(
         simd_lanes
     );
   } else {
-    TORCH_CHECK(false, "Unsupported dtype for split gateupsilu");
+    TORCH_CHECK(false, "Unsupported dtype for split gateupmlp");
   }
 
   // down proj
@@ -332,7 +365,8 @@ void muillm_gateupsilu_split_forward_placed_output(
   muillm_linear_activ_forward_placed_output(
       engine,
       undef_tensor /*norm_weights*/,
-      epsilon,
+      0.f, /* epsilon */
+      0.f, /* norm_weights_offset */
       down_weights,
       mui_activation::Identity,
       undef_tensor /*mul_bias*/,
@@ -344,10 +378,12 @@ void muillm_gateupsilu_split_forward_placed_output(
   );
 }
 
-at::Tensor muillm_gateupsilu_split_forward(
+at::Tensor muillm_gateupmlp_split_forward(
     muillm_engine_t* engine,
+    MuiGateUpMLPActivation activation,
     torch::Tensor& norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
@@ -375,10 +411,12 @@ at::Tensor muillm_gateupsilu_split_forward(
 
   void* output_ptr = output.data_ptr();
   
-  muillm_gateupsilu_split_forward_placed_output(
+  muillm_gateupmlp_split_forward_placed_output(
     engine,
+    activation,
     norm_weights,
     epsilon,
+    norm_weights_offset,
     gate_weights,
     up_weights,
     down_weights,

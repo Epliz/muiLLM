@@ -64,6 +64,18 @@ struct __align__(8) float8 {
   float d;
 };
 
+__device__ inline float8 operator+(const float8& a, const float b) {
+  float8 r;
+  r.x = a.x + b;
+  r.y = a.y + b;
+  r.z = a.z + b;
+  r.w = a.w + b;
+  r.a = a.a + b;
+  r.b = a.b + b;
+  r.c = a.c + b;
+  r.d = a.d + b;
+  return r;
+}
 
 static inline void __device__ dot2(float& acc, const float2& a, const float2& b) {
   acc += a.x * b.x;
@@ -368,6 +380,7 @@ __global__ void muillm_gemv_norm_inputs_bf16_kernel(
     unsigned N,
     unsigned K,
     float epsilon,
+    float weights_offset,
     float scale
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
@@ -417,7 +430,7 @@ __global__ void muillm_gemv_norm_inputs_bf16_kernel(
         for (k = threadIdx.x * 8; k + 7 < K; k += (THREADS_PER_BLOCK * 8)) {
           // vectorized
           float8 x = __bfloat1682float8(*(const bfloat168*)(addr(X, k)));
-          float8 nw = __bfloat1682float8(*(const bfloat168*)(addr(NW, k)));
+          float8 nw = __bfloat1682float8(*(const bfloat168*)(addr(NW, k))) + weights_offset;
 
           float8 w0 = __bfloat1682float8(load_nontemporal_bfloat168(addr(W0, k)));
           float8 w1 = __bfloat1682float8(load_nontemporal_bfloat168(addr(W1, k)));
@@ -445,7 +458,7 @@ __global__ void muillm_gemv_norm_inputs_bf16_kernel(
         if (k + 3 < K) {
           // vectorized
           float4 x = __bfloat1642float4(*(const bfloat164*)(addr(X, k)));
-          float4 nw = __bfloat1642float4(*(const bfloat164*)(addr(NW, k)));
+          float4 nw = __bfloat1642float4(*(const bfloat164*)(addr(NW, k))) + weights_offset;
 
           float4 w0 = __bfloat1642float4(load_nontemporal_bfloat164(addr(W0, k)));
           float4 w1 = __bfloat1642float4(load_nontemporal_bfloat164(addr(W1, k)));
@@ -471,7 +484,7 @@ __global__ void muillm_gemv_norm_inputs_bf16_kernel(
         if (k + 1 < K) {
           // remainder
           float2 x = __bfloat1622float2(*(const __hip_bfloat162*)(addr(X, k)));
-          float2 nw = __bfloat1622float2(*(const __hip_bfloat162*)(addr(NW, k)));
+          float2 nw = __bfloat1622float2(*(const __hip_bfloat162*)(addr(NW, k))) + weights_offset;
 
           float2 w0 = __bfloat1622float2(load_nontemporal_bfloat162(addr(W0, k)));
           float2 w1 = __bfloat1622float2(load_nontemporal_bfloat162(addr(W1, k)));
@@ -493,7 +506,7 @@ __global__ void muillm_gemv_norm_inputs_bf16_kernel(
         if (k < K) {
           // remainder
           float x = __bfloat162float(*addr(X,k));
-          float nw = __bfloat162float(*addr(NW,k));
+          float nw = __bfloat162float(*addr(NW,k)) + weights_offset;
 
 
           float w0 = __bfloat162float(*addr(W0,k));
@@ -548,7 +561,7 @@ __global__ void muillm_gemv_norm_inputs_bf16_kernel(
             float w = __bfloat162float(W_[k]);
 
             float x = __bfloat162float(X[k]);
-            float nw = __bfloat162float(NW[k]);
+            float nw = __bfloat162float(NW[k]) + weights_offset;
 
             // accumuate the variance
             var_x += x * x;
@@ -563,7 +576,7 @@ __global__ void muillm_gemv_norm_inputs_bf16_kernel(
             float w = __bfloat162float(W_[k]);
 
             float x = __bfloat162float(X[k]);
-            float nw = __bfloat162float(NW[k]);
+            float nw = __bfloat162float(NW[k]) + weights_offset;
 
             // don't accumulate the variance (we already have done it with i == 0)
 
@@ -631,6 +644,7 @@ void muillm_linear_activ_forward_bf16(
   unsigned K,
   const __hip_bfloat16* norm_weights,
   float epsilon,
+  float norm_weights_offset,
   const __hip_bfloat16* weights,
   mui_activation activ,
   const __hip_bfloat16* mul_bias,
@@ -669,6 +683,7 @@ void muillm_linear_activ_forward_bf16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     } else if (threads_per_blocks == 128) {
@@ -684,6 +699,7 @@ void muillm_linear_activ_forward_bf16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     } else if (threads_per_blocks == 256) {
@@ -699,6 +715,7 @@ void muillm_linear_activ_forward_bf16(
         N,
         K,
         epsilon,
+        norm_weights_offset,
         scale
       );
     }

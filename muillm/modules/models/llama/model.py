@@ -21,7 +21,7 @@ from typing import List, Optional, Tuple, Union
 
 from muillm.engineconfig import MuiEngineConfig
 from muillm.memorymanagement.gc import trigger_gc
-from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
+from muillm.modules.rope.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.attention.sdpaattention import _ignore_causal_mask_sdpa
 from muillm.modules.decoder.decoder import MuiDecoderLayer
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
@@ -117,6 +117,15 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             self.post_init()
 
     def finalize_init(self):
+        # finalize initializations
+        self.embed_tokens.finalize_init()
+        self.rotary_emb.finalize_init()
+
+        for layer in self.layers:
+            layer.finalize_init()
+
+        # create the cpp module if possible
+
         if self.comms == None:
             # in the single GPU case we don't have comms, and we can't use the parallel decoder stack
             self.cpp_module = None
@@ -303,6 +312,10 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
+        if all_ones_mask is None:
+            # if not specified, assume it might not have just ones
+            all_ones_mask = False
+
         causal_mask = self._update_causal_mask(
             attention_mask,
             inputs_shape,
@@ -311,10 +324,6 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             output_attentions,
             all_ones_mask,
         )
-
-        if all_ones_mask is None:
-            # if not specified, assume it might not have just ones
-            all_ones_mask = False
 
         if all_ones_mask:
             causal_mask = None
@@ -479,7 +488,10 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
 
         dtype = self.mdtype
         sequence_length = inputs_shape[1]
-        if False:  # using_static_cache:
+        if isinstance(past_key_values, MuiCache):
+            # use the minimal size
+            target_length = past_seen_tokens + sequence_length
+        elif isinstance(past_key_values, StaticCache):
             # modification compared to normal HF transformers
             # we use the same normal code as for dynamic cache
             target_length = past_key_values.get_max_length()
@@ -487,7 +499,7 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             target_length = (
                 attention_mask.shape[-1]
                 if isinstance(attention_mask, torch.Tensor)
-                else past_seen_tokens + sequence_length + 1
+                else past_seen_tokens + sequence_length
             )
 
         # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
@@ -843,10 +855,6 @@ class MuiLlamaForCausalLM(LlamaPreTrainedModel, MuiGenerationMixin):
                     # if we are doing the first decode, prev_position_ids
                     # contain several tokens but need a single one
                     position_ids = position_ids[:, -input_ids.shape[1] :]
-
-            # if self.engine_config.is_rank0():
-            #     print(f"(prepare inputs) position_ids shape: ", position_ids.shape)
-            #     print(f"(prepare inputs) position_ids: ", position_ids)
 
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and cache_position[0] == 0:

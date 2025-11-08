@@ -14,22 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.attention.causaltransformerdecoding import (
-    mui_causally_decode,
-    mui_causally_decode_masked,
-)
-from muillm.modules.attention.rotaryembedding import _MuiComplexRotaryNoCache
+from muillm.modules.rope.ropeops import apply_complex_rotary_emb
 from muillm.modules.attention.temperaturetuning import _MuiTemperatureTuning
+from muillm.modules.kvcache.cache_utils import MuiCache, MuiHybridChunkedCache
 from muillm.modules.linear import MuiLinear
 from muillm.modules.module import MuiModule
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.utils.checkpoint
 
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
@@ -39,38 +33,14 @@ from transformers.processing_utils import Unpack
 from transformers.utils import logging
 from transformers.models.llama4.modeling_llama4 import (
     Llama4TextAttention,
-    Llama4TextL2Norm,
 )
-from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
 
-from muillm.modules.multilinear import MuiMultiLinear
 from muillm.modules.norm.qkl2norm import MuiQKL2Norm
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
+import muillm_ext
+
 logger = logging.get_logger(__name__)
-
-
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    dtype = xq.dtype
-    if (xq.is_cuda) and ((dtype == torch.float16) or (dtype == torch.bfloat16)):
-        freqs_cis = freqs_cis.contiguous()
-        # can dispatch to the custom kernel
-        return _MuiComplexRotaryNoCache.apply(
-            xq,
-            xk,
-            freqs_cis,
-        )
-    else:
-        # freqs_cis is always a complex tensor of floats
-        xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-        xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-        xq_out = torch.view_as_real(xq_ * freqs_cis[:, None, :, :]).flatten(3)
-        xk_out = torch.view_as_real(xk_ * freqs_cis[:, None, :, :]).flatten(3)
-        return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
 def apply_temperature_tuning(
@@ -148,6 +118,62 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
+class _MuiLlama4AttentionFullForward(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        module,
+        cache_module,
+        q,
+        k,
+        v,
+        m,
+        residual,
+        position_embeddings,
+        cache_positions,
+    ):
+        output = muillm_ext.muillm_llama4_attention_module_rope_forward(
+            module,
+            cache_module,
+            q,
+            k,
+            v,
+            m,
+            residual,
+            position_embeddings,
+            cache_positions,
+        )
+
+        ctx.save_for_backward(q, k, v, m)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
+
+
+class _MuiLlama4Attention(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, module, q, k, v, m, residual):
+        output = muillm_ext.muillm_llama4_attention_module_forward(
+            module,
+            q,
+            k,
+            v,
+            m,
+            residual,
+        )
+
+        ctx.save_for_backward(q, k, v, m)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise ValueError("Not implemented")
+
+
 class MuiLlama4TextAttention(MuiModule):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -159,6 +185,13 @@ class MuiLlama4TextAttention(MuiModule):
         o_proj: MuiLinear,
     ):
         super().__init__(engine_config=engine_config)
+
+        self.cpp_engine = engine_config.cpp_engine
+        # the cpp module will be created at the end of all layer replacements
+        # (set the field here before potential OOM errors so that it can still be manipulated in
+        # the destructor)
+        self.cpp_module = None
+
         self.config = prev_module.config
         self.layer_idx = prev_module.layer_idx
         self.head_dim = prev_module.head_dim
@@ -175,6 +208,42 @@ class MuiLlama4TextAttention(MuiModule):
         self.o_proj = o_proj
         if self.config.use_qk_norm and self.use_rope:
             self.qk_norm = qk_norm
+
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+    def _check_dispatchable(self):
+        self.dispatchable = self.o_proj.dispatchable
+
+    def finalize_init(self):
+        # cache the flags checking if it is dispatchable
+        self._check_dispatchable()
+
+        if self.cpp_module is not None:
+            muillm_ext.muillm_llama4_attention_module_deinit(self.cpp_module)
+
+        use_qk_norm = hasattr(self, "qk_norm")
+        use_temperature_tuning = self.attn_temperature_tuning and not self.use_rope
+
+        self.cpp_module = muillm_ext.muillm_llama4_attention_module_init(
+            self.cpp_engine,
+            self.o_proj.cpp_module,
+            self.num_attention_heads,
+            self.num_key_value_heads,
+            self.head_dim,
+            bool(self.use_rope),
+            use_qk_norm,
+            self.qk_norm.variance_epsilon if use_qk_norm else 0.0,
+            use_temperature_tuning,
+            self.attn_scale,
+            self.floor_scale,
+            self.layer_idx,
+        )
+
+    def finalize_deinit(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_llama4_attention_module_deinit(self.cpp_module)
+            self.cpp_module = None
 
     @staticmethod
     def replace(
@@ -207,7 +276,7 @@ class MuiLlama4TextAttention(MuiModule):
         query_states: torch.Tensor,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        position_embeddings: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
@@ -216,64 +285,79 @@ class MuiLlama4TextAttention(MuiModule):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = query_states.size()
 
-        if (
-            (q_len == 1)
-            and (
-                (query_states.dtype == torch.float16)
-                or (query_states.dtype == torch.bfloat16)
-            )
-            and (query_states.is_cuda)
-        ):
-            # as q_len == 1, we can avoid the transposes
-            query_states = query_states.view(
-                bsz, self.num_attention_heads, q_len, self.head_dim
-            )
-            key_states = key_states.view(
-                bsz, self.num_key_value_heads, q_len, self.head_dim
-            )
-            value_states = value_states.view(
-                bsz, self.num_key_value_heads, q_len, self.head_dim
-            )
-
-            if (
-                self.use_rope
-            ):  # the 16E model skips rope for long context on certain layers
-                query_states, key_states = apply_rotary_emb(
+        if (q_len == 1) and self.dispatchable:
+            if isinstance(past_key_value, MuiHybridChunkedCache):
+                attn_output = _MuiLlama4AttentionFullForward.apply(
+                    self.cpp_module,
+                    past_key_value.cpp_module,
                     query_states,
                     key_states,
+                    value_states,
+                    attention_mask,
+                    residual,
                     position_embeddings,
-                )
-
-            # (rope and qk_norm commute as rope is a rotation)
-            if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
-                query_states, key_states = self.qk_norm(query_states, key_states)
-
-            # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
-            if self.attn_temperature_tuning and not self.use_rope:
-                query_states = apply_temperature_tuning(
-                    query_states,
                     cache_position,
-                    self.attn_scale,
-                    self.floor_scale,
-                )
-
-            query_states = query_states
-            key_states = key_states
-
-            if past_key_value is not None:
-                # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                cache_kwargs = {"cache_position": cache_position}
-                key_states, value_states = past_key_value.update(
-                    key_states, value_states, self.layer_idx, cache_kwargs
-                )
-
-            if attention_mask is not None:
-                attn_output = mui_causally_decode_masked(
-                    query_states, key_states, value_states, attention_mask
                 )
             else:
-                attn_output = mui_causally_decode(
-                    query_states, key_states, value_states
+                # as q_len == 1, we can avoid the transposes
+                query_states = query_states.view(
+                    bsz, self.num_attention_heads, q_len, self.head_dim
+                )
+                key_states = key_states.view(
+                    bsz, self.num_key_value_heads, q_len, self.head_dim
+                )
+                value_states = value_states.view(
+                    bsz, self.num_key_value_heads, q_len, self.head_dim
+                )
+
+                # (rope and qk_norm commute as rope is a rotation)
+                if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
+                    query_states, key_states = self.qk_norm(query_states, key_states)
+
+                # Use temperature tuning from https://arxiv.org/abs/2501.19399) to NoROPE layers
+                if self.attn_temperature_tuning and not self.use_rope:
+                    query_states = apply_temperature_tuning(
+                        query_states,
+                        cache_position,
+                        self.attn_scale,
+                        self.floor_scale,
+                    )
+
+                cache_kwargs = {
+                    "cache_position": cache_position,
+                }
+                if self.use_rope and isinstance(past_key_value, MuiCache):
+                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                    query_states, key_states, value_states = past_key_value.rope_update(
+                        query_states,
+                        key_states,
+                        value_states,
+                        position_embeddings,
+                        self.layer_idx,
+                        cache_kwargs,
+                        complex_rope=True,
+                    )
+                else:
+                    if self.use_rope:
+                        query_states, key_states = apply_complex_rotary_emb(
+                            query_states,
+                            key_states,
+                            position_embeddings,
+                        )
+
+                    if past_key_value is not None:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        key_states, value_states = past_key_value.update(
+                            key_states, value_states, self.layer_idx, cache_kwargs
+                        )
+
+                attn_output = _MuiLlama4Attention.apply(
+                    self.cpp_module,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    residual,
                 )
 
             attn_weights = None
@@ -292,15 +376,6 @@ class MuiLlama4TextAttention(MuiModule):
             key_states = key_states.transpose(1, 2)
             value_states = value_states.transpose(1, 2)
 
-            if (
-                self.use_rope
-            ):  # the 16E model skips rope for long context on certain layers
-                query_states, key_states = apply_rotary_emb(
-                    query_states,
-                    key_states,
-                    position_embeddings,
-                )
-
             # (rope and qk_norm commute as rope is a rotation)
             if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
                 query_states, key_states = self.qk_norm(query_states, key_states)
@@ -314,12 +389,33 @@ class MuiLlama4TextAttention(MuiModule):
                     self.floor_scale,
                 )
 
-            if past_key_value is not None:
+            cache_kwargs = {
+                "cache_position": cache_position,
+            }
+            if self.use_rope and isinstance(past_key_value, MuiCache):
                 # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                cache_kwargs = {"cache_position": cache_position}
-                key_states, value_states = past_key_value.update(
-                    key_states, value_states, self.layer_idx, cache_kwargs
+                query_states, key_states, value_states = past_key_value.rope_update(
+                    query_states,
+                    key_states,
+                    value_states,
+                    position_embeddings,
+                    self.layer_idx,
+                    cache_kwargs,
+                    complex_rope=True,
                 )
+            else:
+                if self.use_rope:
+                    query_states, key_states = apply_complex_rotary_emb(
+                        query_states,
+                        key_states,
+                        position_embeddings,
+                    )
+
+                if past_key_value is not None:
+                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                    key_states, value_states = past_key_value.update(
+                        key_states, value_states, self.layer_idx, cache_kwargs
+                    )
 
             attention_interface: Callable = eager_attention_forward
             if self.config._attn_implementation != "eager":
@@ -345,6 +441,7 @@ class MuiLlama4TextAttention(MuiModule):
                 **kwargs,
             )
 
-        attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
-        attn_output = self.o_proj(attn_output, residual=residual)
+            attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
+            attn_output = self.o_proj(attn_output, residual=residual)
+
         return attn_output, attn_weights

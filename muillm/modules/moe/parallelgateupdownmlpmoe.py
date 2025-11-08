@@ -56,7 +56,7 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         hidden_size: int,
         intermediate_size: int,
         activation_function: nn.Module,
-        normalize: bool = False,
+        norm: Optional[MuiRMSNorm] = None,
         device=None,
         dtype=None,
     ):
@@ -79,6 +79,8 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         self.num_dynamic_experts = num_dynamic_experts
         self.num_experts = self.num_shared_experts + self.num_dynamic_experts
 
+        self.norm = norm
+
         # We fuse the layernorm into the router
         # We do not shard the router, as it is small
         self.router = MuiLinear(
@@ -86,7 +88,7 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
             in_features=hidden_size,
             out_features=self.num_dynamic_experts,
             bias=False,
-            normalize=normalize,
+            norm=norm,
             device=device,
             dtype=dtype,
         )
@@ -139,11 +141,7 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
         if self.cpp_module is not None:
             muillm_ext.muillm_parallel_gateupdownmlpmoe_module_deinit(self.cpp_module)
 
-        norm_weights = (
-            self.router.norm_weights[0]
-            if self.router.norm_weights is not None
-            else None
-        )
+        normalize = self.norm is not None
 
         # make sure the router is initialized
         self.router.finalize_init()
@@ -155,11 +153,12 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
             self.num_shared_experts,
             self.num_dynamic_experts,
             self.top_k,
-            norm_weights,
+            self.norm.weight if normalize else None,
             self.gate_projs.linear.weights[0],
             self.up_projs.linear.weights[0],
             self.down_projs.linear.weights[0],
-            self.router.variance_epsilon,
+            self.norm.variance_epsilon if normalize else 0.0,
+            self.norm.weight_offset if normalize else 0.0,
         )
 
         # cache the flags checking if it is dispatchable
@@ -209,6 +208,15 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
 
         activation_function = prev_module.experts.act_fn
 
+        norm = (
+            MuiRMSNorm.replace(
+                replacement_context,
+                prev_layernorm_module,
+            )
+            if prev_layernorm_module is not None
+            else None
+        )
+
         new_module = MuiParallelGateUpDownMLPMoe(
             engine_config=engine_config,
             num_dynamic_experts=num_dynamic_experts,
@@ -216,14 +224,13 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             activation_function=activation_function,
-            normalize=prev_layernorm_module is not None,
+            norm=norm,
             device=device,
             dtype=dtype,
         )
 
         new_module.copy_module(
             prev_module=prev_module,
-            prev_layernorm_module=prev_layernorm_module,
             device=device,
         )
 
@@ -274,24 +281,15 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
     def copy_module(
         self,
         prev_module: Llama4TextMoe,
-        prev_layernorm_module: Union[MuiRMSNorm, Llama4TextRMSNorm] = None,
         device=None,
     ):
         if device is None:
             raise ValueError("device was None")
 
-        variance_epsilon = 0.0
-        norm_weights = None
-        if prev_layernorm_module is not None:
-            variance_epsilon = MuiRMSNorm._extract_eps(prev_layernorm_module)
-            norm_weights = prev_layernorm_module.weight
-
         # copy the router
 
         self.router.copy_module(
             prev_module=prev_module.router,
-            norm_weights=norm_weights,
-            variance_epsilon=variance_epsilon,
             device=device,
         )
 
@@ -404,12 +402,8 @@ class MuiParallelGateUpDownMLPMoe(MuiModule):
             router_top_values, router_indices = topk_sigmoid(router_logits, self.top_k)
 
             # normalize the hidden states if needed
-            if self.router.normalize:
-                hidden_states = _MuiRMSNorm.apply(
-                    hidden_states,
-                    self.router.norm_weights,
-                    self.router.variance_epsilon,
-                )
+            if self.norm is not None:
+                hidden_states = self.norm(hidden_states)
 
             out_shape = hidden_states.shape
 

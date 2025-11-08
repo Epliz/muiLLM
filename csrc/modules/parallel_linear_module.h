@@ -20,6 +20,8 @@ struct MuiLLMParallelLinear: torch::nn::Module {
   torch::Tensor add_bias{nullptr};
 
   float variance_epsilon;
+  float norm_weights_offset;
+
   int sharding_dim;
 
   bool dispatchable;
@@ -33,6 +35,7 @@ struct MuiLLMParallelLinear: torch::nn::Module {
     torch::Tensor& mul_bias,
     torch::Tensor& add_bias,
     float variance_epsilon,
+    float norm_weights_offset,
     int sharding_dim
   );
 
@@ -63,6 +66,7 @@ muillm_parallel_linear_module_ptr_t muillm_parallel_linear_module_init_trampolin
   torch::Tensor weights,
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
+  float norm_weights_offset,
   std::optional<torch::Tensor> mul_bias_,
   std::optional<torch::Tensor> add_bias_,
   int sharding_dim

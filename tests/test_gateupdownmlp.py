@@ -11,6 +11,8 @@ from transformers.models.mistral.configuration_mistral import MistralConfig
 from transformers.models.llama.modeling_llama import LlamaMLP
 from transformers.models.llama.configuration_llama import LlamaConfig
 
+from transformers.models.gemma3.modeling_gemma3 import Gemma3MLP
+from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 
 from transformers.models.llama4.modeling_llama4 import Llama4TextMLP
 from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
@@ -220,6 +222,86 @@ def test_basic_llama4_mlp():
     y_m = muimlp(input_tensor)
 
     tensors_equal(y, y_m)
+
+
+def random_gemma3_mlp(
+    hidden_size: int, intermediate_size: int, device: str, dtype: torch.dtype
+) -> Gemma3MLP:
+    config = Gemma3TextConfig(
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=1,
+        num_attention_heads=16,
+        initializer_factor=0.02,
+        layer_norm_eps=1e-5,
+    )
+
+    mlp = Gemma3MLP(config)
+
+    mlp = mlp.to(device=device, dtype=dtype)
+
+    # initialize weights
+    torch.nn.init.xavier_uniform_(mlp.gate_proj.weight)
+    torch.nn.init.xavier_uniform_(mlp.up_proj.weight)
+    torch.nn.init.xavier_uniform_(mlp.down_proj.weight)
+
+    return mlp
+
+
+def copy_gemma3_mlp(mlp: Gemma3MLP) -> Gemma3MLP:
+    new_mlp = Gemma3MLP(config=mlp.config)
+
+    new_mlp.gate_proj.weight = nn.Parameter(mlp.gate_proj.weight.clone().detach())
+    new_mlp.up_proj.weight = nn.Parameter(mlp.up_proj.weight.clone().detach())
+    new_mlp.down_proj.weight = nn.Parameter(mlp.down_proj.weight.clone().detach())
+
+    return new_mlp
+
+
+def _test_basic_gemma3_mlp(device: str = "cpu", dtype: torch.dtype = torch.float32):
+    hidden_size = 256
+    mlp = random_gemma3_mlp(
+        hidden_size=hidden_size, intermediate_size=1024, device=device, dtype=dtype
+    )
+
+    # replace destroys the passed linear module so we need to copy it
+    mlp_copy = copy_gemma3_mlp(mlp)
+
+    engine_config = MuiEngineConfig(tensor_parallelism=1)
+    replacement_context = MuiReplacementContext(
+        engine_config=engine_config,
+        model=None,  # No model context needed for this test
+        device=device,
+    )
+    muimlp = MuiGateUpDownMLP.replace(
+        replacement_context=replacement_context,
+        prev_module=mlp_copy,
+    )
+    muimlp.finalize_init()
+
+    input_tensor = torch.rand(size=(4, hidden_size), device=device, dtype=dtype)
+
+    y = mlp(input_tensor)
+
+    y_m = muimlp(input_tensor)
+
+    tensors_equal(y, y_m)
+
+
+def test_basic_gemma3_mlp_fp32_cpu():
+    _test_basic_gemma3_mlp(device="cpu", dtype=torch.float32)
+
+
+def test_basic_gemma3_mlp_fp32_gpu():
+    _test_basic_gemma3_mlp(device="cuda", dtype=torch.float32)
+
+
+def test_basic_gemma3_mlp_fp16_gpu():
+    _test_basic_gemma3_mlp(device="cuda", dtype=torch.float16)
+
+
+def test_basic_gemma3_mlp_bf16_gpu():
+    _test_basic_gemma3_mlp(device="cuda", dtype=torch.bfloat16)
 
 
 # TODO tests with bias and no bias

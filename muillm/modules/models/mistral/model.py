@@ -3,7 +3,7 @@
 
 from typing import List, Optional, Tuple, Union
 from muillm.memorymanagement.gc import trigger_gc
-from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
+from muillm.modules.rope.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.attention.sdpaattention import _ignore_causal_mask_sdpa
 from muillm.modules.decoder.decoder import MuiDecoderLayer
 from muillm.modules.decoder.paralleldecoder import MuiParallelDecoderLayer
@@ -109,6 +109,15 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
             self.post_init()
 
     def finalize_init(self):
+        # finalize initializations
+        self.embed_tokens.finalize_init()
+        self.rotary_emb.finalize_init()
+
+        for layer in self.layers:
+            layer.finalize_init()
+
+        # create the cpp module if possible
+
         if self.comms == None:
             # in the single GPU case we don't have comms, and we can't use the parallel decoder stack
             self.cpp_module = None
@@ -489,20 +498,22 @@ class MuiMistralModel(MistralPreTrainedModel, MuiModule):
 
         dtype = self.mdtype
         sequence_length = inputs_shape[1]
-        # SlidingWindowCache
-        if using_sliding_window_cache:
+
+        if isinstance(past_key_values, MuiCache):
+            # use the minimal size
+            target_length = past_seen_tokens + sequence_length
+        # TODO: muiLLM sliding window cache
+        elif using_sliding_window_cache:
             target_length = max(sequence_length, self.config.sliding_window)
-        # StaticCache
-        elif False:  # using_static_cache:
+        elif isinstance(past_key_values, StaticCache):
             # modification compared to normal HF transformers
             # we use the same normal code as for dynamic cache
             target_length = past_key_values.get_max_length()
-        # DynamicCache or no cache
         else:
             target_length = (
                 attention_mask.shape[-1]
                 if isinstance(attention_mask, torch.Tensor)
-                else past_seen_tokens + sequence_length + 1
+                else past_seen_tokens + sequence_length
             )
 
         # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).

@@ -5,12 +5,13 @@
 
 #include <torch/extension.h>
 
-void muillm_gateupsilumoe_forward_placed_output(
+void muillm_gateupmlpmoe_forward_placed_output(
     muillm_engine_t* engine,
     int num_shared_experts,
     int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
@@ -21,12 +22,13 @@ void muillm_gateupsilumoe_forward_placed_output(
     void* output_ptr
 );
 
-void muillm_gateupsilumoe_split_forward_placed_output(
+void muillm_gateupmlpmoe_split_forward_placed_output(
     muillm_engine_t* engine,
     int num_shared_experts,
     int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
@@ -37,12 +39,13 @@ void muillm_gateupsilumoe_split_forward_placed_output(
     void* output_ptr
 );
 
-at::Tensor muillm_gateupsilumoe_forward(
+at::Tensor muillm_gateupmlpmoe_forward(
     muillm_engine_t* engine,
     int num_shared_experts,
     int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
@@ -52,12 +55,13 @@ at::Tensor muillm_gateupsilumoe_forward(
     torch::Tensor& router_indices
 );
 
-at::Tensor muillm_gateupsilumoe_split_forward(
+at::Tensor muillm_gateupmlpmoe_split_forward(
     muillm_engine_t* engine,
     int num_shared_experts,
     int num_dynamic_experts,
     torch::Tensor& norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor& gate_weights,
     torch::Tensor& up_weights,
     torch::Tensor& down_weights,
@@ -68,12 +72,13 @@ at::Tensor muillm_gateupsilumoe_split_forward(
 );
 
 // python trampoline
-at::Tensor muillm_gateupsilumoe_forward_trampoline(
+at::Tensor muillm_gateupmlpmoe_forward_trampoline(
     muillm_engine_ptr engine,
     int num_shared_experts,
     int num_dynamic_experts,
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor gate_weights,
     torch::Tensor up_weights,
     torch::Tensor down_weights,
@@ -83,12 +88,13 @@ at::Tensor muillm_gateupsilumoe_forward_trampoline(
     torch::Tensor router_indices
 );
 
-at::Tensor muillm_gateupsilumoe_split_forward_trampoline(
+at::Tensor muillm_gateupmlpmoe_split_forward_trampoline(
     muillm_engine_ptr engine,
     int num_shared_experts,
     int num_dynamic_experts,
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor gate_weights,
     torch::Tensor up_weights,
     torch::Tensor down_weights,

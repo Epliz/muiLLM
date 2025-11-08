@@ -21,8 +21,8 @@ MuillmHybridChunkedKVCache::~MuillmHybridChunkedKVCache() {
 }
 
 std::tuple<torch::Tensor, torch::Tensor> MuillmHybridChunkedKVCache::update(
-  torch::Tensor key_states,
-  torch::Tensor value_states,
+  torch::Tensor& key_states,
+  torch::Tensor& value_states,
   torch::Tensor& cache_positions,
   int layer_index
 ) {
@@ -71,7 +71,138 @@ std::tuple<torch::Tensor, torch::Tensor> MuillmHybridChunkedKVCache::update(
       this->key_cache[layer_index],
       this->value_cache[layer_index],
       cache_positions,
-      this->seen_tokens()
+      seen_tokens
+    );
+  }
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> MuillmHybridChunkedKVCache::rope_update(
+  torch::Tensor& query_states,
+  torch::Tensor& key_states,
+  torch::Tensor& value_states,
+  std::tuple<torch::Tensor, torch::Tensor>& position_embeddings,
+  torch::Tensor& cache_positions,
+  int layer_index
+) {
+
+  auto undef_tensor = torch::Tensor();
+
+  int prev_seen_tokens;
+  int seen_tokens;
+  auto num_new_tokens = key_states.size(key_states.dim() - 2);
+
+  if (layer_index == 0) {
+    // update the token count only for the first layer
+    prev_seen_tokens = this->seen_tokens();
+    seen_tokens = prev_seen_tokens + num_new_tokens;
+    this->seen_tokens(seen_tokens);
+  } else {
+    // we assume we already updated the count with the first layer
+    seen_tokens = this->seen_tokens();
+    prev_seen_tokens = seen_tokens - num_new_tokens;
+  }
+
+  torch::Tensor cos = std::get<0>(position_embeddings);
+  torch::Tensor sin = std::get<1>(position_embeddings);
+
+  if (this->is_sliding[layer_index]) {
+    // sliding cache
+    bool is_prefill = prev_seen_tokens == 0;
+    bool is_full = seen_tokens > this->window_size;
+
+    auto [q_out, k_out, v_out] = muillm_rope_forward_sliding_cache(
+      cos,
+      sin,
+      query_states,
+      key_states,
+      value_states,
+      this->key_cache[layer_index],
+      this->value_cache[layer_index],
+      cache_positions,
+      seen_tokens
+    );
+    
+    if (!is_prefill && is_full) {
+      // the cache was re-allocated during the update
+      this->key_cache[layer_index] = k_out;
+      this->value_cache[layer_index] = v_out;
+    }
+
+    return std::make_tuple(q_out, k_out, v_out);
+  } else {
+    // static cache
+    return muillm_rope_forward_static_cache(
+      cos,
+      sin,
+      query_states,
+      key_states,
+      value_states,
+      this->key_cache[layer_index],
+      this->value_cache[layer_index],
+      cache_positions,
+      seen_tokens
+    );
+  }
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> MuillmHybridChunkedKVCache::complex_rope_update(
+  torch::Tensor& query_states,
+  torch::Tensor& key_states,
+  torch::Tensor& value_states,
+  torch::Tensor& position_embeddings,
+  torch::Tensor& cache_positions,
+  int layer_index
+) {
+
+  int prev_seen_tokens;
+  int seen_tokens;
+  auto num_new_tokens = key_states.size(key_states.dim() - 2);
+
+  if (layer_index == 0) {
+    // update the token count only for the first layer
+    prev_seen_tokens = this->seen_tokens();
+    seen_tokens = prev_seen_tokens + num_new_tokens;
+    this->seen_tokens(seen_tokens);
+  } else {
+    // we assume we already updated the count with the first layer
+    seen_tokens = this->seen_tokens();
+    prev_seen_tokens = seen_tokens - num_new_tokens;
+  }
+
+  if (this->is_sliding[layer_index]) {
+    // sliding cache
+    bool is_prefill = prev_seen_tokens == 0;
+    bool is_full = seen_tokens > this->window_size;
+
+    auto [q_out, k_out, v_out] = muillm_complex_rope_forward_sliding_cache(
+      position_embeddings,
+      query_states,
+      key_states,
+      value_states,
+      this->key_cache[layer_index],
+      this->value_cache[layer_index],
+      cache_positions,
+      seen_tokens
+    );
+    
+    if (!is_prefill && is_full) {
+      // the cache was re-allocated during the update
+      this->key_cache[layer_index] = k_out;
+      this->value_cache[layer_index] = v_out;
+    }
+
+    return std::make_tuple(q_out, k_out, v_out);
+  } else {
+    // static cache
+    return muillm_complex_rope_forward_static_cache(
+      position_embeddings,
+      query_states,
+      key_states,
+      value_states,
+      this->key_cache[layer_index],
+      this->value_cache[layer_index],
+      cache_positions,
+      seen_tokens
     );
   }
 }
@@ -103,8 +234,8 @@ muillm_kvcache_module_ptr_t muillm_hybrid_chunked_kvcache_module_init_trampoline
 // update
 std::tuple<torch::Tensor, torch::Tensor> muillm_hybrid_chunked_kvcache_module_update_trampoline(
   muillm_kvcache_module_ptr_t module_ptr,
-  torch::Tensor key_states,
-  torch::Tensor value_states,
+  torch::Tensor& key_states,
+  torch::Tensor& value_states,
   torch::Tensor& cache_positions,
   int layer_index
 ) {
@@ -117,6 +248,57 @@ std::tuple<torch::Tensor, torch::Tensor> muillm_hybrid_chunked_kvcache_module_up
   return hybrid_cache->update(
     key_states,
     value_states,
+    cache_positions,
+    layer_index
+  );
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> muillm_hybrid_chunked_kvcache_module_rope_update_trampoline(
+  muillm_kvcache_module_ptr_t module_ptr,
+  torch::Tensor& query_states,
+  torch::Tensor& key_states,
+  torch::Tensor& value_states,
+  std::tuple<torch::Tensor, torch::Tensor> position_embeddings,
+  torch::Tensor& cache_positions,
+  int layer_index
+) {
+  MuillmKVCache* cache = module_ptr.ptr;
+  if (cache->type != MUILLM_HYBRID_CHUNKED_KVCACHE) {
+    TORCH_CHECK(false, "expected a hybrid chunked cache");
+  }
+
+  MuillmHybridChunkedKVCache* hybrid_cache = (MuillmHybridChunkedKVCache*) cache;
+  return hybrid_cache->rope_update(
+    query_states,
+    key_states,
+    value_states,
+    position_embeddings,
+    cache_positions,
+    layer_index
+  );
+}
+
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> muillm_hybrid_chunked_kvcache_module_complex_rope_update_trampoline(
+  muillm_kvcache_module_ptr_t module_ptr,
+  torch::Tensor& query_states,
+  torch::Tensor& key_states,
+  torch::Tensor& value_states,
+  torch::Tensor& position_embeddings,
+  torch::Tensor& cache_positions,
+  int layer_index
+) {
+  MuillmKVCache* cache = module_ptr.ptr;
+  if (cache->type != MUILLM_HYBRID_CHUNKED_KVCACHE) {
+    TORCH_CHECK(false, "expected a hybrid chunked cache");
+  }
+
+  MuillmHybridChunkedKVCache* hybrid_cache = (MuillmHybridChunkedKVCache*) cache;
+  return hybrid_cache->complex_rope_update(
+    query_states,
+    key_states,
+    value_states,
+    position_embeddings,
     cache_positions,
     layer_index
   );

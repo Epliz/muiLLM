@@ -35,6 +35,7 @@ at::Tensor muillm_int8_linear_forward_trampoline(
     int group_size_shift,
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
+    float norm_weights_offset,
     std::optional<torch::Tensor> mul_bias_,
     std::optional<torch::Tensor> add_bias_) {
     torch::Tensor norm_weights = norm_weights_.has_value() ? norm_weights_.value() : torch::Tensor();
@@ -43,6 +44,7 @@ at::Tensor muillm_int8_linear_forward_trampoline(
     return muillm_int8_linear_activ_forward(
         norm_weights,
         epsilon,
+        norm_weights_offset,
         weights,
         scales_min_vals,
         group_size_shift,
@@ -57,14 +59,15 @@ at::Tensor muillm_int8_linear_forward_trampoline(
 #include "moeffn/gateupmoe.cuh"
 
 
-std::tuple<at::Tensor, at::Tensor> muillm_int8_gateupsilu_dequantize_forward(
+std::tuple<at::Tensor, at::Tensor> muillm_int8_gateupmlp_dequantize_forward(
     torch::Tensor gate_up_weights,
     torch::Tensor gate_up_scales_min_vals,
     int group_size_shift);
 
-at::Tensor muillm_int8_gateupsilu_forward(
+at::Tensor muillm_int8_gateupmlp_forward(
     torch::Tensor norm_weights,
     float epsilon,
+    float norm_weights_offset,
     torch::Tensor gate_up_weights,
     torch::Tensor gate_up_scales_min_vals,
     int group_size_shift,
@@ -72,11 +75,13 @@ at::Tensor muillm_int8_gateupsilu_forward(
 
 #include "norm/l2norm.cuh"
 #include "norm/qkl2norm.cuh"
+#include "norm/qkrmsnorm.cuh"
 #include "norm/rmsnorm.cuh"
 #include "reduce/reduce.cuh"
 #include "topk/topk.cuh"
 #include "rope/rotary.h"
 #include "kvcaches/static_kvcache.hpp"
+#include "kvcaches/dynamic_kvcache.hpp"
 #include "kvcaches/sliding_kvcache.hpp"
 #include "temperaturetuning/temperature_tuning.cuh"
 
@@ -149,7 +154,15 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "comms/comm_torch.h"
 
 #include "modules/linear_module.h"
+#include "modules/multilinear_module.h"
+#include "modules/gateup_module.h"
 #include "modules/embedding_module.h"
+#include "modules/attention_module.h"
+#include "modules/gemma3_attention_module.h"
+#include "modules/llama4_attention_module.h"
+#include "modules/decoder_module.h"
+#include "modules/gemma3_decoder_module.h"
+#include "modules/llama4_decoder_module.h"
 
 #include "parallel_linear_kernels.cuh"
 #include "parallel_gateupmoe_kernels.cuh"
@@ -159,8 +172,10 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "modules/parallel_gateup_module.h"
 #include "modules/parallel_gateupmoe_module.h"
 #include "modules/parallel_attention_module.h"
+#include "modules/parallel_gemma3_attention_module.h"
 #include "modules/parallel_llama4_attention_module.h"
 #include "modules/parallel_decoder_module.h"
+#include "modules/parallel_gemma3_decoder_module.h"
 #include "modules/parallel_llama4_decoder_module.h"
 #include "modules/parallel_decoder_stack.h"
 #include "modules/parallel_llama4_decoder_stack.h"
@@ -175,18 +190,20 @@ at::Tensor muillm_to_cpu_trampoline(
 #include "modules/rotary_module.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("engine"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none());
-  m.def("muillm_parallel_linear_forward", &muillm_parallel_linear_forward_trampoline, "muillm parallel linear forward", py::arg("engine"), py::arg("comm"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none(), py::arg("sharding_dim") = 1, py::arg("reduce") = false);
+  m.def("muillm_linear_forward", &muillm_linear_forward_trampoline, "muillm linear forward", py::arg("engine"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none());
+  m.def("muillm_parallel_linear_forward", &muillm_parallel_linear_forward_trampoline, "muillm parallel linear forward", py::arg("engine"), py::arg("comm"), py::arg("x"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("residual") = py::none(), py::arg("sharding_dim") = 1, py::arg("reduce") = false);
   m.def("muillm_int8_dequantize_forward", &muillm_int8_dequantize_forward, "muillm int8 dequantize forward");
-  m.def("muillm_int8_linear_forward", &muillm_int8_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("scales_min_vals"), py::arg("group_size_shift"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
-  m.def("muillm_gateupsilu_forward", &muillm_gateupsilu_forward_trampoline, "muillm gate up silu forward");
-  m.def("muillm_gateupsilumoe_forward", &muillm_gateupsilumoe_forward_trampoline, "muillm gate up silu moe forward");
-  m.def("muillm_parallel_gateupsilu_forward", &muillm_parallel_gateupsilu_forward_trampoline, "muillm parallel gate up silu forward",
+  m.def("muillm_int8_linear_forward", &muillm_int8_linear_forward_trampoline, "muillm linear forward", py::arg("x"), py::arg("weights"), py::arg("scales_min_vals"), py::arg("group_size_shift"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
+  m.def("muillm_gateupmlp_forward", &muillm_gateupmlp_forward_trampoline, "muillm gate up silu forward");
+  m.def("muillm_gateupmlpmoe_forward", &muillm_gateupmlpmoe_forward_trampoline, "muillm gate up silu moe forward");
+  m.def("muillm_parallel_gateupmlp_forward", &muillm_parallel_gateupmlp_forward_trampoline, "muillm parallel gate up silu forward",
     // args
     py::arg("engine"),
     py::arg("comm"),
+    py::arg("activation"),
     py::arg("norm_weights"),
     py::arg("epsilon"),
+    py::arg("norm_weights_offset"),
     py::arg("gate_weights"),
     py::arg("up_weights"),
     py::arg("down_weights"),
@@ -194,7 +211,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("x"),
     py::arg("reduce") = true
   );
-  m.def("muillm_parallel_gateupsilumoe_forward", &muillm_parallel_gateupsilumoe_forward_trampoline, "muillm parallel gate up silu moe forward",
+  m.def("muillm_parallel_gateupmlpmoe_forward", &muillm_parallel_gateupmlpmoe_forward_trampoline, "muillm parallel gate up silu moe forward",
     // args
     py::arg("engine"),
     py::arg("comm"),
@@ -202,6 +219,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("num_dynamic_experts"),
     py::arg("norm_weights"),
     py::arg("epsilon"),
+    py::arg("norm_weights_offset"),
     py::arg("gate_weights"),
     py::arg("up_weights"),
     py::arg("down_weights"),
@@ -212,13 +230,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("reduce") = true
   );
 
-  m.def("muillm_gateupsilu_split_forward", &muillm_gateupsilu_split_forward_trampoline, "muillm gate up silu split K forward");
-  m.def("muillm_parallel_gateupsilu_split_forward", &muillm_parallel_gateupsilu_split_forward_trampoline, "muillm parallel gate up silu split K forward", 
+  m.def("muillm_gateupmlp_split_forward", &muillm_gateupmlp_split_forward_trampoline, "muillm gate up silu split K forward");
+  m.def("muillm_parallel_gateupmlp_split_forward", &muillm_parallel_gateupmlp_split_forward_trampoline, "muillm parallel gate up silu split K forward", 
     // args
     py::arg("engine"),
     py::arg("comm"),
+    py::arg("activation"),
     py::arg("norm_weights"),
     py::arg("epsilon"),
+    py::arg("norm_weights_offset"),
     py::arg("gate_weights"),
     py::arg("up_weights"),
     py::arg("down_weights"),
@@ -226,7 +246,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("x"),
     py::arg("reduce") = true
   );
-  m.def("muillm_parallel_gateupsilumoe_split_forward", &muillm_parallel_gateupsilumoe_split_forward_trampoline, "muillm parallel gate up silu moe split K forward",
+  m.def("muillm_parallel_gateupmlpmoe_split_forward", &muillm_parallel_gateupmlpmoe_split_forward_trampoline, "muillm parallel gate up silu moe split K forward",
     // args
     py::arg("engine"),
     py::arg("comm"),
@@ -234,6 +254,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("num_dynamic_experts"),
     py::arg("norm_weights"),
     py::arg("epsilon"),
+    py::arg("norm_weights_offset"),
     py::arg("gate_weights"),
     py::arg("up_weights"),
     py::arg("down_weights"),
@@ -244,11 +265,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("reduce") = true
   );
 
-  m.def("muillm_int8_gateupsilu_dequantize_forward", &muillm_int8_gateupsilu_dequantize_forward, "muillm int8 gate up dequantize");
-  m.def("muillm_int8_gateupsilu_forward", &muillm_int8_gateupsilu_forward, "muillm int8 gate up silu forward");
-  m.def("muillm_l2norm_forward", &muillm_l2norm_forward, "muillm l2norm forward");
+  m.def("muillm_int8_gateupmlp_dequantize_forward", &muillm_int8_gateupmlp_dequantize_forward, "muillm int8 gate up dequantize");
+  m.def("muillm_int8_gateupmlp_forward", &muillm_int8_gateupmlp_forward, "muillm int8 gate up silu forward");
+  m.def("muillm_l2norm_forward", &muillm_l2norm_forward_trampoline, "muillm l2norm forward", py::arg("inputs"), py::arg("residual") = py::none(), py::arg("epsilon") = 0.f);
   m.def("muillm_qkl2norm_forward", &muillm_qkl2norm_forward, "muillm qkl2norm forward");
-  m.def("muillm_rmsnorm_forward", &muillm_rmsnorm_forward, "muillm rmsnorm forward");
+  m.def("muillm_rmsnorm_forward", &muillm_rmsnorm_forward_trampoline, "muillm rmsnorm forward", py::arg("weights"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("epsilon") = 0.f, py::arg("weights_offset") = 0.f);
+  m.def("muillm_qkrmsnorm_forward", &muillm_qkrmsnorm_forward, "muillm qkrmsnorm forward");
   m.def("muillm_reduce_sum_forward", &muillm_reduce_sum_forward, "muillm reduce sum forward");
   m.def("muillm_topk_sigmoid_forward", &muillm_topk_sigmoid_forward, "muillm topk sigmoid forward");
 
@@ -307,9 +329,65 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<muillm_linear_module_ptr_t> cl_linear_module(m, "muillm_linear_module_ptr");
   cl_linear_module.def(pybind11::init<>());
 
-  m.def("muillm_linear_module_init", &muillm_linear_module_init_trampoline, "muillm linear module init", py::arg("engine"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
+  m.def("muillm_linear_module_init", &muillm_linear_module_init_trampoline, "muillm linear module init", py::arg("engine"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none());
   m.def("muillm_linear_module_deinit", &muillm_linear_module_deinit_trampoline, "muillm linear module deinit", py::arg("module"));
   m.def("muillm_linear_module_forward", &muillm_linear_module_forward_trampoline, "muillm linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none());
+
+  // multilinear
+  pybind11::class_<muillm_multilinear_module_ptr_t> cl_multilinear_module(m, "muillm_multilinear_module_ptr");
+  cl_multilinear_module.def(pybind11::init<>());
+
+  m.def("muillm_multilinear_module_init", &muillm_multilinear_module_init_trampoline, "muillm multilinear module init", py::arg("engine"), py::arg("linear"), py::arg("slices"));
+  m.def("muillm_multilinear_module_deinit", &muillm_multilinear_module_deinit_trampoline, "muillm multilinear module deinit", py::arg("module"));
+  m.def("muillm_multilinear_module_forward", &muillm_multilinear_module_forward_trampoline, "muillm multilinear module forward", py::arg("module"), py::arg("input"));
+
+
+  // mlp interface
+  pybind11::class_<muillm_igateupdownmlp_module_ptr_t> cl_igateupdownmlp_module(m, "muillm_igateupdownmlp_module_ptr");
+
+  // gateup/down mlp
+  m.def("muillm_gateupdownmlp_module_init", &muillm_gateupdownmlp_module_init_trampoline, "muillm gateupdown mlp module init",
+    py::arg("engine"),
+    py::arg("activation"),
+    py::arg("method"),
+    py::arg("norm_weights"),
+    py::arg("gate_weights"),
+    py::arg("up_weights"),
+    py::arg("down_weights"),
+    py::arg("variance_epsilon"),
+    py::arg("norm_weights_offset")
+  );
+  m.def("muillm_gateupdownmlp_module_deinit", &muillm_gateupdownmlp_module_deinit_trampoline, "muillm gateupdown mlp module deinit", py::arg("module"));
+  m.def("muillm_gateupdownmlp_module_forward", &muillm_gateupdownmlp_module_forward_trampoline, "muillm gateupdown mlp module forward",
+    py::arg("module"),
+    py::arg("inputs"),
+    py::arg("residual") = py::none()
+  );
+
+  // decoder
+  pybind11::class_<muillm_decoder_module_ptr_t> cl_decoder_module(m, "muillm_decoder_module_ptr");
+  cl_decoder_module.def(pybind11::init<>());
+
+  m.def("muillm_decoder_module_init", &muillm_decoder_module_init_trampoline, "muillm decoder module init", py::arg("engine"), py::arg("multilinear"), py::arg("attention"), py::arg("mlp"));
+  m.def("muillm_decoder_module_deinit", &muillm_decoder_module_deinit_trampoline, "muillm decoder module deinit", py::arg("module"));
+  m.def("muillm_decoder_module_forward", &muillm_decoder_module_forward, "muillm decoder module forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("m"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+
+  // gemma 3 decoder
+  pybind11::class_<muillm_gemma3_decoder_module_ptr_t> cl_gemma3_decoder_module(m, "muillm_gemma3_decoder_module_ptr");
+  cl_gemma3_decoder_module.def(pybind11::init<>());
+
+  m.def("muillm_gemma3_decoder_module_init", &muillm_gemma3_decoder_module_init_trampoline, "muillm gemma3 decoder module init", py::arg("engine"), py::arg("multilinear"), py::arg("attention"), py::arg("mlp"), py::arg("sliding_layer"), py::arg("post_attention_layer_norm_weight"), py::arg("post_attention_layer_norm_epsilon"), py::arg("post_attention_layer_norm_weights_offset"), py::arg("post_feedforward_layer_norm_weight"), py::arg("post_feedforward_layer_norm_epsilon"), py::arg("post_feedforward_layer_norm_weights_offset"));
+  m.def("muillm_gemma3_decoder_module_deinit", &muillm_gemma3_decoder_module_deinit_trampoline, "muillm gemma3 decoder module deinit", py::arg("module"));
+  m.def("muillm_gemma3_decoder_module_forward", &muillm_gemma3_decoder_module_forward, "muillm gemma3 decoder module forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("mask"), py::arg("sliding_mask"), py::arg("position_embeds_global"), py::arg("position_embeds_local"), py::arg("cache_positions"));
+
+  // llama 4 decoder
+  pybind11::class_<muillm_llama4_decoder_module_ptr_t> cl_llama4_decoder_module(m, "muillm_llama4_decoder_module_ptr");
+  cl_llama4_decoder_module.def(pybind11::init<>());
+
+  m.def("muillm_llama4_decoder_module_init", &muillm_llama4_decoder_module_init_trampoline, "muillm llama4 decoder module init", py::arg("engine"), py::arg("multilinear"), py::arg("attention"), py::arg("mlp"), py::arg("use_chunked_attention"));
+  m.def("muillm_llama4_decoder_module_deinit", &muillm_llama4_decoder_module_deinit_trampoline, "muillm llama4 decoder module deinit", py::arg("module"));
+  m.def("muillm_llama4_decoder_module_forward", &muillm_llama4_decoder_module_forward, "muillm llama4 decoder module forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("mask"), py::arg("chunked_mask"), py::arg("position_embeds"), py::arg("cache_positions"));
+
 
   // embedding
   pybind11::class_<muillm_embedding_module_ptr_t> cl_embedding_module(m, "muillm_embedding_module_ptr");
@@ -324,7 +402,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<muillm_parallel_linear_module_ptr_t> cl_parallel_linear_module(m, "muillm_parallel_linear_module_ptr");
   cl_parallel_linear_module.def(pybind11::init<>());
 
-  m.def("muillm_parallel_linear_module_init", &muillm_parallel_linear_module_init_trampoline, "muillm parallel linear module init", py::arg("engine"), py::arg("comm"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("sharding_dim") = 1);
+  m.def("muillm_parallel_linear_module_init", &muillm_parallel_linear_module_init_trampoline, "muillm parallel linear module init", py::arg("engine"), py::arg("comm"), py::arg("weights"), py::arg("norm_weights") = py::none(), py::arg("epsilon") = 0.f, py::arg("norm_weights_offset") = 0.f, py::arg("mul_bias") = py::none(), py::arg("add_bias") = py::none(), py::arg("sharding_dim") = 1);
   m.def("muillm_parallel_linear_module_deinit", &muillm_parallel_linear_module_deinit_trampoline, "muillm parallel linear module deinit", py::arg("module"));
   m.def("muillm_parallel_linear_module_forward", &muillm_parallel_linear_module_forward_trampoline, "muillm parallel linear module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("reduce") = false);
 
@@ -340,14 +418,48 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<muillm_parallel_igateupdownmlp_module_ptr_t> cl_parallel_igateupdownmlp_module(m, "muillm_parallel_igateupdownmlp_module_ptr");
 
   // parallel gateup/down mlp
-  m.def("muillm_parallel_gateupdownmlp_module_init", &muillm_parallel_gateupdownmlp_module_init_trampoline, "muillm parallel gateupdown mlp module init", py::arg("engine"), py::arg("comm"), py::arg("method"), py::arg("norm_weights"), py::arg("gate_weights"), py::arg("up_weights"), py::arg("down_weights"), py::arg("variance_epsilon"));
+  m.def("muillm_parallel_gateupdownmlp_module_init", &muillm_parallel_gateupdownmlp_module_init_trampoline, "muillm parallel gateupdown mlp module init",
+    py::arg("engine"),
+    py::arg("comm"), 
+    py::arg("activation"),
+    py::arg("method"),
+    py::arg("norm_weights"),
+    py::arg("gate_weights"),
+    py::arg("up_weights"),
+    py::arg("down_weights"),
+    py::arg("variance_epsilon"),
+    py::arg("norm_weights_offset")
+  );
   m.def("muillm_parallel_gateupdownmlp_module_deinit", &muillm_parallel_gateupdownmlp_module_deinit_trampoline, "muillm parallel gateupdown mlp module deinit", py::arg("module"));
-  m.def("muillm_parallel_gateupdownmlp_module_forward", &muillm_parallel_gateupdownmlp_module_forward_trampoline, "muillm parallel gateupdown mlp module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("reduce") = true);
+  m.def("muillm_parallel_gateupdownmlp_module_forward", &muillm_parallel_gateupdownmlp_module_forward_trampoline, "muillm parallel gateupdown mlp module forward",
+    py::arg("module"),
+    py::arg("inputs"),
+    py::arg("residual") = py::none(),
+    py::arg("reduce") = true
+  );
 
   // parallel gateup/down mlp moe
-  m.def("muillm_parallel_gateupdownmlpmoe_module_init", &muillm_parallel_gateupdownmlpmoe_module_init_trampoline, "muillm parallel gateupdown mlp moe module init", py::arg("engine"), py::arg("comm"), py::arg("router"), py::arg("num_shared_experts"), py::arg("num_dynamic_experts"), py::arg("num_routed_experts"), py::arg("norm_weights"), py::arg("gate_weights"), py::arg("up_weights"), py::arg("down_weights"), py::arg("variance_epsilon"));
+  m.def("muillm_parallel_gateupdownmlpmoe_module_init", &muillm_parallel_gateupdownmlpmoe_module_init_trampoline, "muillm parallel gateupdown mlp moe module init",
+    py::arg("engine"),
+    py::arg("comm"),
+    py::arg("router"),
+    py::arg("num_shared_experts"),
+    py::arg("num_dynamic_experts"),
+    py::arg("num_routed_experts"),
+    py::arg("norm_weights"),
+    py::arg("gate_weights"),
+    py::arg("up_weights"),
+    py::arg("down_weights"),
+    py::arg("variance_epsilon"),
+    py::arg("norm_weights_offset")
+  );
   m.def("muillm_parallel_gateupdownmlpmoe_module_deinit", &muillm_parallel_gateupdownmlpmoe_module_deinit_trampoline, "muillm parallel gateupdown mlp moe module deinit", py::arg("module"));
-  m.def("muillm_parallel_gateupdownmlpmoe_module_forward", &muillm_parallel_gateupdownmlpmoe_module_forward_trampoline, "muillm parallel gateupdown mlp moe module forward", py::arg("module"), py::arg("inputs"), py::arg("residual") = py::none(), py::arg("reduce") = true);
+  m.def("muillm_parallel_gateupdownmlpmoe_module_forward", &muillm_parallel_gateupdownmlpmoe_module_forward_trampoline, "muillm parallel gateupdown mlp moe module forward",
+    py::arg("module"),
+    py::arg("inputs"),
+    py::arg("residual") = py::none(),
+    py::arg("reduce") = true
+  );
 
 
   // KV cache
@@ -358,17 +470,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   
   // static KV cache
   m.def("muillm_static_kvcache_module_init", &muillm_static_kvcache_module_init_trampoline, "muillm static kvcache module init", py::arg("engine"), py::arg("key_cache"), py::arg("value_cache"), py::arg("seen_tokens"));
+  m.def("muillm_static_kvcache_module_update", &muillm_static_kvcache_module_update_trampoline, "muillm static kvcache module update", py::arg("module"), py::arg("key_states"), py::arg("value_states"), py::arg("cache_position"), py::arg("layer_index"));
+  m.def("muillm_static_kvcache_module_rope_update", &muillm_static_kvcache_module_rope_update_trampoline, "muillm static kvcache module rope update", py::arg("module"), py::arg("query_states"), py::arg("key_states"), py::arg("value_states"), py::arg("position_embeddings"), py::arg("cache_position"), py::arg("layer_index"));
+  m.def("muillm_static_kvcache_module_complex_rope_update", &muillm_static_kvcache_module_complex_rope_update_trampoline, "muillm static kvcache module complex rope update", py::arg("module"), py::arg("query_states"), py::arg("key_states"), py::arg("value_states"), py::arg("position_embeddings"), py::arg("cache_position"), py::arg("layer_index"));
   m.def("muillm_static_kvcache_module_deinit", &muillm_static_kvcache_module_deinit_trampoline, "muillm static kvcache module deinit", py::arg("module"));
   m.def("muillm_static_kvcache_module_sync_back", &muillm_static_kvcache_module_sync_back_trampoline, "muillm static kvcache module sync back", py::arg("module"));
 
   // dynamic KV cache
   m.def("muillm_dynamic_kvcache_module_init", &muillm_dynamic_kvcache_module_init_trampoline, "muillm dynamic kvcache module init", py::arg("engine"), py::arg("key_cache"), py::arg("value_cache"), py::arg("seen_tokens"));
+  m.def("muillm_dynamic_kvcache_module_update", &muillm_dynamic_kvcache_module_update_trampoline, "muillm dynamic kvcache module update", py::arg("module"), py::arg("key_states"), py::arg("value_states"), py::arg("cache_position"), py::arg("layer_index"));
+  m.def("muillm_dynamic_kvcache_module_rope_update", &muillm_dynamic_kvcache_module_rope_update_trampoline, "muillm dynamic kvcache module rope update", py::arg("module"), py::arg("query_states"), py::arg("key_states"), py::arg("value_states"), py::arg("position_embeddings"), py::arg("cache_position"), py::arg("layer_index"));
+  m.def("muillm_dynamic_kvcache_module_complex_rope_update", &muillm_dynamic_kvcache_module_complex_rope_update_trampoline, "muillm dynamic kvcache module complex rope update", py::arg("module"), py::arg("query_states"), py::arg("key_states"), py::arg("value_states"), py::arg("position_embeddings"), py::arg("cache_position"), py::arg("layer_index"));
   m.def("muillm_dynamic_kvcache_module_deinit", &muillm_dynamic_kvcache_module_deinit_trampoline, "muillm dynamic kvcache module deinit", py::arg("module"));
   m.def("muillm_dynamic_kvcache_module_sync_back", &muillm_dynamic_kvcache_module_sync_back_trampoline, "muillm dynamic kvcache module sync back", py::arg("module"));
 
   // hybrid chunked KV cache
   m.def("muillm_hybrid_chunked_kvcache_module_init", &muillm_hybrid_chunked_kvcache_module_init_trampoline, "muillm hybrid chunked kvcache module init", py::arg("engine"), py::arg("key_cache"), py::arg("value_cache"), py::arg("is_sliding"), py::arg("window_size"), py::arg("seen_tokens"));
   m.def("muillm_hybrid_chunked_kvcache_module_update", &muillm_hybrid_chunked_kvcache_module_update_trampoline, "muillm hybrid chunked kvcache module update", py::arg("module"), py::arg("key_states"), py::arg("value_states"), py::arg("cache_position"), py::arg("layer_index"));
+  m.def("muillm_hybrid_chunked_kvcache_module_rope_update", &muillm_hybrid_chunked_kvcache_module_rope_update_trampoline, "muillm hybrid chunked kvcache module rope update", py::arg("module"), py::arg("query_states"), py::arg("key_states"), py::arg("value_states"), py::arg("position_embeddings"), py::arg("cache_position"), py::arg("layer_index"));
+  m.def("muillm_hybrid_chunked_kvcache_module_complex_rope_update", &muillm_hybrid_chunked_kvcache_module_complex_rope_update_trampoline, "muillm hybrid chunked kvcache module complex rope update", py::arg("module"), py::arg("query_states"), py::arg("key_states"), py::arg("value_states"), py::arg("position_embeddings"), py::arg("cache_position"), py::arg("layer_index"));
   m.def("muillm_hybrid_chunked_kvcache_module_deinit", &muillm_hybrid_chunked_kvcache_module_deinit_trampoline, "muillm hybrid chunked kvcache module deinit", py::arg("module"));
   m.def("muillm_hybrid_chunked_kvcache_module_sync_back", &muillm_hybrid_chunked_kvcache_module_sync_back_trampoline, "muillm hybrid chunked kvcache module sync back", py::arg("module"));
 
@@ -378,18 +498,56 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("muillm_rotary_embedding_module_init", &muillm_rotary_embedding_module_init_trampoline, "muillm rotary embedding module init", py::arg("engine"), py::arg("layer_idx"), py::arg("cos_cached"), py::arg("sin_cached"));
   m.def("muillm_rotary_embedding_module_deinit", &muillm_rotary_embedding_module_deinit_trampoline, "muillm rotary embedding module deinit", py::arg("module"));
-  m.def("muillm_rotary_embedding_module_forward", &muillm_rotary_embedding_module_forward_trampoline, "muillm rotary embedding module forward", py::arg("module"), py::arg("cache"), py::arg("q_in"), py::arg("k_in"), py::arg("v_in"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+
+  // attention
+  pybind11::class_<muillm_attention_module_ptr_t> cl_attention_module(m, "muillm_attention_module_ptr");
+  cl_attention_module.def(pybind11::init<>());
+
+  m.def("muillm_attention_module_init", &muillm_attention_module_init_trampoline, "muillm  attention module init", py::arg("engine"), py::arg("rotary"), py::arg("o_proj"), py::arg("num_heads"), py::arg("num_key_value_heads"), py::arg("head_dim"), py::arg("layer_index"));
+  m.def("muillm_attention_module_deinit", &muillm_attention_module_deinit_trampoline, "muillm  attention module deinit", py::arg("module"));
+  m.def("muillm_attention_module_forward", &muillm_attention_module_forward_trampoline, "muillm  attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none(), py::arg("residual") = py::none());
+  m.def("muillm_attention_module_rope_forward", &muillm_attention_module_rope_forward_trampoline, "muillm  attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+
+  // gemma 3 attention
+  pybind11::class_<muillm_gemma3_attention_module_ptr_t> cl_gemma3_attention_module(m, "muillm_gemma3_attention_module_ptr");
+  cl_gemma3_attention_module.def(pybind11::init<>());
+
+  m.def("muillm_gemma3_attention_module_init", &muillm_gemma3_attention_module_init_trampoline, "muillm  gemma3 attention module init", py::arg("engine"), py::arg("o_proj"), py::arg("num_heads"), py::arg("num_key_value_heads"), py::arg("head_dim"), py::arg("q_norm_weight"), py::arg("k_norm_weight"), py::arg("norm_epsilon"), py::arg("norm_weights_offset"), py::arg("layer_index"));
+  m.def("muillm_gemma3_attention_module_deinit", &muillm_gemma3_attention_module_deinit_trampoline, "muillm  gemma3 attention module deinit", py::arg("module"));
+  m.def("muillm_gemma3_attention_module_forward", &muillm_gemma3_attention_module_forward_trampoline, "muillm  gemma3 attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none());
+  m.def("muillm_gemma3_attention_module_rope_forward", &muillm_gemma3_attention_module_rope_forward_trampoline, "muillm  gemma3 attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("cos"), py::arg("sin"), py::arg("cache_positions"));
+
+
+  // llama 4 attention
+  pybind11::class_<muillm_llama4_attention_module_ptr_t> cl_llama4_attention_module(m, "muillm_llama4_attention_module_ptr");
+  cl_llama4_attention_module.def(pybind11::init<>());
+
+  m.def("muillm_llama4_attention_module_init", &muillm_llama4_attention_module_init_trampoline, "muillm  llama4 attention module init", py::arg("engine"), py::arg("o_proj"), py::arg("num_tp_heads"), py::arg("num_tp_key_value_heads"), py::arg("head_dim"), py::arg("use_rope"), py::arg("use_qk_norm"), py::arg("norm_epsilon"), py::arg("use_temperature_tuning"), py::arg("attention_scale"), py::arg("floor_scale"), py::arg("layer_index"));
+  m.def("muillm_llama4_attention_module_deinit", &muillm_llama4_attention_module_deinit_trampoline, "muillm  llama4 attention module deinit", py::arg("module"));
+  m.def("muillm_llama4_attention_module_forward", &muillm_llama4_attention_module_forward_trampoline, "muillm  llama4 attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none(), py::arg("residual") = py::none());
+  m.def("muillm_llama4_attention_module_rope_forward", &muillm_llama4_attention_module_rope_forward_trampoline, "muillm  llama4 attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_embeds"), py::arg("cache_positions"));
+
 
   // parallel attention
   pybind11::class_<muillm_parallel_attention_module_ptr_t> cl_parallel_attention_module(m, "muillm_parallel_attention_module_ptr");
   cl_parallel_attention_module.def(pybind11::init<>());
 
-  m.def("muillm_parallel_attention_module_init", &muillm_parallel_attention_module_init_trampoline, "muillm parallel attention module init", py::arg("engine"), py::arg("comm"), py::arg("rotary"), py::arg("o_proj"), py::arg("num_tp_heads"), py::arg("num_tp_key_value_heads"), py::arg("head_dim"));
+  m.def("muillm_parallel_attention_module_init", &muillm_parallel_attention_module_init_trampoline, "muillm parallel attention module init", py::arg("engine"), py::arg("comm"), py::arg("rotary"), py::arg("o_proj"), py::arg("num_tp_heads"), py::arg("num_tp_key_value_heads"), py::arg("head_dim"), py::arg("layer_index"));
   m.def("muillm_parallel_attention_module_deinit", &muillm_parallel_attention_module_deinit_trampoline, "muillm parallel attention module deinit", py::arg("module"));
   m.def("muillm_parallel_attention_module_forward", &muillm_parallel_attention_module_forward_trampoline, "muillm parallel attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none(), py::arg("residual") = py::none());
   m.def("muillm_parallel_attention_module_rope_forward", &muillm_parallel_attention_module_rope_forward_trampoline, "muillm parallel attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("residual"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
   
-  // parallel attention
+  // parallel gemma 3 attention
+  pybind11::class_<muillm_parallel_gemma3_attention_module_ptr_t> cl_parallel_gemma3_attention_module(m, "muillm_parallel_gemma3_attention_module_ptr");
+  cl_parallel_gemma3_attention_module.def(pybind11::init<>());
+
+  m.def("muillm_parallel_gemma3_attention_module_init", &muillm_parallel_gemma3_attention_module_init_trampoline, "muillm parallel gemma3 attention module init", py::arg("engine"), py::arg("comm"), py::arg("o_proj"), py::arg("num_tp_heads"), py::arg("num_tp_key_value_heads"), py::arg("head_dim"), py::arg("q_norm_weight"), py::arg("k_norm_weight"), py::arg("norm_epsilon"), py::arg("norm_weights_offset"), py::arg("layer_index"));
+  m.def("muillm_parallel_gemma3_attention_module_deinit", &muillm_parallel_gemma3_attention_module_deinit_trampoline, "muillm parallel gemma3 attention module deinit", py::arg("module"));
+  m.def("muillm_parallel_gemma3_attention_module_forward", &muillm_parallel_gemma3_attention_module_forward_trampoline, "muillm parallel gemma3 attention module forward", py::arg("module"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m") = py::none());
+  m.def("muillm_parallel_gemma3_attention_module_rope_forward", &muillm_parallel_gemma3_attention_module_rope_forward_trampoline, "muillm parallel gemma3 attention module rope forward", py::arg("module"), py::arg("cache"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("m"), py::arg("cos"), py::arg("sin"), py::arg("cache_positions"));
+
+
+  // parallel llama 4 attention
   pybind11::class_<muillm_parallel_llama4_attention_module_ptr_t> cl_parallel_llama4_attention_module(m, "muillm_parallel_llama4_attention_module_ptr");
   cl_parallel_llama4_attention_module.def(pybind11::init<>());
 
@@ -405,6 +563,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("muillm_parallel_decoder_module_init", &muillm_parallel_decoder_module_init_trampoline, "muillm parallel decoder module init", py::arg("engine"), py::arg("comm"), py::arg("multilinear"), py::arg("attention"), py::arg("mlp"));
   m.def("muillm_parallel_decoder_module_deinit", &muillm_parallel_decoder_module_deinit_trampoline, "muillm parallel decoder module deinit", py::arg("module"));
   m.def("muillm_parallel_decoder_module_forward", &muillm_parallel_decoder_module_forward, "muillm parallel decoder module forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("m"), py::arg("position_ids"), py::arg("cos_sin"), py::arg("cache_positions"));
+
+  // parallel gemma 3 decoder
+  pybind11::class_<muillm_parallel_gemma3_decoder_module_ptr_t> cl_parallel_gemma3_decoder_module(m, "muillm_parallel_gemma3_decoder_module_ptr");
+  cl_parallel_gemma3_decoder_module.def(pybind11::init<>());
+
+  m.def("muillm_parallel_gemma3_decoder_module_init", &muillm_parallel_gemma3_decoder_module_init_trampoline, "muillm parallel gemma3 decoder module init", py::arg("engine"), py::arg("comm"), py::arg("multilinear"), py::arg("attention"), py::arg("mlp"), py::arg("sliding_layer"), py::arg("post_attention_layer_norm_weight"), py::arg("post_attention_layer_norm_epsilon"), py::arg("post_attention_layer_norm_weights_offset"), py::arg("post_feedforward_layer_norm_weight"), py::arg("post_feedforward_layer_norm_epsilon"), py::arg("post_feedforward_layer_norm_weights_offset"));
+  m.def("muillm_parallel_gemma3_decoder_module_deinit", &muillm_parallel_gemma3_decoder_module_deinit_trampoline, "muillm parallel gemma3 decoder module deinit", py::arg("module"));
+  m.def("muillm_parallel_gemma3_decoder_module_forward", &muillm_parallel_gemma3_decoder_module_forward, "muillm parallel gemma3 decoder module forward", py::arg("module"), py::arg("cache"), py::arg("h"), py::arg("mask"), py::arg("sliding_mask"), py::arg("position_embeds_global"), py::arg("position_embeds_local"), py::arg("cache_positions"));
 
   // parallel llama 4 decoder
   pybind11::class_<muillm_parallel_llama4_decoder_module_ptr_t> cl_parallel_llama4_decoder_module(m, "muillm_parallel_llama4_decoder_module_ptr");

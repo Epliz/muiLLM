@@ -1,7 +1,7 @@
 from typing import List, Tuple
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.attention.llama4attention import apply_rotary_emb
-from muillm.modules.attention.rotaryembedding import MuiRotaryEmbedding
+from muillm.modules.rope.ropeops import apply_complex_rotary_emb
+from muillm.modules.rope.rotaryembedding import MuiRotaryEmbedding
 from muillm.modules.gateupdownmlp import MuiGateUpDownMLP
 import torch
 import torch.nn as nn
@@ -68,6 +68,7 @@ def _test_basic_mistral_rotary(device: str, dtype: torch.dtype):
         replacement_context=replacement_context,
         prev_module=rotary_emb_copy,
     )
+    mui_rotary.finalize_init()
 
     input_position_ids = torch.arange(
         start=0, end=max_position_embeddings, device=device
@@ -147,6 +148,7 @@ def _test_basic_llama3_rotary(device: str, dtype: torch.dtype):
         replacement_context=replacement_context,
         prev_module=rotary_emb_copy,
     )
+    mui_rotary.finalize_init()
 
     input_position_ids = torch.arange(
         start=0, end=max_position_embeddings, device=device
@@ -226,6 +228,7 @@ def _test_basic_llama4_rotary(device: str, dtype: torch.dtype):
         replacement_context=replacement_context,
         prev_module=rotary_emb_copy,
     )
+    mui_rotary.finalize_init()
 
     input_position_ids = torch.arange(
         start=0, end=max_position_embeddings, device=device
@@ -288,7 +291,7 @@ def _test_apply_rotary_emb(device: str, dtype: torch.dtype):
 
     xq_out, xk_out = ref_apply_rotary_emb(xq, xk, freqs_cis)
 
-    xq_out_m, xk_out_m = apply_rotary_emb(xq, xk, freqs_cis)
+    xq_out_m, xk_out_m = apply_complex_rotary_emb(xq, xk, freqs_cis)
 
     tensors_equal(xq_out, xq_out_m)
     tensors_equal(xk_out, xk_out_m)

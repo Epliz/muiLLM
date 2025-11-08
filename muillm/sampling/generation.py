@@ -189,8 +189,11 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
         )
 
         model_forward = self.__call__
-        if isinstance(model_kwargs.get("past_key_values"), Cache):
-            is_compileable = (
+        is_compileable = True
+        if generation_config.disable_compile:
+            is_compileable = False
+        if is_compileable and isinstance(model_kwargs.get("past_key_values"), Cache):
+            is_compileable &= (
                 model_kwargs["past_key_values"].is_compileable
                 and self._supports_static_cache
             )
@@ -250,7 +253,10 @@ class MuiGenerationMixin(MuiModule, GenerationMixin):
                 **model_kwargs,
             )
 
-            if not checked_mask_content:
+            if (not checked_mask_content) and (not is_prefill):
+                # we check the content of the attention mask after the prefill
+                # as some models (like Gemma3) may require a specific mask during prefill
+                # e.g. due to passed image masks
                 checked_mask_content = True
 
                 if "attention_mask" in model_inputs:

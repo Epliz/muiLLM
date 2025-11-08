@@ -19,6 +19,8 @@ from muillm.replacement.replacementcontext import MuiReplacementContext
 class _MuiQKL2Norm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, epsilon):
+        q = q.contiguous()
+        k = k.contiguous()
         output = muillm_ext.muillm_qkl2norm_forward(q, k, epsilon)
 
         ctx.save_for_backward(q, k)
@@ -95,6 +97,7 @@ class MuiQKL2Norm(MuiModule):
             k_states = k.to(torch.float32)
             q_variance = q_states.pow(2).mean(-1, keepdim=True)
             k_variance = k_states.pow(2).mean(-1, keepdim=True)
+
             q_states = q_states * torch.rsqrt(q_variance + self.variance_epsilon)
             k_states = k_states * torch.rsqrt(k_variance + self.variance_epsilon)
             return q_states.to(input_dtype), k_states.to(input_dtype)

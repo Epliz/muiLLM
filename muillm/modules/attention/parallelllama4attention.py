@@ -17,21 +17,14 @@ import math
 from typing import Callable, List, Optional, Tuple, Union
 
 from muillm.engineconfig import MuiEngineConfig
-from muillm.modules.attention.causaltransformerdecoding import (
-    mui_causally_decode,
-    mui_causally_decode_masked,
-)
 from muillm.modules.attention.llama4attention import (
-    apply_rotary_emb,
     apply_temperature_tuning,
     eager_attention_forward,
 )
 
-from muillm.modules.kvcache.cache_utils import MuiHybridChunkedCache
+from muillm.modules.kvcache.cache_utils import MuiCache, MuiHybridChunkedCache
 from muillm.modules.module import MuiModule
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
@@ -44,8 +37,8 @@ from transformers.models.llama4.modeling_llama4 import (
 )
 
 from muillm.modules.parallellinear import MuiParallelLinear
-from muillm.modules.parallelmultilinear import MuiParallelMultiLinear
 from muillm.modules.norm.qkl2norm import MuiQKL2Norm
+from muillm.modules.rope.ropeops import apply_complex_rotary_emb
 from muillm.replacement.replacementcontext import MuiReplacementContext
 
 
@@ -276,15 +269,6 @@ class MuiParallelLlama4TextAttention(MuiModule):
                     bsz, self.num_tp_key_value_heads, q_len, self.head_dim
                 )
 
-                if (
-                    self.use_rope
-                ):  # the 16E model skips rope for long context on certain layers
-                    query_states, key_states = apply_rotary_emb(
-                        query_states,
-                        key_states,
-                        position_embeddings,
-                    )
-
                 # (rope and qk_norm commute as rope is a rotation)
                 if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
                     query_states, key_states = self.qk_norm(query_states, key_states)
@@ -298,15 +282,33 @@ class MuiParallelLlama4TextAttention(MuiModule):
                         self.floor_scale,
                     )
 
-                query_states = query_states
-                key_states = key_states
-
-                if past_key_value is not None:
+                cache_kwargs = {
+                    "cache_position": cache_position,
+                }
+                if self.use_rope and isinstance(past_key_value, MuiCache):
                     # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                    cache_kwargs = {"cache_position": cache_position}
-                    key_states, value_states = past_key_value.update(
-                        key_states, value_states, self.layer_idx, cache_kwargs
+                    query_states, key_states, value_states = past_key_value.rope_update(
+                        query_states,
+                        key_states,
+                        value_states,
+                        position_embeddings,
+                        self.layer_idx,
+                        cache_kwargs,
+                        complex_rope=True,
                     )
+                else:
+                    if self.use_rope:
+                        query_states, key_states = apply_complex_rotary_emb(
+                            query_states,
+                            key_states,
+                            position_embeddings,
+                        )
+
+                    if past_key_value is not None:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        key_states, value_states = past_key_value.update(
+                            key_states, value_states, self.layer_idx, cache_kwargs
+                        )
 
                 attn_output = _MuiParallelLlama4Attention.apply(
                     self.cpp_module,
@@ -333,15 +335,6 @@ class MuiParallelLlama4TextAttention(MuiModule):
             key_states = key_states.transpose(1, 2)
             value_states = value_states.transpose(1, 2)
 
-            if (
-                self.use_rope
-            ):  # the 16E model skips rope for long context on certain layers
-                query_states, key_states = apply_rotary_emb(
-                    query_states,
-                    key_states,
-                    position_embeddings,
-                )
-
             # (rope and qk_norm commute as rope is a rotation)
             if hasattr(self, "qk_norm"):  # the 128E model does not use qk_norm
                 query_states, key_states = self.qk_norm(query_states, key_states)
@@ -355,12 +348,33 @@ class MuiParallelLlama4TextAttention(MuiModule):
                     self.floor_scale,
                 )
 
-            if past_key_value is not None:
+            cache_kwargs = {
+                "cache_position": cache_position,
+            }
+            if self.use_rope and isinstance(past_key_value, MuiCache):
                 # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                cache_kwargs = {"cache_position": cache_position}
-                key_states, value_states = past_key_value.update(
-                    key_states, value_states, self.layer_idx, cache_kwargs
+                query_states, key_states, value_states = past_key_value.rope_update(
+                    query_states,
+                    key_states,
+                    value_states,
+                    position_embeddings,
+                    self.layer_idx,
+                    cache_kwargs,
+                    complex_rope=True,
                 )
+            else:
+                if self.use_rope:
+                    query_states, key_states = apply_complex_rotary_emb(
+                        query_states,
+                        key_states,
+                        position_embeddings,
+                    )
+
+                if past_key_value is not None:
+                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                    key_states, value_states = past_key_value.update(
+                        key_states, value_states, self.layer_idx, cache_kwargs
+                    )
 
             attention_interface: Callable = eager_attention_forward
             if self.config._attn_implementation != "eager":
