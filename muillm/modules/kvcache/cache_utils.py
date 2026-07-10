@@ -252,14 +252,18 @@ class MuiDynamicCache(DynamicCache, MuiCache):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
-        if self.cpp_module is not None:
-            muillm_ext.muillm_dynamic_kvcache_module_deinit(self.cpp_module)
+        self._deinit_cpp_module()
 
         # TODO: make sure the cache lists are always populated, even if with empty
         # tensors?
         self.cpp_module = muillm_ext.muillm_dynamic_kvcache_module_init(
             self.cpp_engine, self.key_cache, self.value_cache, self._seen_tokens
         )
+
+    def _deinit_cpp_module(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_dynamic_kvcache_module_deinit(self.cpp_module)
+            del self.cpp_module
 
     def _sync_seen_tokens(self):
         if self.cpp_module is not None:
@@ -525,12 +529,16 @@ class MuiStaticCache(StaticCache, MuiCache):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
-        if self.cpp_module is not None:
-            muillm_ext.muillm_static_kvcache_module_deinit(self.cpp_module)
+        self._deinit_cpp_module()
 
         self.cpp_module = muillm_ext.muillm_static_kvcache_module_init(
             self.cpp_engine, self.key_cache, self.value_cache, self._seen_tokens
         )
+
+    def _deinit_cpp_module(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_static_kvcache_module_deinit(self.cpp_module)
+            del self.cpp_module
 
     def _sync_seen_tokens(self):
         if self.cpp_module is not None:
@@ -872,8 +880,7 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
-        if self.cpp_module is not None:
-            muillm_ext.muillm_hybrid_chunked_kvcache_module_deinit(self.cpp_module)
+        self._deinit_cpp_module()
 
         self.cpp_module = muillm_ext.muillm_hybrid_chunked_kvcache_module_init(
             self.cpp_engine,
@@ -883,6 +890,11 @@ class MuiHybridChunkedCache(HybridChunkedCache, MuiCache):
             self.sliding_window,
             self._seen_tokens,
         )
+
+    def _deinit_cpp_module(self):
+        if self.cpp_module is not None:
+            muillm_ext.muillm_hybrid_chunked_kvcache_module_deinit(self.cpp_module)
+            del self.cpp_module
 
     def _sync_seen_tokens(self):
         if self.cpp_module is not None:

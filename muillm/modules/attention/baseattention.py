@@ -150,8 +150,7 @@ class MuiBaseAttention(MuiModule):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
-        if self.cpp_module is not None:
-            muillm_ext.muillm_attention_module_deinit(self.cpp_module)
+        self._deinit_cpp_module()
 
         self.cpp_module = muillm_ext.muillm_attention_module_init(
             self.cpp_engine,
@@ -163,10 +162,18 @@ class MuiBaseAttention(MuiModule):
             self.layer_idx,
         )
 
+    def _deinit_cpp_module(self):
+        if getattr(self, "cpp_module", None) is None:
+            return
+
+        deinit_fn = getattr(muillm_ext, "muillm_attention_module_deinit", None)
+        if callable(deinit_fn):
+            deinit_fn(self.cpp_module)
+
+        del self.cpp_module
+
     def finalize_deinit(self):
-        if self.cpp_module is not None:
-            muillm_ext.muillm_attention_module_deinit(self.cpp_module)
-            self.cpp_module = None
+        self._deinit_cpp_module()
 
     @staticmethod
     def _create_rotary_embeddings(

@@ -127,8 +127,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
         self.up_proj.finalize_init()
         self.down_proj.finalize_init()
 
-        if self.cpp_module is not None:
-            muillm_ext.muillm_parallel_gateupdownmlp_module_deinit(self.cpp_module)
+        self._deinit_cpp_module()
 
         if not self.dispatchable:
             # cannot initialize the cpp module
@@ -162,10 +161,18 @@ class MuiParallelGateUpDownMLP(MuiModule):
             dispatchable_activation and dispatchable_device and dispatchable_type
         )
 
+    def _deinit_cpp_module(self):
+        if getattr(self, "cpp_module", None) is None:
+            return
+
+        deinit_fn = getattr(muillm_ext, "muillm_parallel_gateupdownmlp_module_deinit", None)
+        if callable(deinit_fn):
+            deinit_fn(self.cpp_module)
+
+        del self.cpp_module
+
     def finalize_deinit(self):
-        if self.cpp_module is not None:
-            muillm_ext.muillm_parallel_gateupdownmlp_module_deinit(self.cpp_module)
-            self.cpp_module = None
+        self._deinit_cpp_module()
 
     @staticmethod
     def replace(
