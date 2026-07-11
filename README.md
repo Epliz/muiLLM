@@ -93,6 +93,11 @@ And install the library (creating a virtual environment beforehand is recommende
 pip install --upgrade build
 pip install wheel
 
+pip install -e . --no-build-isolation
+```
+
+To build a wheel file and install it:
+```shell
 python -m build --no-isolation && pip install ./dist/muillm-0.0.1-cp310-cp310-linux_x86_64.whl
 ```
 
