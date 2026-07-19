@@ -154,6 +154,14 @@ setup(
         )
     ],
     cmdclass={"build_ext": NinjaBuildExtension},
+    entry_points={"console_scripts": ["muillm-server=muillm.server.server:main"]},
     install_requires=["torch", "transformers==4.52.4", "accelerate"],
+    extras_require={
+        "server": [
+            "fastapi>=0.110.0",
+            "uvicorn>=0.29.0",
+            "peft", # for LoRa support
+        ]
+    },
     version=get_version("muillm/__init__.py"),
 )
