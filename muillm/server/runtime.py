@@ -74,6 +74,8 @@ def validate_structured_output(content: str, output_json_schema: dict) -> None:
         raise ValueError(f"Parsed content does not match the output schema: {e.message}")
 
 def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest], device: torch.device, rank: int, profile: bool) -> List[str]:
+    batch_size = len(payloads)
+
     # TODO: check that all generation args are the same
     generation_args = build_generation_args(payloads[0])
 
@@ -116,7 +118,7 @@ def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest],
             if torch.cuda.is_available():
                 torch.cuda.synchronize(device)
     finally:
-        save_trace(profile_ctx, rank)
+        save_trace(profile_ctx, rank, batch_size)
 
     end_time = time.time()
 
@@ -125,7 +127,6 @@ def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest],
     texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=False)
 
     output_len = generated_ids.shape[1]
-    batch_size = len(payloads)
     total_tokens = batch_size * output_len
 
     tokens_per_seconds = total_tokens / (end_time - start_time)
@@ -179,13 +180,13 @@ def create_profiling_context(profile: bool):
 
     return profile_ctx
 
-def save_trace(profile_ctx, rank: int):
+def save_trace(profile_ctx, rank: int, batch_size: int):
     if (profile_ctx is not None) and isinstance(profile_ctx, torch.profiler.profile):
         profile_output_dir = "profiler"
         os.makedirs(profile_output_dir, exist_ok=True)
 
         trace_id = generate_id("trace_", length=6)
-        trace_file = os.path.join(profile_output_dir, f"trace_{trace_id}_rank{rank}.json")
+        trace_file = os.path.join(profile_output_dir, f"trace_{trace_id}_bs{batch_size}_rank{rank}.json")
 
         print(f"Profiling trace saved to: {trace_file}")
         profile_ctx.export_chrome_trace(trace_file)
