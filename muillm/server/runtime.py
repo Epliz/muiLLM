@@ -16,6 +16,7 @@ from muillm.server.chatcompletion import ChatCompletionFunctionTool, ChatComplet
 from muillm.server.defaults import DEFAULT_MAX_CONTEXT_LENGTH, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_TEMPERATURE, DEFAULT_TOP_P
 from muillm.server.filehelpers import read_file_content
 from muillm.server.idutils import generate_id
+from muillm.server.outputparsers.outputparser import OutputParser
 
 
 def detect_tp_size(requested: Optional[int]) -> int:
@@ -148,6 +149,7 @@ def _worker_entrypoint(
     lora_path: Optional[str],
     tokenizer_path: str,
     chat_template_path: Optional[str],
+    output_parser_name: Optional[str],
     model_dtype,
     request_queue: Any,
     response_queue: Any,
@@ -172,7 +174,7 @@ def _worker_entrypoint(
 
     model = load_model(rank, model_path, lora_path, model_dtype, device)
 
-    output_parser = create_output_parser(model)
+    output_parser = create_output_parser(model, output_parser_name)
 
     ready_queue.put(rank)
 
@@ -202,10 +204,8 @@ def _worker_entrypoint(
 
             response_queue.put(responses)
 
-def create_output_parser(model):
-    # create based on what the model is
-    from muillm.server.outputparsers.llama3thinking import Llama3ThinkingOutputParser
-    return Llama3ThinkingOutputParser()
+def create_output_parser(model, output_parser_name: Optional[str]) -> OutputParser:
+    return OutputParser.create_output_parser(model.__class__.__name__, output_parser_name)
 
 def load_model(rank, model_path, lora_path, model_dtype, device):
     print(f"Loading model on rank {rank}...")
@@ -277,6 +277,7 @@ class ModelWorkerManager:
         # if a tokenizer path was not provided, use the model path as the tokenizer path
         self.tokenizer_path = args.tokenizer_path if args.tokenizer_path is not None else self.model_path
         self.chat_template_path = args.chat_template_path
+        self.output_parser_name = args.output_parser
 
         self.profile = args.profile
 
@@ -301,6 +302,8 @@ class ModelWorkerManager:
             print(f"tokenizer_path={self.tokenizer_path}")
         if self.chat_template_path is not None:
             print(f"chat_template_path={self.chat_template_path}")
+        if self.output_parser_name is not None:
+            print(f"output_parser={self.output_parser_name}")
         print(f"model_dtype={self.model_dtype}")
         print(f"tp_size={self.tp_size}")
         print(f"max_batch_size={self.max_batch_size}")
@@ -343,6 +346,7 @@ class ModelWorkerManager:
                     self.lora_path,
                     self.tokenizer_path,
                     self.chat_template_path,
+                    self.output_parser_name,
                     self.model_dtype,
                     self.request_queues[rank],
                     self.response_queue,

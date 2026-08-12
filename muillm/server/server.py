@@ -5,7 +5,6 @@ from unittest import result
 import uvicorn
 
 import time
-import uuid
 from http import HTTPStatus
 
 from fastapi import FastAPI, HTTPException
@@ -13,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from muillm.server.chatcompletion import ChatCompletionRequest
 from muillm.server.idutils import generate_id
+from muillm.server.outputparsers.outputparser import OutputParser
 from muillm.server.runtime import ModelWorkerManager
 
 
@@ -65,6 +65,13 @@ def parse_args():
         type=str,
         default=None,
         help="Path to chat template file",
+    )
+    group.add_argument(
+        "--output-parser",
+        dest="output_parser",
+        type=str,
+        default=None,
+        help=f"Name of the output parser to use ({','.join(OutputParser.list_output_parsers())})"
     )
     group = parser.add_argument_group("kvcache", "kv cache options")
     group.add_argument("--max-batch-size", dest="max_batch_size", type=int, help="Maximum batch size for KV cache")

@@ -11,6 +11,16 @@ _LLAMA3_THINKING_TOOL_CALL_END = "</tool_call>"
 _LLAMA3_THINKING_END_OF_TURN = "<|eot_id|>"
 
 class Llama3ThinkingOutputParser(OutputParser):
+    parser_name = "llama3thinking"
+
+    def __init__(self):
+        super().__init__()
+
+    @classmethod
+    def matches(cls, model_class_name: str) -> bool:
+        lowered_name = model_class_name.lower()
+        return "llama" in lowered_name and "thinking" in lowered_name
+
     def _extract_reasoning_content(self, content: str) -> tuple[str, str]:
         """
         Extract the reasoning content from the text, if present.
