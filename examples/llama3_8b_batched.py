@@ -122,10 +122,11 @@ Check-in is from 3 pm, and check-out is by"""
 
 batched_prompts = [short_prompt0, short_prompt1, long_prompt0, long_prompt1]
 all_prompts = [short_prompt0, long_prompt0, batched_prompts]
+labels = ["short prompt", "long prompt", "batched prompts"]
 
-for prompts in all_prompts:
+for prompts, label in zip(all_prompts, labels):
     tokenized_prompts = tokenizer(prompts, return_tensors="pt", padding="longest")
-    print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
+    print(f"tokenized '{label}' prompts: {tokenized_prompts['input_ids'].shape}")
 
     num_input_tokens = tokenized_prompts["input_ids"].shape[1]
     batch_size = tokenized_prompts["input_ids"].shape[0]
@@ -143,11 +144,13 @@ for prompts in all_prompts:
             num_input_tokens + tokenized_outputs["input_ids"].shape[1]
         ) * batch_size
 
-        print("[Original] Completion: ", text)
-        print("[Original] Time: ", time)
+        print("---")
+        print(f"[Original] Completion for '{label}': ", text)
+        print(f"[Original] Time for '{label}': ", time)
         print(
             f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})"
         )
+        print("---")
 
 
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
@@ -163,9 +166,10 @@ model = init_engine(model, tensor_parallelism=1)
 
 print("Optimized models: ", model)
 
-for prompts in all_prompts:
+for prompts, label in zip(all_prompts, labels):
     tokenized_prompts = tokenizer(prompts, return_tensors="pt", padding="longest")
-    print("tokenized prompts: ", tokenized_prompts["input_ids"].shape)
+    print(f"tokenized '{label}' prompts: {tokenized_prompts['input_ids'].shape}")
+
 
     num_input_tokens = tokenized_prompts["input_ids"].shape[1]
     batch_size = tokenized_prompts["input_ids"].shape[0]
@@ -182,11 +186,13 @@ for prompts in all_prompts:
         num_input_tokens + tokenized_outputs["input_ids"].shape[1]
     ) * batch_size
 
-    print("[Optimized] Completion: ", text)
-    print("[Optimized] Time: ", time)
+    print("---")
+    print(f"[Optimized] Completion for '{label}': ", text)
+    print(f"[Optimized] Time for '{label}': ", time)
     print(
         f"tot toks/s:  {num_total_tokens / time} (batch size {batch_size}, prompt len {num_input_tokens})"
     )
+    print("---")
 
 # Save a pytorch trace (visualizable for example with https://ui.perfetto.dev)
 text, time = profile_func(

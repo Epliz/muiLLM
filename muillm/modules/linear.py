@@ -81,8 +81,8 @@ class MuiLinear(MuiModule, nn.Linear):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
-        if self.cpp_module is not None:
-            muillm_ext.muillm_linear_module_deinit(self.cpp_module)
+        # de-init the previous module if there was one
+        self._deinit_cpp_module()
 
         if not self.dispatchable:
             # cannot initialize the cpp module
@@ -102,24 +102,28 @@ class MuiLinear(MuiModule, nn.Linear):
             bias,
         )
 
+    def _deinit_cpp_module(self):
+        if getattr(self, "cpp_module", None) is None:
+            return
+        
+        # the de-init function might not be available anymore
+        deinit_fn = getattr(muillm_ext, "muillm_linear_module_deinit", None)
+        if callable(deinit_fn):
+            deinit_fn(self.cpp_module)
+        
+        del self.cpp_module
+
     def _severe_ties(self):
         # severe ties to weights, biases and norm_weights
-        weight = self.weight
-        self.weight = None
-        del weight
+        del self.weight
 
         if self.bias is not None:
-            bias = self.bias
-            self.bias = None
-            del bias
+            del self.bias
 
         if self.norm is not None:
             del self.norm
 
-        # destroy the C++ module as well to severe the ties to tensors
-        if self.cpp_module is not None:
-            muillm_ext.muillm_linear_module_deinit(self.cpp_module)
-            self.cpp_module = None
+        self._deinit_cpp_module()
 
     def finalize_deinit(self):
         self._severe_ties()

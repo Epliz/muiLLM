@@ -143,14 +143,23 @@ class MuiLlama4TextModel(Llama4PreTrainedModel, MuiModule):
             self.cpp_module = None
             return
 
-        if self.cpp_module is not None:
-            muillm_ext.muillm_parallel_llama4_decoder_stack_deinit(self.cpp_module)
+        self._deinit_cpp_module()
 
         self.cpp_module = muillm_ext.muillm_parallel_llama4_decoder_stack_init(
             self.cpp_engine,
             self.comms.comms,
             [layer.cpp_module for layer in self.layers],
         )
+
+    def _deinit_cpp_module(self):
+        if getattr(self, "cpp_module", None) is None:
+            return
+
+        deinit_fn = getattr(muillm_ext, "muillm_parallel_llama4_decoder_stack_deinit", None)
+        if callable(deinit_fn):
+            deinit_fn(self.cpp_module)
+
+        del self.cpp_module
 
     @staticmethod
     def _replace_layers(

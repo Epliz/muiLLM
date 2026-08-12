@@ -97,8 +97,7 @@ class MuiLlama4TextDecoderLayer(MuiModule):
         self._check_dispatchable()
 
         # initialize the cpp module
-        if self.cpp_module is not None:
-            muillm_ext.muillm_llama4_decoder_module_deinit(self.cpp_module)
+        self._deinit_cpp_module()
 
         self.cpp_module = muillm_ext.muillm_llama4_decoder_module_init(
             self.cpp_engine,
@@ -108,10 +107,18 @@ class MuiLlama4TextDecoderLayer(MuiModule):
             self.use_chunked_attention,
         )
 
+    def _deinit_cpp_module(self):
+        if getattr(self, "cpp_module", None) is None:
+            return
+
+        deinit_fn = getattr(muillm_ext, "muillm_llama4_decoder_module_deinit", None)
+        if callable(deinit_fn):
+            deinit_fn(self.cpp_module)
+
+        del self.cpp_module
+
     def finalize_deinit(self):
-        if self.cpp_module is not None:
-            muillm_ext.muillm_llama4_decoder_module_deinit(self.cpp_module)
-            self.cpp_module = None
+        self._deinit_cpp_module()
 
     @staticmethod
     def replace(

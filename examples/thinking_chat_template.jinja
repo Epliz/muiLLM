@@ -1,0 +1,142 @@
+{{- bos_token }}
+{%- if not reasoning_effort is defined %}
+    {%- set reasoning_effort = none %}
+{%- endif %}
+{%- if custom_tools is defined %}
+    {%- set tools = custom_tools %}
+{%- endif %}
+{%- if not tools_in_last_message is defined %}
+    {%- set tools_in_last_message = true %}
+{%- endif %}
+{%- if not date_string is defined %}
+    {%- set date_string = "26 Jul 2024" %}
+{%- endif %}
+{%- if not tools is defined %}
+    {%- set tools = none %}
+{%- endif %}
+
+{#- This block extracts the system message, so we can slot it into the right place. #}
+{%- if messages[0]['role'] == 'system' %}
+    {%- set system_message = messages[0]['content']|trim %}
+    {%- set messages = messages[1:] %}
+{%- else %}
+    {%- set system_message = "" %}
+{%- endif %}
+
+{#- System message#}
+{{- "<|start_header_id|>system<|end_header_id|>\n" }}
+{{- "Cutting Knowledge Date: December 2023\n" }}
+{{- "Today Date: " + date_string + "\n" }}
+
+
+{#- System message + reasoning instructions#}
+{%- if reasoning_effort is not none %}
+    {{- '<thinking effort="' + reasoning_effort +'"/>\n'}}
+{%- else %}
+    {{- '<thinking effort="auto"/>\n'}}
+{%- endif %}
+{{- "Before answering, always think step by step. Put your thoughts in a single block between <thoughts></thoughts> XML tags.\n" }}
+{{- "After that provide your final answer.\n"}}
+
+{%- if tools is not none and not tools_in_last_message %}
+    {{- "You may call one or more functions in your final answer to assist with the current task.\n"}}
+    {{- "You are provided with the function signatures within <tools></tools> XML tags.\n"}}
+    {{- 'For each function call, return a JSON object between XML tags <tool_call></tool_call> in the format <tool_call>{"name": function name, "parameters": dictionary of argument name and its value}</tool_call>.' }}
+    {{- "Do not use variables.\n" }}
+    {{- "<tools>\n"}}
+    {%- for t in tools %}
+        {{- t | tojson(indent=4) }}
+        {{- "\n" }}
+    {%- endfor %}
+    {{- "</tools>\n"}}
+{%- endif %}
+{{- system_message }}
+{{- "<|eot_id|>\n\n" }}
+
+{#- Custom tools are passed in the last message with some extra guidance #}
+{%- if tools_in_last_message and not tools is none %}
+    {#- Extract the first user message so we can plug it in here #}
+    {%- if messages | length != 0 %}
+        {%- set last_message = messages[-1] %}
+        {%- set messages = messages[0:-1] %}
+    {%- else %}
+        {{- raise_exception("Cannot put tools in the last message when there's no message!") }}
+    {%- endif %}
+{%- endif %}
+
+{%- for message in messages %}
+    {%- if not (message.role == 'tool' or 'tool_calls' in message) %}
+        {{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n' }}
+        {%- if message.reasoning_content is string %}
+            {{- '<thoughts>' + message.reasoning_content + '</thoughts>\n'}}
+        {%- endif %}
+        {{- message['content'] | trim }}
+        {{- '<|eot_id|>\n\n' }}
+    {%- elif 'tool_calls' in message %}
+        {{- '<|start_header_id|>assistant<|end_header_id|>\n'}}
+        {%- if message.reasoning_content is string %}
+            {{- '<thoughts>' + message.reasoning_content + '</thoughts>\n'}}
+        {%- endif %}
+        {{- message['content'] | trim + '\n' }}
+        {%- for tool_call_object in message.tool_calls %}
+            {%- set tool_call = tool_call_object.function %}
+            {%- if tool_call_object.id is string %}
+                {{- '<tool_call>{"id": "' + tool_call_object.id + '", "name": "' + tool_call.name + '", ' }}
+            {%- else %}
+                {{- '<tool_call>{"name": "' + tool_call.name + '", ' }}
+            {%- endif %}
+            {{- '"parameters": ' }}
+            {{- tool_call.arguments | tojson }}
+            {{- "}</tool_call>\n" }}
+        {%- endfor %}
+        {{- "<|eot_id|>\n\n" }}
+    {%- elif message.role == "tool" %}
+        {{- "<|start_header_id|>tool_results<|end_header_id|>\n" }}
+        {%- if message.tool_call_id is string %}
+            {{- 'tool_call_id: ' + last_message['tool_call_id']|trim + '\n' }}
+        {%- endif %}
+        {%- if message.content is mapping or message.content is iterable %}
+            {{- message.content | tojson }}
+        {%- else %}
+            {{- message.content }}
+        {%- endif %}
+        {{- "<|eot_id|>\n\n" }}
+    {%- endif %}
+{%- endfor %}
+
+{#- Custom tools are passed in the last message with some extra guidance #}
+{%- if tools_in_last_message and not tools is none %}
+    {%- if last_message.role == "tool" %}
+        {{- '<|start_header_id|>tool_results<|end_header_id|>\n' }}
+        {%- if last_message.tool_call_id is string %}
+            {{- 'tool_call_id: ' + last_message['tool_call_id']|trim + '\n' }}
+        {%- endif %}
+    {%- else %}
+        {{- '<|start_header_id|>' + last_message['role']|trim + '<|end_header_id|>\n' }}
+    {%- endif %}
+    {%- if last_message.reasoning_content is string %}
+        {{- '<thoughts>' + last_message.reasoning_content + '</thoughts>\n'}}
+    {%- endif %}
+    {{- last_message['content']|trim + "\n\n" }}
+    {{- "For the next turn, you may call one or more functions in your final answer to assist with the current task.\n"}}
+    {{- "You are provided with the function signatures within <tools></tools> XML tags.\n"}}
+    {{- 'For each function call, return a JSON object between XML tags <tool_call></tool_call> in the format <tool_call>{"name": function name, "parameters": dictionary of argument name and its value}</tool_call>.' }}
+    {{- "Do not use variables.\n" }}
+    {{- "<tools>\n"}}
+    {%- for t in tools %}
+        {{- t | tojson(indent=4) }}
+        {{- "\n" }}
+    {%- endfor %}
+    {{- "</tools>\n"}}
+    {{- "<|eot_id|>\n\n"}}
+{%- endif %}
+
+{%- if add_generation_prompt %}
+    {{- '<|start_header_id|>assistant<|end_header_id|>\n' }}
+    {%- if (reasoning_effort is not none) and (reasoning_effort == 'none') %}
+        {#-Thinking is disabled, so close the thoughts already #}
+        {{- '<thoughts></thoughts>' }}
+    {%- else  %}
+        {{- '<thoughts>' }}
+    {%- endif %} 
+{%- endif %}

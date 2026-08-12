@@ -93,6 +93,17 @@ And install the library (creating a virtual environment beforehand is recommende
 pip install --upgrade build
 pip install wheel
 
+pip install -e . --no-build-isolation
+```
+
+To install optional dependencies required for the OpenAI-compatible FastAPI server:
+
+```shell
+pip install -e .[server] --no-build-isolation
+```
+
+To build a wheel file and install it:
+```shell
 python -m build --no-isolation && pip install ./dist/muillm-0.0.1-cp310-cp310-linux_x86_64.whl
 ```
 
@@ -111,6 +122,42 @@ pip install pytest-forked
 And you can run them with:
 ```shell
 pytest --forked ./tests
+```
+
+## Server
+
+The repository includes a FastAPI-based OpenAI chat completion compatible server.
+
+Start it with:
+
+```shell
+python -m muillm.server.server \
+    --model-path mistralai/Mistral-7B-Instruct-v0.2 \
+    --server-model-id mistral-7b-instruct
+```
+
+Health check endpoint:
+
+```shell
+curl http://127.0.0.1:8000/healthz
+```
+
+Chat completion endpoint:
+
+```shell
+curl http://127.0.0.1:8000/v1/chat/completions \
+    -H "content-type: application/json" \
+    -d '{
+        "model": "mistral-7b-instruct",
+        "messages": [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Say hello in one sentence."}
+        ],
+        "max_tokens": 64,
+        "temperature": 0.7,
+        "top_p": 1.0,
+        "stream": false
+    }'
 ```
 
 ## Examples
