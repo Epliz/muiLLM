@@ -23,9 +23,9 @@ from muillm.replacement.replacementcontext import MuiReplacementContext
 
 class _MuiParallelLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, module, x, residual, reduce):
+    def forward(ctx, module, x, mul_residual, residual, reduce):
         output = muillm_ext.muillm_parallel_linear_module_forward(
-            module, x, residual=residual, reduce=reduce
+            module, x, mul_residual=mul_residual, residual=residual, reduce=reduce
         )
 
         ctx.save_for_backward(x)
@@ -115,7 +115,6 @@ class MuiParallelLinear(MuiModule):
             self.norm.weight if normalize else None,
             self.norm.variance_epsilon if normalize else 0.0,
             self.norm.weight_offset if normalize else 0.0,
-            None,  # mul_bias
             bias,
             self.sharding_dim,
         )
@@ -513,20 +512,21 @@ class MuiParallelLinear(MuiModule):
     def parallel_forward(
         self,
         input: Union[Tensor, List[Tensor]],
+        mul_residual: Optional[Tensor] = None,
         residual: Optional[Tensor] = None,
         collect_outputs: bool = True,
     ) -> Tensor:
         input = self._shard_inputs_if_needed(input)
 
         output = _MuiParallelLinear.apply(
-            self.cpp_module, input, residual, collect_outputs
+            self.cpp_module, input, mul_residual, residual, collect_outputs
         )
 
         # wrap in a list to indicate that it is the output of parallel_forward
         return [output]
 
-    def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
+    def forward(self, input: Tensor, mul_residual: Optional[Tensor] = None, residual: Optional[Tensor] = None) -> Tensor:
         if self.tensor_parallelism > 1:
-            return self.parallel_forward(input, residual)[0]
+            return self.parallel_forward(input, mul_residual, residual)[0]
 
         raise ValueError("Only parallel inference is supported")

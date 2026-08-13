@@ -185,6 +185,13 @@ static inline float __device__ silu(float x) {
   return x / (1.0f + expf(-x));
 }
 
+static inline float __device__ gelu_tanh(float x) {
+  // in python:
+  // 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))));
+
+  return 0.5f * x * (1.0f + tanhf(sqrtf(2.0f / M_PI) * (x * (1.0f + 0.044715f * x * x))));
+}
+
 static inline float __device__ qint8tofloat(uint8_t q, half2 scale_min_val) {
   half scale = scale_min_val.x;
   half min_val = scale_min_val.y;
@@ -447,6 +454,8 @@ __global__ void muillm_int8_gemv_kernel(
       if (activation == mui_activation::Silu) {
         // apply the activation if there is one
         acc = silu(acc);
+      } else if (activation == mui_activation::Gelu_Tanh) {
+        acc = gelu_tanh(acc);
       }
 
       if (MB != nullptr) { // apply the multipicative bias if there is one
@@ -714,6 +723,8 @@ __global__ void muillm_int8_gemv_norm_inputs_kernel(
       if (activation == mui_activation::Silu) {
         // apply the activation if there is one
         acc = silu(acc);
+      } else if (activation == mui_activation::Gelu_Tanh) {
+        acc = gelu_tanh(acc);
       }
 
       if (MB != nullptr) { // apply the multipicative bias if there is one

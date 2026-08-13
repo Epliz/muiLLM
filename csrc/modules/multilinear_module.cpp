@@ -20,9 +20,12 @@ std::vector<torch::Tensor> MuiLLMMultiLinear::forward(
 ) {
   auto undef_tensor = torch::Tensor();
 
-  int num_slices = this->slices.size();
+  auto all_outputs = this->linear->forward(
+    input,
+    /* mul_residual */ undef_tensor,
+    /* residual */ undef_tensor
+  );
 
-  auto all_outputs = this->linear->forward(input, /*residual*/ undef_tensor);
   auto all_split_outputs = this->slice_outputs(all_outputs);
   return all_split_outputs;
 };

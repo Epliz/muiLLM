@@ -43,6 +43,7 @@ at::Tensor muillm_gateupmlp_forward_trampoline(
 void muillm_gateupmlp_forward_fp16(
   hipStream_t stream,
   MuiGateUpMLPActivation activation,
+  unsigned B,
   unsigned N,
   unsigned K,
   const half* norm_weights,
@@ -52,12 +53,13 @@ void muillm_gateupmlp_forward_fp16(
   const half* up_weights,
   const half* x,
   half* y,
-  int simd_lanes
+  int warp_size
 );
 
 void muillm_gateupmlp_forward_bf16(
   hipStream_t stream,
   MuiGateUpMLPActivation activation,
+  unsigned B,
   unsigned N,
   unsigned K,
   const __hip_bfloat16* norm_weights,
@@ -67,7 +69,7 @@ void muillm_gateupmlp_forward_bf16(
   const __hip_bfloat16* up_weights,
   const __hip_bfloat16* x,
   __hip_bfloat16* y,
-  int simd_lanes
+  int warp_size
 );
 
 void muillm_gateupmlp_forward_placed_output(
@@ -102,6 +104,15 @@ void muillm_gateupmlp_forward_placed_output(
 
   const auto N = gate_weights.size(0);
   const auto K = gate_weights.size(1);
+  const auto Kx = x.size(x.dim() - 1);
+  TORCH_CHECK(K == Kx, "gate_weights.size(1) must match x.size(-1)");
+  const auto B = x.numel() / K;
+  TORCH_CHECK(B <= MUILLM_GATEUP_KERNELS_MAX_BATCH_SIZE, "Unsupported batch size for fused gateup kernels");
+
+  if (normalize) {
+    const auto norm_k = norm_weights.size(0);
+    TORCH_CHECK(K == norm_k, "fused normalization is not supported when sharding on dim 1 (K != norm_weights.size(0))");
+  }
 
   // y has the same dimensions as x, except the last dim that is given by
   // the out_features of weights
@@ -110,12 +121,13 @@ void muillm_gateupmlp_forward_placed_output(
 
   auto y = torch::empty(output_sizes, output_options);
 
-  int simd_lanes = engine->gpu_infos[0]->simd_lanes;
+  int warp_size = engine->gpu_infos[0]->warp_size;
 
   if (dtype == torch::kFloat16) {
     muillm_gateupmlp_forward_fp16(
         stream,
         activation,
+        B,
         N,
         K,
         normalize ? (const half*)norm_weights.data_ptr() : nullptr,
@@ -125,12 +137,13 @@ void muillm_gateupmlp_forward_placed_output(
         (const half*)up_weights.data_ptr(),
         (const half*)x.data_ptr(),
         (half*)y.data_ptr(),
-        simd_lanes
+        warp_size
     );
   } else if (dtype == torch::kBFloat16) {
     muillm_gateupmlp_forward_bf16(
         stream,
         activation,
+        B,
         N,
         K,
         normalize ? (const __hip_bfloat16*)norm_weights.data_ptr() : nullptr,
@@ -140,7 +153,7 @@ void muillm_gateupmlp_forward_placed_output(
         (const __hip_bfloat16*)up_weights.data_ptr(),
         (const __hip_bfloat16*)x.data_ptr(),
         (__hip_bfloat16*)y.data_ptr(),
-        simd_lanes
+        warp_size
     );
   } else {
     TORCH_CHECK(false, "Unsupported dtype for gateupmlp");
@@ -156,8 +169,8 @@ void muillm_gateupmlp_forward_placed_output(
       0.f, /* norm_weights_offset */
       down_weights,
       mui_activation::Identity,
-      undef_tensor /*mul_bias*/,
-      undef_tensor/*add_bias*/,
+      undef_tensor /*add_bias*/,
+      undef_tensor/*mul_residual*/,
       residual,
       y,
       output_ptr,

@@ -55,8 +55,13 @@ torch::Tensor MuiLLMLlama4Attention::forward(
     : muillm_causal_transformer_decoding_no_mask(q, k, v);
 
 
+  auto undef_tensor = torch::Tensor();
   // o proj
-  auto proj_attn_output = this->o_proj->forward(attn_output, residual);
+  auto proj_attn_output = this->o_proj->forward(
+    attn_output,
+    /* mul_residual */ undef_tensor,
+    /* residual */ residual
+  );
   return proj_attn_output;
 }
 

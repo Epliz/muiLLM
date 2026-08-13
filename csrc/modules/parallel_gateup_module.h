@@ -8,6 +8,8 @@
 
 #include "../ffn/gateupmlpactivation.h"
 #include "gateup_method.h"
+#include "linear_module.h"
+#include "parallel_linear_module.h"
 
 struct MuiLLMParallelGateUpDownMLP: MuiLLMParallelGateUpDownMLPInterface {
   // fields
@@ -16,11 +18,12 @@ struct MuiLLMParallelGateUpDownMLP: MuiLLMParallelGateUpDownMLPInterface {
 
   MuiGateUpMLPActivation activation;
   MuiLLMgateupmlpMethod method;
-  
-  torch::Tensor norm_weights{nullptr};
-  torch::Tensor gate_weights{nullptr};
-  torch::Tensor up_weights{nullptr};
-  torch::Tensor down_weights{nullptr};
+
+  // gate/up do not need to do communication, so they can be regular linear modules
+  MuiLLMLinear* gate_linear{nullptr};
+  MuiLLMLinear* up_linear{nullptr};
+  // down needs to do communication, so it needs to be a parallel linear module
+  MuiLLMParallelLinear* down_linear{nullptr};
 
   float variance_epsilon;
   float norm_weights_offset;

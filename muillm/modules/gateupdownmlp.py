@@ -334,7 +334,7 @@ class MuiGateUpDownMLP(MuiModule):
         return output
 
     def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
-        if self.dispatchable and (input.numel() == input.shape[-1]):
+        if self.dispatchable:
             # Also check that we don't have quantized linear
             if isinstance(self.gate_proj, MuiLinear) and isinstance(
                 self.up_proj, MuiLinear

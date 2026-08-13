@@ -2,6 +2,7 @@
 #define __MUILLM_LINEAR_MODULE_H__
 
 #include "../engine.h"
+#include "../linear/activation.h"
 
 #include <optional>
 
@@ -14,11 +15,12 @@ struct MuiLLMLinear: torch::nn::Module {
   torch::Tensor norm_weights{nullptr};
   torch::Tensor weights{nullptr};
 
-  torch::Tensor mul_bias{nullptr};
   torch::Tensor add_bias{nullptr};
 
   float variance_epsilon;
   float norm_weights_offset;
+
+  mui_activation activation;
 
   bool dispatchable;
 
@@ -27,16 +29,17 @@ struct MuiLLMLinear: torch::nn::Module {
     muillm_engine_t* engine,
     torch::Tensor& norm_weights,
     torch::Tensor& weights,
-    torch::Tensor& mul_bias,
     torch::Tensor& add_bias,
     float variance_epsilon,
-    float norm_weights_offset
+    float norm_weights_offset,
+    mui_activation activation = mui_activation::Identity
   );
 
   virtual ~MuiLLMLinear();
 
   torch::Tensor forward(
     torch::Tensor& inputs,
+    torch::Tensor& mul_residual,
     torch::Tensor& residual
   );
 };
@@ -53,7 +56,6 @@ muillm_linear_module_ptr_t muillm_linear_module_init_trampoline(
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
   float norm_weights_offset,
-  std::optional<torch::Tensor> mul_bias_,
   std::optional<torch::Tensor> add_bias_
 );
 
@@ -66,6 +68,7 @@ void muillm_linear_module_deinit_trampoline(
 at::Tensor muillm_linear_module_forward_trampoline(
   muillm_linear_module_ptr_t module_ptr,
   torch::Tensor& inputs,
+  std::optional<torch::Tensor> mul_residual_,
   std::optional<torch::Tensor> residual_
 );
 

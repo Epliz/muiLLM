@@ -35,8 +35,8 @@ at::Tensor muillm_parallel_gateupmlp_forward(
   muillm_comm_error_t muillm_error;
 
   const auto N = down_weights.size(0);
-
-  size_t count = N;
+  const auto B = x.numel() / x.size(x.dim() - 1);
+  const size_t reduce_count = B * N;
 
   auto dtype = x.dtype();
 
@@ -67,7 +67,7 @@ at::Tensor muillm_parallel_gateupmlp_forward(
 
   if (reduce) {
     void** buffers;
-    if ((muillm_error = muillm_comm_get_buffers(comm, count, datatype, &buffers, stream)) != MUILLM_COMM_SUCCESS) {
+    if ((muillm_error = muillm_comm_get_buffers(comm, reduce_count, datatype, &buffers, stream)) != MUILLM_COMM_SUCCESS) {
       TORCH_CHECK(false, "failed to get reduction buffers");
     }
 
@@ -91,7 +91,7 @@ at::Tensor muillm_parallel_gateupmlp_forward(
       comm,
       (const void**) buffers,
       output_ptr,
-      count,
+      reduce_count,
       datatype,
       stream
       )) != MUILLM_COMM_SUCCESS) {

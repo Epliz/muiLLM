@@ -146,6 +146,7 @@ setup(
                 # other
                 "csrc/engine.cpp",
                 "csrc/gpu_info.cpp",
+                "csrc/utils/torch_utils.cpp",
             ],
             extra_compile_args={
                 "cxx": ["-g"],  # Add debug symbols for C++ code

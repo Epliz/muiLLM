@@ -18,8 +18,8 @@ from muillm.replacement.replacementcontext import MuiReplacementContext
 
 class _MuiLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, module, x, residual):
-        output = muillm_ext.muillm_linear_module_forward(module, x, residual=residual)
+    def forward(ctx, module, x, mul_residual, residual):
+        output = muillm_ext.muillm_linear_module_forward(module, x, mul_residual=mul_residual, residual=residual)
 
         ctx.save_for_backward(x)
 
@@ -98,7 +98,6 @@ class MuiLinear(MuiModule, nn.Linear):
             self.norm.weight if normalize else None,
             self.norm.variance_epsilon if normalize else 0.0,
             self.norm.weight_offset if normalize else 0.0,
-            None,  # mul_bias
             bias,
         )
 
@@ -287,11 +286,12 @@ class MuiLinear(MuiModule, nn.Linear):
         # cache the flags checking if it is dispatchable
         self._check_dispatchable()
 
-    def forward(self, input: Tensor, residual: Optional[Tensor] = None) -> Tensor:
+    def forward(self, input: Tensor, mul_residual: Optional[Tensor] = None, residual: Optional[Tensor] = None) -> Tensor:
         if self.cpp_module is not None:
             return _MuiLinear.apply(
                 self.cpp_module,
                 input,
+                mul_residual,
                 residual,
             )
         else:

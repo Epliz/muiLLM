@@ -17,8 +17,8 @@ at::Tensor muillm_parallel_linear_activ_forward(
     float norm_weights_offset,
     torch::Tensor& weights,
     mui_activation activ,
-    torch::Tensor& mul_bias,
     torch::Tensor& add_bias,
+    torch::Tensor& mul_residual,
     torch::Tensor& residual,
     int sharding_dim, // 0 for row-wise, 1 for column-wise
     bool reduce,
@@ -34,8 +34,8 @@ at::Tensor muillm_parallel_linear_forward_trampoline(
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
     float norm_weights_offset,
-    std::optional<torch::Tensor> mul_bias_,
     std::optional<torch::Tensor> add_bias_,
+    std::optional<torch::Tensor> mul_residual_,
     std::optional<torch::Tensor> residual_,
     int sharding_dim,
     bool reduce

@@ -25,20 +25,25 @@ std::vector<torch::Tensor> MuiLLMParallelMultiLinear::forward(
 ) {
   auto undef_tensor = torch::Tensor();
 
-  int num_slices = this->slices.size();
   if (this->sharding_dim == 1) {
     // if we are sharding by columns, we can let MuiParallelLinear collect the results
-    auto all_outputs = this->linear->forward(input, /*residual*/ undef_tensor, collect_outputs);
+    auto all_outputs = this->linear->forward(input, /* mul_residual*/ undef_tensor, /*residual*/ undef_tensor, collect_outputs);
     auto all_split_outputs = this->slice_outputs(all_outputs);
     return all_split_outputs;
   }
 
   // but if we shard by row, we need to do it manually as tensors are interleaved and it would not give
   // the right results
-  auto all_outputs = this->linear->forward(input, /*residual*/ undef_tensor, /* collect_outputs */ false);
+  auto all_outputs = this->linear->forward(
+    input,
+    /* mul_residual */ undef_tensor,
+    /* residual */ undef_tensor,
+    /* collect_outputs */ false
+  );
   auto all_split_outputs = this->slice_outputs(all_outputs);
 
   if (collect_outputs) {
+    int num_slices = this->slices.size();
     // collect the outputs if necessary
     for (int output_idx = 0; output_idx < num_slices; output_idx++) {
       all_split_outputs[output_idx] = this->collect_output(all_split_outputs[output_idx]);

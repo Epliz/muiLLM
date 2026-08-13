@@ -10,40 +10,52 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 
-def max_diff(comp: torch.Tensor, t1: torch.Tensor, t2: torch.Tensor) -> float:
+def max_diff(comp: torch.Tensor, t1: torch.Tensor, t2: torch.Tensor) -> Dict[str, float]:
     comp = comp.reshape(-1)
     t1 = t1.reshape(-1)
     t2 = t2.reshape(-1)
 
     max_val, max_idx = torch.max(comp, dim=0)
-    return max_val.item(), max_idx.item(), t1[max_idx].item(), t2[max_idx].item()
+    return {"max_diff_idx": max_idx.item(), "max_diff_val": max_val.item(), "t1_val": t1[max_idx].item(), "t2_val": t2[max_idx].item()}
 
 
-def tensors_equal(t1, t2, rtol=1e-02, atol=1e-01):
-    same_shapes = t1.shape == t2.shape
+def tensors_equal(y, y_m, rtol=1e-02, y_highres: torch.Tensor = None):
+    same_shapes = y.shape == y_m.shape
 
     if not same_shapes:
-        print(f"Shapes are different: {t1.shape} vs {t2.shape}")
+        print(f"Shapes are different: {y.shape} vs {y_m.shape}")
         assert False
 
-    t1 = t1.float()
-    t2 = t2.float()
+    y = y.float()
+    y_m = y_m.float()
 
     # we don't care so much about absolute differences, but rather relative differences
     rel_eps = 1e-08
 
-    abs_diff = torch.abs(t1 - t2)
-    rel_diff = 2.0 * torch.abs(t1 - t2) / (torch.abs(t1) + torch.abs(t2) + rel_eps)
+    if y_highres is not None:
+        # we prefer to compare to a high resolution (fp32 computed reference - y_highres)
+        rel_diff_highres_y = 2.0 * torch.abs(y - y_highres) / (torch.abs(y) + torch.abs(y_highres) + rel_eps)
+        print(f"Max relative difference y vs high-res: {max_diff(rel_diff_highres_y, y, y_highres)})")
+        rel_diff_highres_ym = 2.0 * torch.abs(y_m - y_highres) / (torch.abs(y_m) + torch.abs(y_highres) + rel_eps)
+        print(f"Max relative difference y_m vs high-res: {max_diff(rel_diff_highres_ym, y_m, y_highres)})")
+        ym_yhighres_relatively_close = torch.all(rel_diff_highres_ym <= rtol).cpu().item()
 
-    absolutely_close = torch.all(torch.abs(t1 - t2) <= atol).cpu().item()
-    relatively_close = torch.all(rel_diff <= rtol).cpu().item()
-    close_enough = absolutely_close and relatively_close
+        if not ym_yhighres_relatively_close:
+            print(f"Tensors are not close enough: y_m vs high-res: {y_m} vs {y_highres}")
+            print(f"Difference: {y_m - y_highres}")
+            assert False
+    else:
+        rel_diff = 2.0 * torch.abs(y - y_m) / (torch.abs(y) + torch.abs(y_m) + rel_eps)
 
-    print(f"Max absolute difference: {max_diff(abs_diff, t1, t2)})")
-    print(f"Max relative difference: {max_diff(rel_diff, t1, t2)})")
-    if not close_enough:
-        print(f"Tensors are not close enough: {t1} vs {t2}")
-        assert False
+        relatively_close = torch.all(rel_diff <= rtol).cpu().item()
+        close_enough = relatively_close
+
+        #print(f"Max absolute difference: {max_diff(abs_diff, t1, t2)})")
+        print(f"Max relative difference: {max_diff(rel_diff, y, y_m)})")
+        if not close_enough:
+            print(f"Tensors are not close enough: {y} vs {y_m}")
+            print(f"Difference: {y - y_m}")
+            assert False
 
 
 def random_linear(

@@ -40,7 +40,12 @@ torch::Tensor MuiLLMAttention::forward(
 
 
   // o proj
-  auto proj_attn_output = this->o_proj->forward(attn_output, residual);
+  auto undef_tensor = torch::Tensor();
+  auto proj_attn_output = this->o_proj->forward(
+    attn_output,
+    /* mul_residual */ undef_tensor,
+    residual
+  );
   return proj_attn_output;
 }
 

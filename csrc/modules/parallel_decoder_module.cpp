@@ -28,7 +28,6 @@ torch::Tensor MuiLLMParallelDecoder::forward(
   torch::Tensor& cache_positions
 ) {
   auto residual = h;
-
   auto qkv = this->multilinear->forward(
     h,
     /* collect */ false

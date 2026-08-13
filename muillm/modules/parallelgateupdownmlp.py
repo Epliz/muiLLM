@@ -374,7 +374,7 @@ class MuiParallelGateUpDownMLP(MuiModule):
         else:
             raise ValueError("not implemented")
 
-        if self.dispatchable and (inputs.numel() == inputs.shape[-1]):
+        if self.dispatchable:
             output = _MuiParallelGateUpMLP.apply(
                 self.cpp_module, inputs, residual, collect_outputs
             )

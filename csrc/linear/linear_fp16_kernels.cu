@@ -6,7 +6,6 @@
 // actual module
 //
 
-#define ROWS_PER_BLOCK 4
 #define GEMV_THREADS_PER_BLOCK 256
 
 #define DIV_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
@@ -172,17 +171,25 @@ static inline float __device__ silu(float x) {
   return x / (1.0f + expf(-x));
 }
 
-template<int THREADS_PER_BLOCK>
-__global__ void muillm_gemv_fp16_kernel(
+static inline float __device__ gelu_tanh(float x) {
+  // in python:
+  // 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))));
+
+  return 0.5f * x * (1.0f + tanhf(sqrtf(2.0f / M_PI) * (x * (1.0f + 0.044715f * x * x))));
+}
+
+template<int THREADS_PER_BLOCK, int BATCH_SIZE, int ROWS_PER_BLOCK>
+__device__ void muillm_gemv_fp16_func(
     const half* __restrict__ W, // weight matrix - size N x K
-    const half* __restrict__ X, // input = size K
+    const half* __restrict__ X, // input = size B x K
     mui_activation activation, // activation function 
-    const half* __restrict__ MB, // optional multiplicative bias - size N (applied before additive bias)
     const half* __restrict__ AB, // optional additive bias - size N
-    const half* __restrict__ RB, // optional residual - size N
-    half* __restrict__ Y, // output - size N
+    const half* __restrict__ MRB, // optional multiplicative bias - size BxN (applied before additive bias)
+    const half* __restrict__ RB, // optional residual - size B x N
+    half* __restrict__ Y, // output - size B x N
     unsigned N,
-    unsigned K
+    unsigned K,
+    unsigned xK // stride of the input X (in case it is not contiguous)
 ) {
   int warpCounts = THREADS_PER_BLOCK / warpSize;
   int warpId = threadIdx.x / warpSize;
@@ -192,11 +199,13 @@ __global__ void muillm_gemv_fp16_kernel(
   // shared state to do the reductions
 
   // TODO: avoid bank conflicts by having per warp shared memory
-  __shared__ float shared_accs[ROWS_PER_BLOCK];
+  __shared__ float shared_accs[BATCH_SIZE][ROWS_PER_BLOCK];
 
   // initialize the shared memory
   if (threadIdx.x < ROWS_PER_BLOCK) {
-    shared_accs[threadIdx.x] = 0.f;
+    for (int b = 0; b < BATCH_SIZE; b++) {
+      shared_accs[b][threadIdx.x] = 0.f;
+    }
   }
   if (THREADS_PER_BLOCK > warpSize) {
     __syncthreads();
@@ -208,90 +217,101 @@ __global__ void muillm_gemv_fp16_kernel(
 
       // compute the t-th element of Y. by doing the dot product with the
       // t-th row of W
-      const half* W0 = &W[(current_row + 0) * K];
-      const half* W1 = &W[(current_row + 1) * K];
-      const half* W2 = &W[(current_row + 2) * K];
-      const half* W3 = &W[(current_row + 3) * K];
+      const half* Wps[ROWS_PER_BLOCK];
+      float accs[BATCH_SIZE][ROWS_PER_BLOCK];
 
-      float acc0 = 0.f;
-      float acc1 = 0.f;
-      float acc2 = 0.f;
-      float acc3 = 0.f;
+      for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+        Wps[r] = &W[(current_row + r) * K];
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          accs[b][r] = 0.f;
+        }
+      }
+
+      const half* Xps[BATCH_SIZE];
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        Xps[b] = &X[b * xK];
+      }
 
       // do the dot product
       {
         unsigned k;
         //*
         for (k = threadIdx.x * 8; k + 7 < K; k += (THREADS_PER_BLOCK * 8)) {
-          // vectorized
-          float8 x = __half82float8(*(const half8*)(addr(X, k)));
+          float8 ws[ROWS_PER_BLOCK];
+          for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+            ws[r] = __half82float8(load_nontemporal_half8(addr(Wps[r], k)));
+          }
 
-          float8 w0 = __half82float8(load_nontemporal_half8(addr(W0, k)));
-          float8 w1 = __half82float8(load_nontemporal_half8(addr(W1, k)));
-          float8 w2 = __half82float8(load_nontemporal_half8(addr(W2, k)));
-          float8 w3 = __half82float8(load_nontemporal_half8(addr(W3, k)));
-
-          dot8(acc0, w0, x);
-          dot8(acc1, w1, x);
-          dot8(acc2, w2, x);
-          dot8(acc3, w3, x);
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float8 x = __half82float8(*(const half8*)(addr(Xps[b], k)));
+            for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+              // vectorized
+              dot8(accs[b][r], ws[r], x);
+            }
+          }
         }
         if (k + 3 < K) {
-          // vectorized
-          float4 x = __half42float4(*(const half4*)(addr(X, k)));
-          float4 w0 = __half42float4(load_nontemporal_half4(addr(W0, k)));
-          float4 w1 = __half42float4(load_nontemporal_half4(addr(W1, k)));
-          float4 w2 = __half42float4(load_nontemporal_half4(addr(W2, k)));
-          float4 w3 = __half42float4(load_nontemporal_half4(addr(W3, k)));
+          float4 ws[ROWS_PER_BLOCK];
+          for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+            ws[r] = __half42float4(load_nontemporal_half4(addr(Wps[r], k)));
+          }
 
-          dot4(acc0, w0, x);
-          dot4(acc1, w1, x);
-          dot4(acc2, w2, x);
-          dot4(acc3, w3, x);
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float4 x = __half42float4(*(const half4*)(addr(Xps[b], k)));
+            for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+              // vectorized
+              dot4(accs[b][r], ws[r], x);
+            }
+          }
 
           k += 4;
         }
         if (k + 1 < K) {
-          // remainder
-          float2 x = __half22float2(*(const half2*)(addr(X,k)));
-          float2 w0 = __half22float2(load_nontemporal_half2(addr(W0,k)));
-          float2 w1 = __half22float2(load_nontemporal_half2(addr(W1,k)));
-          float2 w2 = __half22float2(load_nontemporal_half2(addr(W2,k)));
-          float2 w3 = __half22float2(load_nontemporal_half2(addr(W3,k)));
+          float2 ws[ROWS_PER_BLOCK];
+          for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+            ws[r] = __half22float2(load_nontemporal_half2(addr(Wps[r], k)));
+          }
 
-          dot2(acc0, w0, x);
-          dot2(acc1, w1, x);
-          dot2(acc2, w2, x);
-          dot2(acc3, w3, x);
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float2 x = __half22float2(*(const half2*)(addr(Xps[b], k)));
+            for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+              // remainder
+              dot2(accs[b][r], ws[r], x);
+            }
+          }
 
           k+= 2;
         }
         if (k < K) {
-          // remainder
-          float x = __half2float(*addr(X,k));
-          float w0 = __half2float(*addr(W0,k));
-          float w1 = __half2float(*addr(W1,k));
-          float w2 = __half2float(*addr(W2,k));
-          float w3 = __half2float(*addr(W3,k));
-          acc0 += w0 * x;
-          acc1 += w1 * x;
-          acc2 += w2 * x;
-          acc3 += w3 * x;
+          float ws[ROWS_PER_BLOCK];
+          for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+            ws[r] = __half2float(*addr(Wps[r], k));
+          }
+
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float x = __half2float(*addr(Xps[b], k));
+            for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+              // remainder
+              accs[b][r] += ws[r] * x;
+            }
+          }
         }
       }
 
       // warp reduce
-      acc0 = warpReduce(acc0);
-      acc1 = warpReduce(acc1);
-      acc2 = warpReduce(acc2);
-      acc3 = warpReduce(acc3);
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+          accs[b][r] = warpReduce(accs[b][r]);
+        }
+      }
 
       // reduce accross warps
       if (laneId == 0) {
-        atomicAdd(&shared_accs[0], acc0);
-        atomicAdd(&shared_accs[1], acc1);
-        atomicAdd(&shared_accs[2], acc2);
-        atomicAdd(&shared_accs[3], acc3);
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+            atomicAdd(&shared_accs[b][r], accs[b][r]);
+          }
+        }
       }
     } else {
       for (int i = 0; i < ROWS_PER_BLOCK; i++) {
@@ -305,28 +325,46 @@ __global__ void muillm_gemv_fp16_kernel(
         const half* W_ = &W[current_row * K];
       
         // do the dot product
-        float acc = 0.f;
+        float accs[BATCH_SIZE];
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          accs[b] = 0.f;
+        }
         {
+          const half* Xps[BATCH_SIZE];
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            Xps[b] = &X[b * xK];
+          }
+
           int k = threadIdx.x  * 2;
           for (; k + 1 < K; k += THREADS_PER_BLOCK * 2) {
             float2 w = __half22float2(*(const half2*)&W_[k]);
-            float2 x = __half22float2(*(const half2*)&X[k]);
-            dot2(acc, w, x);
+
+            for (int b = 0; b < BATCH_SIZE; b++) {
+              float2 x = __half22float2(*(const half2*)(addr(Xps[b], k)));
+              dot2(accs[b], w, x);
+            }
           }
           if (k < K) {
             float w = __half2float(W_[k]);
-            float x = __half2float(X[k]);
-            acc += w * x;
+
+            for (int b = 0; b < BATCH_SIZE; b++) {
+              float x = __half2float(*addr(Xps[b], k));
+              accs[b] += w * x;
+            }
           }
         }
 
 
         // warp reduce
-        acc = warpReduce(acc);
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          accs[b] = warpReduce(accs[b]);
+        }
 
         // reduce accross warps
         if (laneId == 0) {
-          atomicAdd(&shared_accs[i], acc);
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            atomicAdd(&shared_accs[b][i], accs[b]);
+          }
         }
       }
     }
@@ -344,41 +382,74 @@ __global__ void muillm_gemv_fp16_kernel(
     int current_row = blockIdx.x * ROWS_PER_BLOCK + threadIdx.x;
 
     if (current_row < N) {
-      float acc = shared_accs[threadIdx.x]; // read the fully reduced value
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        float acc = shared_accs[b][threadIdx.x]; // read the fully reduced value
 
-      if (activation == mui_activation::Silu) {
-        // apply the activation if there is one
-        acc = silu(acc);
-      }
+        if (activation == mui_activation::Silu) {
+          // apply the activation if there is one
+          acc = silu(acc);
+        } else if (activation == mui_activation::Gelu_Tanh) {
+          acc = gelu_tanh(acc);
+        }
 
-      if (MB != nullptr) { // apply the multipicative bias if there is one
-        acc *= __half2float(MB[current_row]);
-      }
+        if (AB != nullptr) { // apply the additive bias if there is one
+          acc += __half2float(AB[current_row]);
+        }
 
-      if (AB != nullptr) { // apply the additive bias if there is one
-        acc += __half2float(AB[current_row]);
+        if (MRB != nullptr) { // apply the multipicative residual if there is one
+          acc *= __half2float(MRB[b * N + current_row]);
+        }
+        if (RB != nullptr) { // apply the residual if there is one
+          acc += __half2float(RB[b * N + current_row]);
+        }
+        // write the output value
+        Y[(b * N) + current_row] = __float2half(acc);
       }
-      if (RB != nullptr) { // apply the residual if there is one
-        acc += __half2float(RB[current_row]);
-      }
-      // write the output value
-      Y[current_row] = __float2half(acc);
     }
   }
 }
 
-template<int THREADS_PER_BLOCK>
-__global__ void muillm_gemv_norm_inputs_fp16_kernel(
-    const half* __restrict__ NW, // input normalization weights matrix - size K
+template<int BATCH_SIZE, int ROWS_PER_BLOCK>
+__global__ void muillm_gemv_fp16_kernel(
     const half* __restrict__ W, // weight matrix - size N x K
-    const half* __restrict__ X, // input = size K
+    const half* __restrict__ X, // input = size B x K
     mui_activation activation, // activation function 
-    const half* __restrict__ MB, // optional multiplicative bias - size N (applied before additive bias)
     const half* __restrict__ AB, // optional additive bias - size N
-    const half* __restrict__ RB, // optional residual - size N
-    half* __restrict__ Y, // output - size N
+    const half* __restrict__ MRB, // optional multiplicative bias - size BxN (applied before additive bias)
+    const half* __restrict__ RB, // optional residual - size B x N
+    half* __restrict__ Y, // output - size B x N
     unsigned N,
     unsigned K,
+    unsigned xK // stride of the input X (in case it is not contiguous)
+) {
+  if (warpSize == 32) {
+    constexpr int THREADS_PER_BLOCK = 32 * 4;
+    muillm_gemv_fp16_func<THREADS_PER_BLOCK, BATCH_SIZE, ROWS_PER_BLOCK>(
+        W, X, activation, AB, MRB, RB, Y, N, K, xK
+    );
+  } else if (warpSize == 64) {
+    constexpr int THREADS_PER_BLOCK = 64 * 4;
+    muillm_gemv_fp16_func<THREADS_PER_BLOCK, BATCH_SIZE, ROWS_PER_BLOCK>(
+        W, X, activation, AB, MRB, RB, Y, N, K, xK
+    );
+  }
+}
+
+// muillm_gemv_norm_inputs_fp16_kernel<256, 16, 4> has an occupancy of 9
+// which is bad
+template<int THREADS_PER_BLOCK, int BATCH_SIZE, int ROWS_PER_BLOCK>
+__device__ void muillm_gemv_norm_inputs_fp16_func(
+    const half* __restrict__ NW, // input normalization weights matrix - size K
+    const half* __restrict__ W, // weight matrix - size N x K
+    const half* __restrict__ X, // input = size B x K
+    mui_activation activation, // activation function 
+    const half* __restrict__ AB, // optional additive bias - size N
+    const half* __restrict__ MRB, // optional multiplicative residual - size B x N (applied before additive bias)s
+    const half* __restrict__ RB, // optional residual - size B x N
+    half* __restrict__ Y, // output - size B x N
+    unsigned N,
+    unsigned K,
+    unsigned xK, // stride of the input X (in case it is not contiguous)
     float epsilon,
     float weights_offset,
     float scale
@@ -387,19 +458,26 @@ __global__ void muillm_gemv_norm_inputs_fp16_kernel(
   int warpId = threadIdx.x / warpSize;
   int laneId = threadIdx.x % warpSize;
 
-  float var_x = 0.f;
+  float var_xs[BATCH_SIZE];
+  for (int b = 0; b < BATCH_SIZE; b++) {
+    var_xs[b] = 0.f;
+  }
 
   // can process ROWS_PER_BLOCK rows
   // shared state to do the reductions
-  __shared__ float shared_accs[ROWS_PER_BLOCK];
-  __shared__ float shared_var_x;
+  __shared__ float shared_accs[BATCH_SIZE][ROWS_PER_BLOCK];
+  __shared__ float shared_var_x[BATCH_SIZE];
 
   // initialize the shared memory
   if (threadIdx.x < ROWS_PER_BLOCK) {
-    shared_accs[threadIdx.x] = 0.f;
+    for (int b = 0; b < BATCH_SIZE; b++) {
+      shared_accs[b][threadIdx.x] = 0.f;
+    }
   }
   if (threadIdx.x == 0) {
-    shared_var_x = epsilon;
+    for (int b = 0; b < BATCH_SIZE; b++) {
+      shared_var_x[b] = epsilon;
+    }
   }
   if (THREADS_PER_BLOCK > warpSize) {
     __syncthreads();
@@ -411,15 +489,20 @@ __global__ void muillm_gemv_norm_inputs_fp16_kernel(
 
       // compute the t-th element of Y. by doing the dot product with the
       // t-th row of W
-      const half* W0 = &W[(current_row + 0) * K];
-      const half* W1 = &W[(current_row + 1) * K];
-      const half* W2 = &W[(current_row + 2) * K];
-      const half* W3 = &W[(current_row + 3) * K];
+      const half* Wps[ROWS_PER_BLOCK];
+      float accs[BATCH_SIZE][ROWS_PER_BLOCK];
 
-      float acc0 = 0.f;
-      float acc1 = 0.f;
-      float acc2 = 0.f;
-      float acc3 = 0.f;
+      for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+        Wps[r] = &W[(current_row + r) * K];
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          accs[b][r] = 0.f;
+        }
+      }
+
+      const half* Xps[BATCH_SIZE];
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        Xps[b] = &X[b * xK];
+      }
 
       // do the dot product
       {
@@ -428,119 +511,136 @@ __global__ void muillm_gemv_norm_inputs_fp16_kernel(
         unsigned k; // should be 2 * tidx ?
         //*
         for (k = threadIdx.x * 8; k + 7 < K; k += (THREADS_PER_BLOCK * 8)) {
-          // vectorized
-          float8 x = __half82float8(*(const half8*)(addr(X, k)));
           float8 nw = __half82float8(*(const half8*)(addr(NW, k))) + weights_offset;
 
-          float8 w0 = __half82float8(load_nontemporal_half8(addr(W0, k)));
-          float8 w1 = __half82float8(load_nontemporal_half8(addr(W1, k)));
-          float8 w2 = __half82float8(load_nontemporal_half8(addr(W2, k)));
-          float8 w3 = __half82float8(load_nontemporal_half8(addr(W3, k)));
+          float8 ws[ROWS_PER_BLOCK];
+          for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+            ws[r] = __half82float8(load_nontemporal_half8(addr(Wps[r], k)));
+          }
 
-          // accumulate for the variance
-          dot8(var_x, x, x);
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float8 x = __half82float8(*(const half8*)(addr(Xps[b], k)));
 
-          // multiply with normalization weights
-          x.x = x.x * nw.x;
-          x.y = x.y * nw.y;
-          x.z = x.z * nw.z;
-          x.w = x.w * nw.w;
-          x.a = x.a * nw.a;
-          x.b = x.b * nw.b;
-          x.c = x.c * nw.c;
-          x.d = x.d * nw.d;
+            // accumulate for the variance
+            dot8(var_xs[b], x, x);
 
-          dot8(acc0, w0, x);
-          dot8(acc1, w1, x);
-          dot8(acc2, w2, x);
-          dot8(acc3, w3, x);
+            // multiply with normalization weights
+            x.x = x.x * nw.x;
+            x.y = x.y * nw.y;
+            x.z = x.z * nw.z;
+            x.w = x.w * nw.w;
+            x.a = x.a * nw.a;
+            x.b = x.b * nw.b;
+            x.c = x.c * nw.c;
+            x.d = x.d * nw.d;
+
+            for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+              // vectorized
+              dot8(accs[b][r], ws[r], x);
+            }
+          }
         }
         if (k + 3 < K) {
-          // vectorized
-          float4 x = __half42float4(*(const half4*)(addr(X, k)));
           float4 nw = __half42float4(*(const half4*)(addr(NW, k))) + weights_offset;
 
-          float4 w0 = __half42float4(load_nontemporal_half4(addr(W0, k)));
-          float4 w1 = __half42float4(load_nontemporal_half4(addr(W1, k)));
-          float4 w2 = __half42float4(load_nontemporal_half4(addr(W2, k)));
-          float4 w3 = __half42float4(load_nontemporal_half4(addr(W3, k)));
+          float4 ws[ROWS_PER_BLOCK];
+          for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+            ws[r] = __half42float4(load_nontemporal_half4(addr(Wps[r], k)));
+          }
 
-          // accumulate for the variance
-          dot4(var_x, x, x);
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float4 x = __half42float4(*(const half4*)(addr(Xps[b], k)));
 
-          // multiply with normalization weights
-          x.x = x.x * nw.x;
-          x.y = x.y * nw.y;
-          x.z = x.z * nw.z;
-          x.w = x.w * nw.w;
+            // accumulate for the variance
+            dot4(var_xs[b], x, x);
 
-          dot4(acc0, w0, x);
-          dot4(acc1, w1, x);
-          dot4(acc2, w2, x);
-          dot4(acc3, w3, x);
+            // multiply with normalization weights
+            x.x = x.x * nw.x;
+            x.y = x.y * nw.y;
+            x.z = x.z * nw.z;
+            x.w = x.w * nw.w;
+
+            for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+              // vectorized
+              dot4(accs[b][r], ws[r], x);
+            }
+          }
 
           k += 4;
         }
         if (k + 1 < K) {
-          // remainder
-          float2 x = __half22float2(*(const half2*)(addr(X, k)));
           float2 nw = __half22float2(*(const half2*)(addr(NW, k))) + weights_offset;
 
-          float2 w0 = __half22float2(load_nontemporal_half2(addr(W0, k)));
-          float2 w1 = __half22float2(load_nontemporal_half2(addr(W1, k)));
-          float2 w2 = __half22float2(load_nontemporal_half2(addr(W2, k)));
-          float2 w3 = __half22float2(load_nontemporal_half2(addr(W3, k)));
+          float2 ws[ROWS_PER_BLOCK];
+          for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+            ws[r] = __half22float2(load_nontemporal_half2(addr(Wps[r], k)));
+          }
 
-          // accumulate for the variance
-          dot2(var_x, x, x);
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float2 x = __half22float2(*(const half2*)(addr(Xps[b], k)));
 
-          // multiply with normalization weights
-          x.x = x.x * nw.x;
-          x.y = x.y * nw.y;
+            // accumulate for the variance
+            dot2(var_xs[b], x, x);
 
-          dot2(acc0, w0, x);
-          dot2(acc1, w1, x);
-          dot2(acc2, w2, x);
-          dot2(acc3, w3, x);
+            // multiply with normalization weights
+            x.x = x.x * nw.x;
+            x.y = x.y * nw.y;
+
+            for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+              // remainder
+              dot2(accs[b][r], ws[r], x);
+            }
+          }
+
+          k += 2;
         }
         if (k < K) {
-          // remainder
-          float x = __half2float(*addr(X,k));
-          float nw = __half2float(*addr(NW,k)) + weights_offset;
+          float nw = __half2float(*addr(NW, k)) + weights_offset;
 
+          float ws[ROWS_PER_BLOCK];
+          for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+            ws[r] = __half2float(*addr(Wps[r], k));
+          }
 
-          float w0 = __half2float(*addr(W0,k));
-          float w1 = __half2float(*addr(W1,k));
-          float w2 = __half2float(*addr(W2,k));
-          float w3 = __half2float(*addr(W3,k));
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float x = __half2float(*addr(Xps[b], k));
 
-          // accumulate for the variance
-          var_x += x * x;
+            // accumulate for the variance
+            var_xs[b] += x * x;
 
-          // multiply with normalization weights
-          x *= nw;
+            // multiply with normalization weights
+            x *= nw;
 
-          acc0 += w0 * x;
-          acc1 += w1 * x;
-          acc2 += w2 * x;
-          acc3 += w3 * x;
+            for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+              // remainder
+              accs[b][r] += ws[r] * x;
+            }
+          }
         }
       }
 
       // warp reduce
-      var_x = warpReduce(var_x);
-      acc0 = warpReduce(acc0);
-      acc1 = warpReduce(acc1);
-      acc2 = warpReduce(acc2);
-      acc3 = warpReduce(acc3);
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        var_xs[b] = warpReduce(var_xs[b]);
+      }
+
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+          accs[b][r] = warpReduce(accs[b][r]);
+        }
+      }
 
       // reduce accross warps
       if (laneId == 0) {
-        atomicAdd(&shared_var_x, var_x);
-        atomicAdd(&shared_accs[0], acc0);
-        atomicAdd(&shared_accs[1], acc1);
-        atomicAdd(&shared_accs[2], acc2);
-        atomicAdd(&shared_accs[3], acc3);
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          atomicAdd(&shared_var_x[b], var_xs[b]);
+        }
+
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          for (int r = 0; r < ROWS_PER_BLOCK; r++) {
+            atomicAdd(&shared_accs[b][r], accs[b][r]);
+          }
+        }
       }
     } else {
       for (int i = 0; i < ROWS_PER_BLOCK; i++) {
@@ -554,48 +654,72 @@ __global__ void muillm_gemv_norm_inputs_fp16_kernel(
         const half* W_ = &W[current_row * K];
       
         // do the dot product
-        float acc = 0.f;
+        float accs[BATCH_SIZE];
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          accs[b] = 0.f;
+        }
+        const half* Xps[BATCH_SIZE];
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          Xps[b] = &X[b * xK];
+        }
+
         if (i == 0) {
           // accumulate the variance
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
             float w = __half2float(W_[k]);
-
-            float x = __half2float(X[k]);
             float nw = __half2float(NW[k]) + weights_offset;
 
-            // accumuate the variance
-            var_x += x * x;
+            for (int b = 0; b < BATCH_SIZE; b++) {
+              float x = __half2float(*addr(Xps[b], k));
 
-            // multiply with normalization weights
-            x *= nw;
+              // accumuate the variance
+              var_xs[b] += x * x;
 
-            acc += w * x;
+              // multiply with normalization weights
+              x *= nw;
+
+              accs[b] += w * x;
+            }
           }
         } else {
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
             float w = __half2float(W_[k]);
-
-            float x = __half2float(X[k]);
             float nw = __half2float(NW[k]) + weights_offset;
 
-            // don't accumulate the variance (we already have done it with i == 0)
+            for (int b = 0; b < BATCH_SIZE; b++) {
+              float x = __half2float(*addr(Xps[b], k));
 
-            // multiply with normalization weights
-            x *= nw;
+              // don't accumulate the variance (we already have done it with i == 0)
 
-            acc += w * x;
+              // multiply with normalization weights
+              x *= nw;
+
+              accs[b] += w * x;
+            }
           }
         }
 
 
         // warp reduce
-        var_x = warpReduce(var_x);
-        acc = warpReduce(acc);
+        if (i == 0) {
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            var_xs[b] = warpReduce(var_xs[b]);
+          }
+        }
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          accs[b] = warpReduce(accs[b]);
+        }
 
         // reduce accross warps
         if (laneId == 0) {
-          atomicAdd(&shared_var_x, var_x);
-          atomicAdd(&shared_accs[i], acc);
+          if (i == 0) {
+            for (int b = 0; b < BATCH_SIZE; b++) {
+              atomicAdd(&shared_var_x[b], var_xs[b]);
+            }
+          }
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            atomicAdd(&shared_accs[b][i], accs[b]);
+          }
         }
       }
     }
@@ -607,58 +731,674 @@ __global__ void muillm_gemv_norm_inputs_fp16_kernel(
 
   // write out the results
   {
-    float rsqrt_var = rsqrtf(shared_var_x * scale);
-
     if (threadIdx.x >= ROWS_PER_BLOCK)
       return;
 
     int current_row = blockIdx.x * ROWS_PER_BLOCK + threadIdx.x;
 
     if (current_row < N) {
-      float acc = shared_accs[threadIdx.x] * rsqrt_var; // read the fully reduced value and scale
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        float rsqrt_var = rsqrtf(shared_var_x[b] * scale);
+        float acc = shared_accs[b][threadIdx.x] * rsqrt_var; // read the fully reduced value and scale
 
-      if (activation == mui_activation::Silu) {
-        // apply the activation if there is one
-        acc = silu(acc);
-      }
+        if (activation == mui_activation::Silu) {
+          // apply the activation if there is one
+          acc = silu(acc);
+        } else if (activation == mui_activation::Gelu_Tanh) {
+          acc = gelu_tanh(acc);
+        }
 
-      if (MB != nullptr) { // apply the multipicative bias if there is one
-        acc *= __half2float(MB[current_row]);
-      }
+        if (AB != nullptr) { // apply the additive bias if there is one
+          acc += __half2float(AB[current_row]);
+        }
 
-      if (AB != nullptr) { // apply the additive bias if there is one
-        acc += __half2float(AB[current_row]);
+        if (MRB != nullptr) { // apply the multipicative residual if there is one
+          acc *= __half2float(MRB[b * N + current_row]);
+        }
+        if (RB != nullptr) { // apply the residual if there is one
+          acc += __half2float(RB[b * N + current_row]);
+        }
+        // write the output value
+        Y[(b * N) + current_row] = __float2half(acc);
       }
-      if (RB != nullptr) { // apply the residual if there is one
-        acc += __half2float(RB[current_row]);
-      }
-      // write the output value
-      Y[current_row] = __float2half(acc);
     }
+  }
+}
+
+template<int BATCH_SIZE, int ROWS_PER_BLOCK>
+__global__ void muillm_gemv_norm_inputs_fp16_kernel(
+    const half* __restrict__ NW, // input normalization weights matrix - size K
+    const half* __restrict__ W, // weight matrix - size N x K
+    const half* __restrict__ X, // input = size B x K
+    mui_activation activation, // activation function 
+    const half* __restrict__ AB, // optional additive bias - size N
+    const half* __restrict__ MRB, // optional multiplicative residual - size B x N (applied before additive bias)s
+    const half* __restrict__ RB, // optional residual - size B x N
+    half* __restrict__ Y, // output - size B x N
+    unsigned N,
+    unsigned K,
+    unsigned xK, // stride of the input X (in case it is not contiguous)
+    float epsilon,
+    float weights_offset,
+    float scale
+) {
+  if (warpSize == 32) {
+    constexpr int THREADS_PER_BLOCK = 32 * 4;
+    muillm_gemv_norm_inputs_fp16_func<THREADS_PER_BLOCK, BATCH_SIZE, ROWS_PER_BLOCK>(
+        NW, W, X, activation, AB, MRB, RB, Y, N, K, xK, epsilon, weights_offset, scale
+    );
+  } else if (warpSize == 64) {
+    constexpr int THREADS_PER_BLOCK = 64 * 4;
+    muillm_gemv_norm_inputs_fp16_func<THREADS_PER_BLOCK, BATCH_SIZE, ROWS_PER_BLOCK>(
+        NW, W, X, activation, AB, MRB, RB, Y, N, K, xK, epsilon, weights_offset, scale
+    );
+  }
+}
+
+template<int BATCH_SIZE_OFFSET, int ROWS_PER_BLOCK>
+static inline void call_gemv_norm_kernel(
+  int num_blocks,
+  int threads_per_blocks,
+  hipStream_t stream,
+  const half* norm_weights,
+  const half* weights,
+  const half* x,
+  mui_activation activ,
+  const half* add_bias,
+  const half* mul_residual,
+  const half* residual,
+  half* y,
+  unsigned B,
+  unsigned N,
+  unsigned K,
+  unsigned xK, // stride of the input X (in case it is not contiguous)
+  float epsilon,
+  float norm_weights_offset
+) {
+  float scale = 1.f / K;
+
+  if (B == (BATCH_SIZE_OFFSET + 1)) {
+    constexpr int BATCH_SIZE = BATCH_SIZE_OFFSET + 1;
+    muillm_gemv_norm_inputs_fp16_kernel<BATCH_SIZE, ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      N,
+      K,
+      xK,
+      epsilon,
+      norm_weights_offset,
+      scale
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 2)) {
+    constexpr int BATCH_SIZE = BATCH_SIZE_OFFSET + 2;
+    muillm_gemv_norm_inputs_fp16_kernel<BATCH_SIZE, ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      N,
+      K,
+      xK,
+      epsilon,
+      norm_weights_offset,
+      scale
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 3)) {
+    constexpr int BATCH_SIZE = BATCH_SIZE_OFFSET + 3;
+    muillm_gemv_norm_inputs_fp16_kernel<BATCH_SIZE, ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      N,
+      K,
+      xK,
+      epsilon,
+      norm_weights_offset,
+      scale
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 4)) {
+    constexpr int BATCH_SIZE = BATCH_SIZE_OFFSET + 4;
+    muillm_gemv_norm_inputs_fp16_kernel<BATCH_SIZE, ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      N,
+      K,
+      xK,
+      epsilon,
+      norm_weights_offset,
+      scale
+    );
+  } else {
+    throw std::runtime_error("Unsupported batch size for muillm_gemv_norm_inputs_fp16_kernel");
+  }
+}
+
+
+template<int BATCH_SIZE_OFFSET, int ROWS_PER_BLOCK>
+static inline void call_gemv_kernel(
+  int num_blocks,
+  int threads_per_blocks,
+  hipStream_t stream,
+  const half* weights,
+  const half* x,
+  mui_activation activ,
+  const half* add_bias,
+  const half* mul_residual,
+  const half* residual,
+  half* y,
+  unsigned B,
+  unsigned N,
+  unsigned K,
+  unsigned xK // stride of the input X (in case it is not contiguous)
+) {
+  if (B == (BATCH_SIZE_OFFSET + 1)) {
+    constexpr int BATCH_SIZE = BATCH_SIZE_OFFSET + 1;
+    muillm_gemv_fp16_kernel<BATCH_SIZE, ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      N,
+      K,
+      xK
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 2)) {
+    constexpr int BATCH_SIZE = BATCH_SIZE_OFFSET + 2;
+    muillm_gemv_fp16_kernel<BATCH_SIZE, ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      N,
+      K,
+      xK
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 3)) {
+    constexpr int BATCH_SIZE = BATCH_SIZE_OFFSET + 3;
+    muillm_gemv_fp16_kernel<BATCH_SIZE, ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      N,
+      K,
+      xK
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 4)) {
+    constexpr int BATCH_SIZE = BATCH_SIZE_OFFSET + 4;
+    muillm_gemv_fp16_kernel<BATCH_SIZE, ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      N,
+      K,
+      xK
+    );
+  } else {
+    throw std::runtime_error("Unsupported batch size for muillm_gemv_fp16_kernel");
+  }
+}
+
+template<int ROWS_PER_BLOCK>
+static inline void call_gemv_norm_kernel_batch_mux(
+  int num_blocks,
+  int threads_per_blocks,
+  hipStream_t stream,
+  const half* norm_weights,
+  const half* weights,
+  const half* x,
+  mui_activation activ,
+  const half* add_bias,
+  const half* mul_residual,
+  const half* residual,
+  half* y,
+  unsigned B,
+  unsigned N,
+  unsigned K,
+  unsigned xK, // stride of the input X (in case it is not contiguous)
+  float epsilon,
+  float norm_weights_offset
+) {
+  
+  if (B <= 4) {
+    constexpr int BATCH_SIZE_OFFSET = 0;
+    call_gemv_norm_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      xK,
+      epsilon,
+      norm_weights_offset
+    );
+  } else if (B <= 8) {
+    constexpr int BATCH_SIZE_OFFSET = 4;
+    call_gemv_norm_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      xK,
+      epsilon,
+      norm_weights_offset
+    );
+  } else if (B <= 12) {
+    constexpr int BATCH_SIZE_OFFSET = 8;
+    call_gemv_norm_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      xK,
+      epsilon,
+      norm_weights_offset
+    );
+  } else if (B <= 16) {
+    constexpr int BATCH_SIZE_OFFSET = 12;
+    call_gemv_norm_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      xK,
+      epsilon,
+      norm_weights_offset
+    );
+  } else {
+    throw std::runtime_error("Unsupported batch size for muillm_gemv_norm_inputs_fp16_kernel");
+  }
+}
+
+template<int ROWS_PER_BLOCK>
+static inline void call_gemv_kernel_batch_mux(
+  int num_blocks,
+  int threads_per_blocks,
+  hipStream_t stream,
+  const half* weights,
+  const half* x,
+  mui_activation activ,
+  const half* add_bias,
+  const half* mul_residual,
+  const half* residual,
+  half* y,
+  unsigned B,
+  unsigned N,
+  unsigned K,
+  unsigned xK // stride of the input X (in case it is not contiguous)
+) {
+  
+  if (B <= 4) {
+    constexpr int BATCH_SIZE_OFFSET = 0;
+    call_gemv_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      xK
+    );
+  } else if (B <= 8) {
+    constexpr int BATCH_SIZE_OFFSET = 4;
+    call_gemv_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      xK
+    );
+  } else if (B <= 12) {
+    constexpr int BATCH_SIZE_OFFSET = 8;
+    call_gemv_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      xK
+    );
+  } else if (B <= 16) {
+    constexpr int BATCH_SIZE_OFFSET = 12;
+    call_gemv_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      xK
+    );
+  } else {
+    throw std::runtime_error("Unsupported batch size for muillm_gemv_fp16_kernel");
+  }
+}
+
+template<int ROWS_PER_BLOCK>
+static inline void call_gemv_norm_kernel_batch_mux(
+  int num_blocks,
+  int threads_per_blocks,
+  hipStream_t stream,
+  const half* norm_weights,
+  const half* weights,
+  const half* x,
+  mui_activation activ,
+  const half* add_bias,
+  const half* mul_residual,
+  const half* residual,
+  half* y,
+  unsigned B,
+  unsigned N,
+  unsigned K,
+  float epsilon,
+  float norm_weights_offset
+) {
+  
+  if (B <= 4) {
+    constexpr int BATCH_SIZE_OFFSET = 0;
+    call_gemv_norm_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset
+    );
+  } else if (B <= 8) {
+    constexpr int BATCH_SIZE_OFFSET = 4;
+    call_gemv_norm_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset
+    );
+  } else if (B <= 12) {
+    constexpr int BATCH_SIZE_OFFSET = 8;
+    call_gemv_norm_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset
+    );
+  } else if (B <= 16) {
+    constexpr int BATCH_SIZE_OFFSET = 12;
+    call_gemv_norm_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset
+    );
+  } else {
+    throw std::runtime_error("Unsupported batch size for muillm_gemv_norm_inputs_fp16_kernel");
+  }
+}
+
+template<int ROWS_PER_BLOCK>
+static inline void call_gemv_kernel_batch_mux(
+  int num_blocks,
+  int threads_per_blocks,
+  hipStream_t stream,
+  const half* weights,
+  const half* x,
+  mui_activation activ,
+  const half* add_bias,
+  const half* mul_residual,
+  const half* residual,
+  half* y,
+  unsigned B,
+  unsigned N,
+  unsigned K
+) {
+  
+  if (B <= 4) {
+    constexpr int BATCH_SIZE_OFFSET = 0;
+    call_gemv_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K
+    );
+  } else if (B <= 8) {
+    constexpr int BATCH_SIZE_OFFSET = 4;
+    call_gemv_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K
+    );
+  } else if (B <= 12) {
+    constexpr int BATCH_SIZE_OFFSET = 8;
+    call_gemv_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K
+    );
+  } else if (B <= 16) {
+    constexpr int BATCH_SIZE_OFFSET = 12;
+    call_gemv_kernel<BATCH_SIZE_OFFSET, ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K
+    );
+  } else {
+    throw std::runtime_error("Unsupported batch size for muillm_gemv_fp16_kernel");
   }
 }
 
 void muillm_linear_activ_forward_fp16(
   hipStream_t stream,
+  unsigned B,
   unsigned N,
   unsigned K,
+  unsigned xK, // stride of the input X (in case it is not contiguous)
   const half* norm_weights,
   float epsilon,
   float norm_weights_offset,
   const half* weights,
   mui_activation activ,
-  const half* mul_bias,
   const half* add_bias,
+  const half* mul_residual,
   const half* residual,
   const half* x,
   half* y,
-  int simd_lanes
+  int warp_size
 ) {
 
   bool normalize = (norm_weights != nullptr);
 
+  constexpr int ROWS_PER_BLOCK = 4;
+  constexpr int BATCH_SIZE = 1;
+
   const int num_blocks = DIV_ROUND_UP(N, ROWS_PER_BLOCK);
-  int threads_per_blocks = GEMV_THREADS_PER_BLOCK;
+  int threads_per_blocks = 4 * warp_size;
 
   // try to occupy enough to saturate memory bandwidth
   /*
@@ -668,95 +1408,41 @@ void muillm_linear_activ_forward_fp16(
   */
 
   if (normalize) {
-    float scale = 1.f / K;
-
-    if (threads_per_blocks == 64) {
-      muillm_gemv_norm_inputs_fp16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        norm_weights,
-        weights,
-        x,
-        activ,
-        mul_bias,
-        add_bias,
-        residual,
-        y,
-        N,
-        K,
-        epsilon,
-        norm_weights_offset,
-        scale
-      );
-    } else if (threads_per_blocks == 128) {
-      muillm_gemv_norm_inputs_fp16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        norm_weights,
-        weights,
-        x,
-        activ,
-        mul_bias,
-        add_bias,
-        residual,
-        y,
-        N,
-        K,
-        epsilon,
-        norm_weights_offset,
-        scale
-      );
-    } else if (threads_per_blocks == 256) {
-      muillm_gemv_norm_inputs_fp16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        norm_weights,
-        weights,
-        x,
-        activ,
-        mul_bias,
-        add_bias,
-        residual,
-        y,
-        N,
-        K,
-        epsilon,
-        norm_weights_offset,
-        scale
-      );
-    }
+    call_gemv_norm_kernel_batch_mux<ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      xK,
+      epsilon,
+      norm_weights_offset
+    );
   } else {
-
-    if (threads_per_blocks == 64) {
-      muillm_gemv_fp16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        weights,
-        x,
-        activ,
-        mul_bias,
-        add_bias,
-        residual,
-        y,
-        N,
-        K
-      );
-    } else if (threads_per_blocks == 128) {
-      muillm_gemv_fp16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        weights,
-        x,
-        activ,
-        mul_bias,
-        add_bias,
-        residual,
-        y,
-        N,
-        K
-      );
-    } else if (threads_per_blocks == 256) {
-      muillm_gemv_fp16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        weights,
-        x,
-        activ,
-        mul_bias,
-        add_bias,
-        residual,
-        y,
-        N,
-        K
-      );
-    }
+    call_gemv_kernel_batch_mux<ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      weights,
+      x,
+      activ,
+      add_bias,
+      mul_residual,
+      residual,
+      y,
+      B,
+      N,
+      K,
+      xK
+    );
   }
 }

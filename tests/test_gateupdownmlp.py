@@ -60,7 +60,7 @@ def copy_mistral_mlp(mlp: MistralMLP) -> MistralMLP:
     return new_mlp
 
 
-def _test_basic_mistral_mlp(device: str = "cpu", dtype: torch.dtype = torch.float32):
+def _test_basic_mistral_mlp(device: str = "cpu", dtype: torch.dtype = torch.float32, batch_size: int = 1):
     hidden_size = 256
     mlp = random_mistral_mlp(
         hidden_size=hidden_size, intermediate_size=1024, device=device, dtype=dtype
@@ -81,32 +81,43 @@ def _test_basic_mistral_mlp(device: str = "cpu", dtype: torch.dtype = torch.floa
     )
     muimlp.finalize_init()
 
-    input_tensor = torch.rand(size=(4, hidden_size), device=device, dtype=dtype)
+    input_tensor = torch.rand(size=(batch_size, hidden_size), device=device, dtype=dtype)
 
     y = mlp(input_tensor)
 
+    mlp.to(device=device, dtype=torch.float32)
+    y_highres = mlp(input_tensor.to(torch.float32)).to(dtype)
+
     y_m = muimlp(input_tensor)
 
-    tensors_equal(y, y_m)
+    tensors_equal(y, y_m, y_highres=y_highres)
 
 
-def test_basic_mistral_mlp_fp32_cpu():
-    _test_basic_mistral_mlp(device="cpu", dtype=torch.float32)
+def test_basic_mistral_mlp_b1_fp32_cpu():
+    _test_basic_mistral_mlp(device="cpu", dtype=torch.float32, batch_size=1)
 
+def test_basic_mistral_mlp_b1_fp32_gpu():
+    _test_basic_mistral_mlp(device="cuda", dtype=torch.float32, batch_size=1)
 
-def test_basic_mistral_mlp_fp32_gpu():
-    _test_basic_mistral_mlp(device="cuda", dtype=torch.float32)
+def test_basic_mistral_mlp_b1_fp16_gpu():
+    _test_basic_mistral_mlp(device="cuda", dtype=torch.float16, batch_size=1)
 
+def test_basic_mistral_mlp_b1_bf16_gpu():
+    _test_basic_mistral_mlp(device="cuda", dtype=torch.bfloat16, batch_size=1)
 
-def test_basic_mistral_mlp_fp16_gpu():
-    _test_basic_mistral_mlp(device="cuda", dtype=torch.float16)
+def test_basic_mistral_mlp_b2_fp16_gpu():
+    _test_basic_mistral_mlp(device="cuda", dtype=torch.float16, batch_size=2)
 
+def test_basic_mistral_mlp_b2_bf16_gpu():
+    _test_basic_mistral_mlp(device="cuda", dtype=torch.bfloat16, batch_size=2)
 
-def test_basic_mistral_mlp_bf16_gpu():
-    _test_basic_mistral_mlp(device="cuda", dtype=torch.bfloat16)
+def test_basic_mistral_mlp_b4_fp16_gpu():
+    _test_basic_mistral_mlp(device="cuda", dtype=torch.float16, batch_size=4)
 
+def test_basic_mistral_mlp_b4_bf16_gpu():
+    _test_basic_mistral_mlp(device="cuda", dtype=torch.bfloat16, batch_size=4)
 
-def random_llama3_mlp(hidden_size: int, intermediate_size: int) -> LlamaMLP:
+def random_llama3_mlp(hidden_size: int, intermediate_size: int, device: str = "cpu", dtype: torch.dtype = torch.float32) -> LlamaMLP:
     config = LlamaConfig(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
@@ -124,7 +135,7 @@ def random_llama3_mlp(hidden_size: int, intermediate_size: int) -> LlamaMLP:
     torch.nn.init.xavier_uniform_(mlp.up_proj.weight)
     torch.nn.init.xavier_uniform_(mlp.down_proj.weight)
 
-    return mlp
+    return mlp.to(device=device, dtype=dtype)
 
 
 def copy_llama3_mlp(mlp: LlamaMLP) -> LlamaMLP:
@@ -137,9 +148,9 @@ def copy_llama3_mlp(mlp: LlamaMLP) -> LlamaMLP:
     return new_mlp
 
 
-def test_basic_llama3_mlp():
+def _test_basic_llama3_mlp(device: str = "cpu", dtype: torch.dtype = torch.float32, batch_size: int = 1):
     hidden_size = 256
-    mlp = random_llama3_mlp(hidden_size=hidden_size, intermediate_size=1024)
+    mlp = random_llama3_mlp(hidden_size=hidden_size, intermediate_size=1024, device=device, dtype=dtype)
 
     # replace destroys the passed linear module so we need to copy it
     mlp_copy = copy_llama3_mlp(mlp)
@@ -148,7 +159,7 @@ def test_basic_llama3_mlp():
     replacement_context = MuiReplacementContext(
         engine_config=engine_config,
         model=None,  # No model context needed for this test
-        device="cpu",
+        device=device,
     )
     muimlp = MuiGateUpDownMLP.replace(
         replacement_context=replacement_context,
@@ -156,16 +167,43 @@ def test_basic_llama3_mlp():
     )
     muimlp.finalize_init()
 
-    input_tensor = torch.rand(size=(4, hidden_size))
+    input_tensor = torch.rand(size=(batch_size, hidden_size), device=device, dtype=dtype)
 
     y = mlp(input_tensor)
 
+    mlp.to(device=device, dtype=torch.float32)
+    y_highres = mlp(input_tensor.to(torch.float32)).to(dtype)
+
     y_m = muimlp(input_tensor)
 
-    tensors_equal(y, y_m)
+    tensors_equal(y, y_m, y_highres=y_highres)
 
 
-def random_llama4_mlp(hidden_size: int, intermediate_size: int) -> Llama4TextMLP:
+def test_basic_llama3_mlp_b1_fp32_cpu():
+    _test_basic_llama3_mlp(device="cpu", dtype=torch.float32, batch_size=1)
+
+def test_basic_llama3_mlp_b1_fp32_gpu():
+    _test_basic_llama3_mlp(device="cuda", dtype=torch.float32, batch_size=1)
+
+def test_basic_llama3_mlp_b1_fp16_gpu():
+    _test_basic_llama3_mlp(device="cuda", dtype=torch.float16, batch_size=1)
+
+def test_basic_llama3_mlp_b1_bf16_gpu():
+    _test_basic_llama3_mlp(device="cuda", dtype=torch.bfloat16, batch_size=1)
+
+def test_basic_llama3_mlp_b4_fp16_gpu():
+    _test_basic_llama3_mlp(device="cuda", dtype=torch.float16, batch_size=4)
+
+def test_basic_llama3_mlp_b4_bf16_gpu():
+    _test_basic_llama3_mlp(device="cuda", dtype=torch.bfloat16, batch_size=4)
+
+def test_basic_llama3_mlp_b8_fp16_gpu():
+    _test_basic_llama3_mlp(device="cuda", dtype=torch.float16, batch_size=8)
+
+def test_basic_llama3_mlp_b8_bf16_gpu():
+    _test_basic_llama3_mlp(device="cuda", dtype=torch.bfloat16, batch_size=8)
+
+def random_llama4_mlp(hidden_size: int, intermediate_size: int, device: str = "cpu", dtype: torch.dtype = torch.float32) -> Llama4TextMLP:
     config = Llama4TextConfig(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
@@ -176,7 +214,7 @@ def random_llama4_mlp(hidden_size: int, intermediate_size: int) -> Llama4TextMLP
         layer_norm_eps=1e-5,
     )
 
-    mlp = Llama4TextMLP(config)
+    mlp = Llama4TextMLP(config).to(device=device, dtype=dtype)
 
     # initialize weights
     torch.nn.init.xavier_uniform_(mlp.gate_proj.weight)
@@ -196,9 +234,9 @@ def copy_llama4_mlp(mlp: Llama4TextMLP) -> Llama4TextMLP:
     return new_mlp
 
 
-def test_basic_llama4_mlp():
+def _test_basic_llama4_mlp(device: str = "cpu", dtype: torch.dtype = torch.float32, batch_size: int = 1):
     hidden_size = 256
-    mlp = random_llama4_mlp(hidden_size=hidden_size, intermediate_size=1024)
+    mlp = random_llama4_mlp(hidden_size=hidden_size, intermediate_size=1024, device=device, dtype=dtype)
 
     # replace destroys the passed linear module so we need to copy it
     mlp_copy = copy_llama4_mlp(mlp)
@@ -207,7 +245,7 @@ def test_basic_llama4_mlp():
     replacement_context = MuiReplacementContext(
         engine_config=engine_config,
         model=None,  # No model context needed for this test
-        device="cpu",
+        device=device,
     )
     muimlp = MuiGateUpDownMLP.replace(
         replacement_context=replacement_context,
@@ -215,14 +253,41 @@ def test_basic_llama4_mlp():
     )
     muimlp.finalize_init()
 
-    input_tensor = torch.rand(size=(4, hidden_size))
+    input_tensor = torch.rand(size=(batch_size, hidden_size), device=device, dtype=dtype)
 
     y = mlp(input_tensor)
 
+    mlp.to(device=device, dtype=dtype)
+    y_highres = mlp(input_tensor.to(dtype=dtype)).to(dtype=dtype)
+
     y_m = muimlp(input_tensor)
 
-    tensors_equal(y, y_m)
+    tensors_equal(y, y_m, y_highres=y_highres)
 
+
+def test_basic_llama4_mlp_b1_fp32_cpu():
+    _test_basic_llama4_mlp(device="cpu", dtype=torch.float32, batch_size=1)
+
+def test_basic_llama4_mlp_b1_fp32_gpu():
+    _test_basic_llama4_mlp(device="cuda", dtype=torch.float32, batch_size=1)
+
+def test_basic_llama4_mlp_b1_fp16_gpu():
+    _test_basic_llama4_mlp(device="cuda", dtype=torch.float16, batch_size=1)
+
+def test_basic_llama4_mlp_b1_bf16_gpu():
+    _test_basic_llama4_mlp(device="cuda", dtype=torch.bfloat16, batch_size=1)
+
+def test_basic_llama4_mlp_b4_fp16_gpu():
+    _test_basic_llama4_mlp(device="cuda", dtype=torch.float16, batch_size=4)
+
+def test_basic_llama4_mlp_b4_bf16_gpu():
+    _test_basic_llama4_mlp(device="cuda", dtype=torch.bfloat16, batch_size=4)
+
+def test_basic_llama4_mlp_b8_fp16_gpu():
+    _test_basic_llama4_mlp(device="cuda", dtype=torch.float16, batch_size=8)
+
+def test_basic_llama4_mlp_b8_bf16_gpu():
+    _test_basic_llama4_mlp(device="cuda", dtype=torch.bfloat16, batch_size=8)
 
 def random_gemma3_mlp(
     hidden_size: int, intermediate_size: int, device: str, dtype: torch.dtype
@@ -258,7 +323,7 @@ def copy_gemma3_mlp(mlp: Gemma3MLP) -> Gemma3MLP:
     return new_mlp
 
 
-def _test_basic_gemma3_mlp(device: str = "cpu", dtype: torch.dtype = torch.float32):
+def _test_basic_gemma3_mlp(device: str = "cpu", dtype: torch.dtype = torch.float32, batch_size: int = 1):
     hidden_size = 256
     mlp = random_gemma3_mlp(
         hidden_size=hidden_size, intermediate_size=1024, device=device, dtype=dtype
@@ -279,30 +344,41 @@ def _test_basic_gemma3_mlp(device: str = "cpu", dtype: torch.dtype = torch.float
     )
     muimlp.finalize_init()
 
-    input_tensor = torch.rand(size=(4, hidden_size), device=device, dtype=dtype)
+    input_tensor = torch.rand(size=(batch_size, hidden_size), device=device, dtype=dtype)
 
     y = mlp(input_tensor)
 
+    mlp.to(device=device, dtype=torch.float32)
+    y_highres = mlp(input_tensor.to(torch.float32)).to(dtype)
+
     y_m = muimlp(input_tensor)
 
-    tensors_equal(y, y_m)
+    tensors_equal(y, y_m, y_highres=y_highres)
 
 
-def test_basic_gemma3_mlp_fp32_cpu():
-    _test_basic_gemma3_mlp(device="cpu", dtype=torch.float32)
+def test_basic_gemma3_mlp_b1_fp32_cpu():
+    _test_basic_gemma3_mlp(device="cpu", dtype=torch.float32, batch_size=1)
 
+def test_basic_gemma3_mlp_b1_fp32_gpu():
+    _test_basic_gemma3_mlp(device="cuda", dtype=torch.float32, batch_size=1)
 
-def test_basic_gemma3_mlp_fp32_gpu():
-    _test_basic_gemma3_mlp(device="cuda", dtype=torch.float32)
+def test_basic_gemma3_mlp_b1_fp16_gpu():
+    _test_basic_gemma3_mlp(device="cuda", dtype=torch.float16, batch_size=1)
 
+def test_basic_gemma3_mlp_b1_bf16_gpu():
+    _test_basic_gemma3_mlp(device="cuda", dtype=torch.bfloat16, batch_size=1)
 
-def test_basic_gemma3_mlp_fp16_gpu():
-    _test_basic_gemma3_mlp(device="cuda", dtype=torch.float16)
+def test_basic_gemma3_mlp_b2_fp16_gpu():
+    _test_basic_gemma3_mlp(device="cuda", dtype=torch.float16, batch_size=2)
 
+def test_basic_gemma3_mlp_b2_bf16_gpu():
+    _test_basic_gemma3_mlp(device="cuda", dtype=torch.bfloat16, batch_size=2)
 
-def test_basic_gemma3_mlp_bf16_gpu():
-    _test_basic_gemma3_mlp(device="cuda", dtype=torch.bfloat16)
+def test_basic_gemma3_mlp_b8_fp16_gpu():
+    _test_basic_gemma3_mlp(device="cuda", dtype=torch.float16, batch_size=8)
 
+def test_basic_gemma3_mlp_b8_bf16_gpu():
+    _test_basic_gemma3_mlp(device="cuda", dtype=torch.bfloat16, batch_size=8)
 
 # TODO tests with bias and no bias
 # TODO tests with input norm

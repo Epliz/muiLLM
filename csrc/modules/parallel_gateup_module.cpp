@@ -1,6 +1,19 @@
 #include "parallel_gateup_module.h"
 
 #include "../parallel_gateup_kernels.cuh"
+#include "../ffn/gateup.cuh"
+#include "../linear/activation.h"
+
+static inline mui_activation to_linear_activation(MuiGateUpMLPActivation activation) {
+  switch (activation) {
+    case MuiGateUpMLPActivation::SILU:
+      return mui_activation::Silu;
+    case MuiGateUpMLPActivation::GELU_TANH:
+      return mui_activation::Gelu_Tanh;
+    default:
+      TORCH_CHECK(false, "Unsupported activation");
+  }
+}
 
 MuiLLMParallelGateUpDownMLP::MuiLLMParallelGateUpDownMLP(
   muillm_engine_t* engine,
@@ -19,13 +32,38 @@ MuiLLMParallelGateUpDownMLP::MuiLLMParallelGateUpDownMLP(
   this->method = static_cast<MuiLLMgateupmlpMethod>(method);
   this->activation = activation;
 
-  this->norm_weights = norm_weights;
-  this->gate_weights = gate_weights;
-  this->up_weights = up_weights;
-  this->down_weights = down_weights;
+  mui_activation linear_activation = to_linear_activation(activation);
 
-  this->variance_epsilon = variance_epsilon;
-  this->norm_weights_offset = norm_weights_offset;
+  auto undef_tensor = torch::Tensor();
+  this->gate_linear = new MuiLLMLinear(
+    engine,
+    norm_weights,
+    gate_weights,
+    /* add_bias */ undef_tensor,
+    variance_epsilon,
+    norm_weights_offset,
+    /* activation */ linear_activation
+  );
+  this->up_linear = new MuiLLMLinear(
+    engine,
+    norm_weights,
+    up_weights,
+    /* add_bias */ undef_tensor,
+    variance_epsilon,
+    norm_weights_offset,
+    /* activation */ mui_activation::Identity
+  );
+  this->down_linear = new MuiLLMParallelLinear(
+    engine,
+    comm,
+    undef_tensor,
+    down_weights,
+    /* add_bias */ undef_tensor,
+    0.f,  // variance_epsilon
+    0.f,  // norm_weights_offset
+    /*sharding dim*/ 1,
+    /* activation */ mui_activation::Identity
+  );
 
   auto wdtype = gate_weights.dtype();
   bool dispatchable_type = (wdtype == torch::kFloat16) || (wdtype == torch::kBFloat16);
@@ -47,20 +85,48 @@ torch::Tensor MuiLLMParallelGateUpDownMLP::forward(
   }
 
   if (this->method == gateupmlp_FUSED) {
-    return muillm_parallel_gateupmlp_forward(
-      this->engine,
-      this->comm,
-      this->activation,
-      this->norm_weights,
-      this->variance_epsilon,
-      this->norm_weights_offset,
-      this->gate_weights,
-      this->up_weights,
-      this->down_weights,
-      residual,
-      inputs,
-      reduce
-    );
+    auto numelements = inputs.numel();
+    auto K = inputs.size(inputs.dim() - 1);
+
+    if (numelements > (MUILLM_GATEUP_KERNELS_MAX_BATCH_SIZE * K)) {
+      // cannot use the fused kernels, so fallback to the linear modules
+      auto undef_tensor = torch::Tensor();
+      auto gate_proj = this->gate_linear->forward(
+        inputs,
+        /* mul_residual */ undef_tensor,
+        /* residual */ undef_tensor
+      );
+
+      auto up_proj = this->up_linear->forward(
+        inputs,
+        /* mul_residual */ gate_proj,
+        /* residual */ undef_tensor
+      );
+
+      auto down_proj = this->down_linear->forward(
+        up_proj,
+        /* mul_residual */ undef_tensor,
+        /* residual */ residual,
+        /* collect_outputs */ reduce
+      );
+      return down_proj;
+    } else {
+      // can use the fused kernels
+      return muillm_parallel_gateupmlp_forward(
+        this->engine,
+        this->comm,
+        this->activation,
+        this->gate_linear->norm_weights,
+        this->gate_linear->variance_epsilon,
+        this->gate_linear->norm_weights_offset,
+        this->gate_linear->weights,
+        this->up_linear->weights,
+        this->down_linear->weights,
+        residual,
+        inputs,
+        reduce
+      );
+    }
   } else {
     TORCH_CHECK(false, "Unsupported method");
   }

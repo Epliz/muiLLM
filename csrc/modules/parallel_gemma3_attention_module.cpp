@@ -52,7 +52,12 @@ torch::Tensor MuiLLMParallelGemma3Attention::forward(
 
   // o proj
   auto undef_tensor = torch::Tensor();
-  auto proj_attn_output = this->o_proj->forward(attn_output, /* residual */ undef_tensor, /*collect_outputs*/ true);
+  auto proj_attn_output = this->o_proj->forward(
+    attn_output,
+    /* mul_residual */ undef_tensor,
+    /* residual */ undef_tensor,
+    /*collect_outputs*/ true
+  );
   return proj_attn_output;
 }
 

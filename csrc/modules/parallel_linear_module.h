@@ -3,6 +3,7 @@
 
 #include "../engine.h"
 #include "../comms/comm_torch.h"
+#include "../linear/activation.h"
 
 #include <optional>
 
@@ -16,11 +17,12 @@ struct MuiLLMParallelLinear: torch::nn::Module {
   torch::Tensor norm_weights{nullptr};
   torch::Tensor weights{nullptr};
 
-  torch::Tensor mul_bias{nullptr};
   torch::Tensor add_bias{nullptr};
 
   float variance_epsilon;
   float norm_weights_offset;
+
+  mui_activation activation;
 
   int sharding_dim;
 
@@ -32,17 +34,18 @@ struct MuiLLMParallelLinear: torch::nn::Module {
     muillm_comm_t* comm,
     torch::Tensor& norm_weights,
     torch::Tensor& weights,
-    torch::Tensor& mul_bias,
     torch::Tensor& add_bias,
     float variance_epsilon,
     float norm_weights_offset,
-    int sharding_dim
+    int sharding_dim,
+    mui_activation activation = mui_activation::Identity
   );
 
   virtual ~MuiLLMParallelLinear();
 
   torch::Tensor forward(
     torch::Tensor& inputs,
+    torch::Tensor& mul_residual,
     torch::Tensor& residual,
     bool collect_outputs
   );
@@ -67,7 +70,6 @@ muillm_parallel_linear_module_ptr_t muillm_parallel_linear_module_init_trampolin
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
   float norm_weights_offset,
-  std::optional<torch::Tensor> mul_bias_,
   std::optional<torch::Tensor> add_bias_,
   int sharding_dim
 );
@@ -81,6 +83,7 @@ void muillm_parallel_linear_module_deinit_trampoline(
 at::Tensor muillm_parallel_linear_module_forward_trampoline(
   muillm_parallel_linear_module_ptr_t module_ptr,
   torch::Tensor& inputs,
+  std::optional<torch::Tensor> mul_residual_,
   std::optional<torch::Tensor> residual_,
   bool reduce
 );

@@ -7,6 +7,7 @@
 
 #include "../ffn/gateupmlpactivation.h"
 #include "gateup_method.h"
+#include "linear_module.h"
 
 struct MuiLLMGateUpDownMLP: MuiLLMGateUpDownMLPInterface {
   // fields
@@ -14,11 +15,11 @@ struct MuiLLMGateUpDownMLP: MuiLLMGateUpDownMLPInterface {
 
   MuiGateUpMLPActivation activation;
   MuiLLMgateupmlpMethod method;
-  
-  torch::Tensor norm_weights{nullptr};
-  torch::Tensor gate_weights{nullptr};
-  torch::Tensor up_weights{nullptr};
-  torch::Tensor down_weights{nullptr};
+
+  MuiLLMLinear* gate_linear{nullptr};
+  MuiLLMLinear* up_linear{nullptr};
+  MuiLLMLinear* down_linear{nullptr};
+
 
   float variance_epsilon;
   float norm_weights_offset;

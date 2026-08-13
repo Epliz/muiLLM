@@ -7,6 +7,8 @@
 
 #include "gateupmlpactivation.h"
 
+#define MUILLM_GATEUP_KERNELS_MAX_BATCH_SIZE 16
+
 void muillm_gateupmlp_forward_placed_output(
     muillm_engine_t* engine,
     MuiGateUpMLPActivation activation,

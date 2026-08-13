@@ -45,8 +45,6 @@ torch::Tensor MuiLLMGemma3Decoder::forward(
   std::tuple<torch::Tensor, torch::Tensor>& position_embeds_local,
   torch::Tensor& cache_positions
 ) {
-  auto undef_tensor = torch::Tensor();
-
   auto residual = h;
 
   auto qkv = this->multilinear->forward(
@@ -83,6 +81,7 @@ torch::Tensor MuiLLMGemma3Decoder::forward(
 
   auto post_feedforward_residual = h;
 
+  auto undef_tensor = torch::Tensor();
   auto mlp_out = this->mlp->forward(
     h,
     /* residual */ undef_tensor

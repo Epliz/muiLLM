@@ -7,6 +7,8 @@
 
 #include "activation.h"
 
+#define MUILLM_LINEAR_KERNELS_MAX_BATCH_SIZE 16
+
 // variant where the output needs to be placed somewhere precise
 // (used when fusing reductions by parallel linear)
 void muillm_linear_activ_forward_placed_output(
@@ -16,8 +18,8 @@ void muillm_linear_activ_forward_placed_output(
     float norm_weights_offset,
     torch::Tensor& weights,
     mui_activation activ,
-    torch::Tensor& mul_bias,
     torch::Tensor& add_bias,
+    torch::Tensor& mul_residual,
     torch::Tensor& residual,
     torch::Tensor& x,
     void* output_ptr,
@@ -31,8 +33,8 @@ at::Tensor muillm_linear_activ_forward(
     float norm_weights_offset,
     torch::Tensor& weights,
     mui_activation activ,
-    torch::Tensor& mul_bias,
     torch::Tensor& add_bias,
+    torch::Tensor& mul_residual,
     torch::Tensor& residual,
     torch::Tensor& x
 );
@@ -45,8 +47,8 @@ at::Tensor muillm_linear_forward_trampoline(
     std::optional<torch::Tensor> norm_weights_,
     float epsilon,
     float norm_weights_offset,
-    std::optional<torch::Tensor> mul_bias_,
     std::optional<torch::Tensor> add_bias_,
+    std::optional<torch::Tensor> mul_residual_,
     std::optional<torch::Tensor> residual_
 );
 

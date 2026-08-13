@@ -1,5 +1,6 @@
 #include "gateupmlpactivation.h"
 #include <hip/hip_bf16.h>
+#include <stdexcept>
 
 #define GEMV_THREADS_PER_BLOCK 256
 
@@ -174,14 +175,12 @@ static inline float __device__ gelu_tanh(float x) {
   return 0.5f * x * (1.0f + tanhf(sqrtf(2.0f / M_PI) * (x * (1.0f + 0.044715f * x * x))));
 }
 
-#define FUSED_ROWS_PER_BLOCK 2
-
-template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupmlp_gemv_bf16_kernel(
+template<int THREADS_PER_BLOCK, int BATCH_SIZE, int FUSED_ROWS_PER_BLOCK>
+__device__ void muillm_gateupmlp_gemv_bf16_func(
     const __hip_bfloat16* __restrict__ GW, // weight matrix - size N x K
     const __hip_bfloat16* __restrict__ UW, // weight matrix - size N x K
-    const __hip_bfloat16* __restrict__ X, // input = size K
-    __hip_bfloat16* __restrict__ Y, // output - size N
+    const __hip_bfloat16* __restrict__ X, // input = size B x K
+    __hip_bfloat16* __restrict__ Y, // output - size B x N
     unsigned N,
     unsigned K,
     MuiGateUpMLPActivation activation
@@ -190,13 +189,15 @@ __global__ void muillm_gateupmlp_gemv_bf16_kernel(
   int warpId = threadIdx.x / warpSize;
   int laneId = threadIdx.x % warpSize;
 
-  __shared__ float shared_gaccs[FUSED_ROWS_PER_BLOCK];
-  __shared__ float shared_uaccs[FUSED_ROWS_PER_BLOCK];
+  __shared__ float shared_gaccs[BATCH_SIZE][FUSED_ROWS_PER_BLOCK];
+  __shared__ float shared_uaccs[BATCH_SIZE][FUSED_ROWS_PER_BLOCK];
 
   // initialize the shared memory
   if (threadIdx.x < FUSED_ROWS_PER_BLOCK) {
-    shared_gaccs[threadIdx.x] = 0.f;
-    shared_uaccs[threadIdx.x] = 0.f;
+    for (int b = 0; b < BATCH_SIZE; b++) {
+      shared_gaccs[b][threadIdx.x] = 0.f;
+      shared_uaccs[b][threadIdx.x] = 0.f;
+    }
   }
   if (THREADS_PER_BLOCK > warpSize) {
     __syncthreads();
@@ -209,98 +210,139 @@ __global__ void muillm_gateupmlp_gemv_bf16_kernel(
     if (current_row + 1 < N) {
       // compute the t-th element of Y. by doing the dot product with the
       // t-th row of W
-      const __hip_bfloat16* GW0 = &GW[(current_row + 0) * K];
-      const __hip_bfloat16* GW1 = &GW[(current_row + 1) * K];
+      const __hip_bfloat16* GWs[FUSED_ROWS_PER_BLOCK];
+      for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+        GWs[r] = &GW[(current_row + r) * K];
+      }
 
-      float gacc0 = 0.f;
-      float gacc1 = 0.f;
+      const __hip_bfloat16* UWs[FUSED_ROWS_PER_BLOCK];
+      for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+        UWs[r] = &UW[(current_row + r) * K];
+      }
 
-      const __hip_bfloat16* UW0 = &UW[(current_row + 0) * K];
-      const __hip_bfloat16* UW1 = &UW[(current_row + 1) * K];
-
-      float uacc0 = 0.f;
-      float uacc1 = 0.f;
+      const __hip_bfloat16* Xps[BATCH_SIZE];
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        Xps[b] = &X[b * K];
+      }
   
+      float gaccs[BATCH_SIZE][FUSED_ROWS_PER_BLOCK];
+      float uaccs[BATCH_SIZE][FUSED_ROWS_PER_BLOCK];
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+          gaccs[b][r] = 0.f;
+          uaccs[b][r] = 0.f;
+        }
+      }
+
       // do the dot product
       {
         unsigned k;
         //*
         for (k = threadIdx.x * 8; k + 7 < K; k += (THREADS_PER_BLOCK * 8)) {
           // vectorized
-          float8 x = __bfloat1682float8(*(const bfloat168*)(addr(X, k)));
+          float8 gws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            gws[r] = __bfloat1682float8(load_nontemporal_bfloat168(addr(GWs[r], k)));
+          }
 
-          float8 gw0 = __bfloat1682float8(load_nontemporal_bfloat168(addr(GW0, k)));
-          float8 gw1 = __bfloat1682float8(load_nontemporal_bfloat168(addr(GW1, k)));
+          float8 uws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            uws[r] = __bfloat1682float8(load_nontemporal_bfloat168(addr(UWs[r], k)));
+          }
 
-          float8 uw0 = __bfloat1682float8(load_nontemporal_bfloat168(addr(UW0, k)));
-          float8 uw1 = __bfloat1682float8(load_nontemporal_bfloat168(addr(UW1, k)));
-      
-          dot8(gacc0, gw0, x);
-          dot8(gacc1, gw1, x);
-          dot8(uacc0, uw0, x);
-          dot8(uacc1, uw1, x);
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float8 x = __bfloat1682float8(*(const bfloat168*)(addr(Xps[b], k)));
+            for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+              dot8(gaccs[b][r], gws[r], x);
+              dot8(uaccs[b][r], uws[r], x);
+            }
+          }
         }
+
         if (k + 3 < K) {
           // vectorized
-          float4 x = __bfloat1642float4(*(const bfloat164*)(addr(X, k)));
+          float4 gws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            gws[r] = __bfloat1642float4(load_nontemporal_bfloat164(addr(GWs[r], k)));
+          }
 
-          float4 gw0 = __bfloat1642float4(load_nontemporal_bfloat164(addr(GW0, k)));
-          float4 gw1 = __bfloat1642float4(load_nontemporal_bfloat164(addr(GW1, k)));
-          float4 uw0 = __bfloat1642float4(load_nontemporal_bfloat164(addr(UW0, k)));
-          float4 uw1 = __bfloat1642float4(load_nontemporal_bfloat164(addr(UW1, k)));
-      
-          dot4(gacc0, gw0, x);
-          dot4(gacc1, gw1, x);
-          dot4(uacc0, uw0, x);
-          dot4(uacc1, uw1, x);
+          float4 uws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            uws[r] = __bfloat1642float4(load_nontemporal_bfloat164(addr(UWs[r], k)));
+          }
+
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float4 x = __bfloat1642float4(*(const bfloat164*)(addr(Xps[b], k)));
+            for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+              dot4(gaccs[b][r], gws[r], x);
+              dot4(uaccs[b][r], uws[r], x);
+            }
+          }
 
           k += 4;
         }
+
         if (k + 1 < K) {
           // vectorized
-          float2 x = __bfloat1622float2(*(const __hip_bfloat162*)(addr(X, k)));
+          float2 gws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            gws[r] = __bfloat1622float2(load_nontemporal_bfloat162(addr(GWs[r], k)));
+          }
 
-          float2 gw0 = __bfloat1622float2(load_nontemporal_bfloat162(addr(GW0, k)));
-          float2 gw1 = __bfloat1622float2(load_nontemporal_bfloat162(addr(GW1, k)));
-          float2 uw0 = __bfloat1622float2(load_nontemporal_bfloat162(addr(UW0, k)));
-          float2 uw1 = __bfloat1622float2(load_nontemporal_bfloat162(addr(UW1, k)));
-      
-          dot2(gacc0, gw0, x);
-          dot2(gacc1, gw1, x);
-          dot2(uacc0, uw0, x);
-          dot2(uacc1, uw1, x);
+          float2 uws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            uws[r] = __bfloat1622float2(load_nontemporal_bfloat162(addr(UWs[r], k)));
+          }
+
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float2 x = __bfloat1622float2(*(const __hip_bfloat162*)(addr(Xps[b], k)));
+            for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+              dot2(gaccs[b][r], gws[r], x);
+              dot2(uaccs[b][r], uws[r], x);
+            }
+          }
 
           k += 2;
         }
 
         if (k < K) {
           // remainder
-          float x = __bfloat162float(*addr(X,k));
+          float gws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            gws[r] = __bfloat162float(*addr(GWs[r], k));
+          }
 
-          float gw0 = __bfloat162float(*addr(GW0,k));
-          float gw1 = __bfloat162float(*addr(GW1,k));
-          float uw0 = __bfloat162float(*addr(UW0,k));
-          float uw1 = __bfloat162float(*addr(UW1,k));
+          float uws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            uws[r] = __bfloat162float(*addr(UWs[r], k));
+          }
 
-          gacc0 += gw0 * x;
-          gacc1 += gw1 * x;
-          uacc0 += uw0 * x;
-          uacc1 += uw1 * x;
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float x = __bfloat162float(*addr(Xps[b], k));
+            for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+              gaccs[b][r] += gws[r] * x;
+              uaccs[b][r] += uws[r] * x;
+            }
+          }
         }
       }
 
       // warp reduce
-      gacc0 = warpReduce(gacc0);
-      gacc1 = warpReduce(gacc1);
-      uacc0 = warpReduce(uacc0);
-      uacc1 = warpReduce(uacc1);
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+          gaccs[b][r] = warpReduce(gaccs[b][r]);
+          uaccs[b][r] = warpReduce(uaccs[b][r]);
+        }
+      }
 
       // reduce accross warps
       if (laneId == 0) {
-        atomicAdd(&shared_gaccs[0], gacc0);
-        atomicAdd(&shared_gaccs[1], gacc1);
-        atomicAdd(&shared_uaccs[0], uacc0);
-        atomicAdd(&shared_uaccs[1], uacc1);
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            atomicAdd(&shared_gaccs[b][r], gaccs[b][r]);
+            atomicAdd(&shared_uaccs[b][r], uaccs[b][r]);
+          }
+        }
       }
     } else {
       for (int i = 0; i < FUSED_ROWS_PER_BLOCK; i++) {
@@ -313,27 +355,43 @@ __global__ void muillm_gateupmlp_gemv_bf16_kernel(
 
         const __hip_bfloat16* GW_ = &GW[current_row * K];
         const __hip_bfloat16* UW_ = &UW[current_row * K];
-      
-        // do the dot product
-        float gacc = 0.f;
-        float uacc = 0.f;
 
+        const __hip_bfloat16* Xps[BATCH_SIZE];
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          Xps[b] = &X[b * K];
+        }
+
+        float gaccs[BATCH_SIZE];
+        float uaccs[BATCH_SIZE];
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          gaccs[b] = 0.f;
+          uaccs[b] = 0.f;
+        }
+
+        // do the dot product
         for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
-          float x =  __bfloat162float(X[k]);
           float gw = __bfloat162float(GW_[k]);
           float uw = __bfloat162float(UW_[k]);
-          gacc += gw * x;
-          uacc += uw * x;
+
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float x = __bfloat162float(*addr(Xps[b], k));
+            gaccs[b] += gw * x;
+            uaccs[b] += uw * x;
+          }
         }
 
         // warp reduce
-        gacc = warpReduce(gacc);
-        uacc = warpReduce(uacc);
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          gaccs[b] = warpReduce(gaccs[b]);
+          uaccs[b] = warpReduce(uaccs[b]);
+        }
 
         // reduce accross warps
         if (laneId == 0) {
-          atomicAdd(&shared_gaccs[i], gacc);
-          atomicAdd(&shared_uaccs[i], uacc);
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            atomicAdd(&shared_gaccs[b][i], gaccs[b]);
+            atomicAdd(&shared_uaccs[b][i], uaccs[b]);
+          }
         }
       }
     }
@@ -351,32 +409,53 @@ __global__ void muillm_gateupmlp_gemv_bf16_kernel(
     int current_row = blockIdx.x * FUSED_ROWS_PER_BLOCK + threadIdx.x;
 
     if (current_row < N) {
-      float gacc = shared_gaccs[threadIdx.x]; // read the fully reduced value
-      float uacc = shared_uaccs[threadIdx.x]; // read the fully reduced value
-      float acc;
-      
-      if (activation == MuiGateUpMLPActivation::SILU) {
-        acc = silu(gacc) * uacc;
-      } else if (activation == MuiGateUpMLPActivation::GELU_TANH) {
-        acc = gelu_tanh(gacc) * uacc;
-      } else {
-        // unsupported activation
-        acc = 0.f;
-      }
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        float gacc = shared_gaccs[b][threadIdx.x]; // read the fully reduced value
+        float uacc = shared_uaccs[b][threadIdx.x]; // read the fully reduced value
+        float acc;
 
-      // write the output value
-      Y[current_row] = __float2bfloat16(acc);
+        if (activation == MuiGateUpMLPActivation::SILU) {
+          acc = silu(gacc) * uacc;
+        } else if (activation == MuiGateUpMLPActivation::GELU_TANH) {
+          acc = gelu_tanh(gacc) * uacc;
+        } else {
+          // unsupported activation
+          acc = 0.f;
+        }
+
+        // write the output value
+        Y[(b * N) + current_row] = __float2bfloat16(acc);
+      }
     }
   }
 }
 
-template<int THREADS_PER_BLOCK>
-__global__ void muillm_gateupmlp_gemv_norm_inputs_bf16_kernel(
+template<int BATCH_SIZE, int FUSED_ROWS_PER_BLOCK>
+__global__ void muillm_gateupmlp_gemv_bf16_kernel(
+    const __hip_bfloat16* __restrict__ GW, // weight matrix - size N x K
+    const __hip_bfloat16* __restrict__ UW, // weight matrix - size N x K
+    const __hip_bfloat16* __restrict__ X, // input = size B x K
+    __hip_bfloat16* __restrict__ Y, // output - size B x N
+    unsigned N,
+    unsigned K,
+    MuiGateUpMLPActivation activation
+) {
+  if (warpSize == 32) {
+    constexpr int THREADS_PER_BLOCK = 32 * 4;
+    muillm_gateupmlp_gemv_bf16_func<THREADS_PER_BLOCK, BATCH_SIZE, FUSED_ROWS_PER_BLOCK>(GW, UW, X, Y, N, K, activation);
+  } else if (warpSize == 64) {
+    constexpr int THREADS_PER_BLOCK = 64 * 4;
+    muillm_gateupmlp_gemv_bf16_func<THREADS_PER_BLOCK, BATCH_SIZE, FUSED_ROWS_PER_BLOCK>(GW, UW, X, Y, N, K, activation);
+  }
+}
+
+template<int THREADS_PER_BLOCK, int BATCH_SIZE, int FUSED_ROWS_PER_BLOCK>
+__device__ void muillm_gateupmlp_gemv_norm_inputs_bf16_func(
     const __hip_bfloat16* __restrict__ NW, // input normalization weights matrix - size K
     const __hip_bfloat16* __restrict__ GW, // weight matrix - size N x K
     const __hip_bfloat16* __restrict__ UW, // weight matrix - size N x K
-    const __hip_bfloat16* __restrict__ X, // input = size K
-    __hip_bfloat16* __restrict__ Y, // output - size N
+    const __hip_bfloat16* __restrict__ X, // input = size B x K
+    __hip_bfloat16* __restrict__ Y, // output - size B x N
     unsigned N,
     unsigned K,
     float epsilon,
@@ -388,19 +467,26 @@ __global__ void muillm_gateupmlp_gemv_norm_inputs_bf16_kernel(
   int warpId = threadIdx.x / warpSize;
   int laneId = threadIdx.x % warpSize;
 
-  float var_x = 0.f;
+  float var_xs[BATCH_SIZE];
+  for (int b = 0; b < BATCH_SIZE; b++) {
+    var_xs[b] = 0.f;
+  }
 
-  __shared__ float shared_gaccs[FUSED_ROWS_PER_BLOCK];
-  __shared__ float shared_uaccs[FUSED_ROWS_PER_BLOCK];
-  __shared__ float shared_var_x;
+  __shared__ float shared_gaccs[BATCH_SIZE][FUSED_ROWS_PER_BLOCK];
+  __shared__ float shared_uaccs[BATCH_SIZE][FUSED_ROWS_PER_BLOCK];
+  __shared__ float shared_var_x[BATCH_SIZE];
 
   // initialize the shared memory
   if (threadIdx.x < FUSED_ROWS_PER_BLOCK) {
-    shared_gaccs[threadIdx.x] = 0.f;
-    shared_uaccs[threadIdx.x] = 0.f;
+    for (int b = 0; b < BATCH_SIZE; b++) {
+      shared_gaccs[b][threadIdx.x] = 0.f;
+      shared_uaccs[b][threadIdx.x] = 0.f;
+    }
   }
   if (threadIdx.x == 0) {
-    shared_var_x = epsilon;
+    for (int b = 0; b < BATCH_SIZE; b++) {
+      shared_var_x[b] = epsilon;
+    }
   }
   if (THREADS_PER_BLOCK > warpSize) {
     __syncthreads();
@@ -413,16 +499,29 @@ __global__ void muillm_gateupmlp_gemv_norm_inputs_bf16_kernel(
     if (current_row + 1 < N) {
       // compute the t-th element of Y. by doing the dot product with the
       // t-th row of W
-      const __hip_bfloat16* GW0 = &GW[(current_row + 0) * K];
-      const __hip_bfloat16* GW1 = &GW[(current_row + 1) * K];
+      const __hip_bfloat16* GWs[FUSED_ROWS_PER_BLOCK];
+      for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+        GWs[r] = &GW[(current_row + r) * K];
+      }
 
-      const __hip_bfloat16* UW0 = &UW[(current_row + 0) * K];
-      const __hip_bfloat16* UW1 = &UW[(current_row + 1) * K];
+      const __hip_bfloat16* UWs[FUSED_ROWS_PER_BLOCK];
+      for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+        UWs[r] = &UW[(current_row + r) * K];
+      }
 
-      float gacc0 = 0.f;
-      float gacc1 = 0.f;
-      float uacc0 = 0.f;
-      float uacc1 = 0.f;
+      const __hip_bfloat16* Xps[BATCH_SIZE];
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        Xps[b] = &X[b * K];
+      }
+
+      float gaccs[BATCH_SIZE][FUSED_ROWS_PER_BLOCK];
+      float uaccs[BATCH_SIZE][FUSED_ROWS_PER_BLOCK];
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+          gaccs[b][r] = 0.f;
+          uaccs[b][r] = 0.f;
+        }
+      }
 
       // do the dot product
       {
@@ -430,120 +529,156 @@ __global__ void muillm_gateupmlp_gemv_norm_inputs_bf16_kernel(
         //*
         for (k = threadIdx.x * 8; k + 7 < K; k += (THREADS_PER_BLOCK * 8)) {
           // vectorized
-          float8 x = __bfloat1682float8(*(const bfloat168*)(addr(X, k)));
+          float8 gws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            gws[r] = __bfloat1682float8(load_nontemporal_bfloat168(addr(GWs[r], k)));
+          }
+
+          float8 uws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            uws[r] = __bfloat1682float8(load_nontemporal_bfloat168(addr(UWs[r], k)));
+          }
+
           float8 nw = __bfloat1682float8(*(const bfloat168*)(addr(NW, k))) + weights_offset;
 
-          float8 gw0 = __bfloat1682float8(load_nontemporal_bfloat168(addr(GW0, k)));
-          float8 gw1 = __bfloat1682float8(load_nontemporal_bfloat168(addr(GW1, k)));
-          float8 uw0 = __bfloat1682float8(load_nontemporal_bfloat168(addr(UW0, k)));
-          float8 uw1 = __bfloat1682float8(load_nontemporal_bfloat168(addr(UW1, k)));
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float8 x = __bfloat1682float8(*(const bfloat168*)(addr(Xps[b], k)));
 
-          // accumulate for the variance
-          dot8(var_x, x, x);
+            // accumulate for the variance
+            dot8(var_xs[b], x, x);
 
-          // multiply with normalization weights
-          x.x = x.x * nw.x;
-          x.y = x.y * nw.y;
-          x.z = x.z * nw.z;
-          x.w = x.w * nw.w;
-          x.a = x.a * nw.a;
-          x.b = x.b * nw.b;
-          x.c = x.c * nw.c;
-          x.d = x.d * nw.d;
+            // multiply with normalization weights
+            x.x = x.x * nw.x;
+            x.y = x.y * nw.y;
+            x.z = x.z * nw.z;
+            x.w = x.w * nw.w;
+            x.a = x.a * nw.a;
+            x.b = x.b * nw.b;
+            x.c = x.c * nw.c;
+            x.d = x.d * nw.d;
 
-          dot8(gacc0, gw0, x);
-          dot8(gacc1, gw1, x);
-          dot8(uacc0, uw0, x);
-          dot8(uacc1, uw1, x);
+            for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+              dot8(gaccs[b][r], gws[r], x);
+              dot8(uaccs[b][r], uws[r], x);
+            }
+          }
         }
+
         if (k + 3 < K) {
           // vectorized
-          float4 x = __bfloat1642float4(*(const bfloat164*)(addr(X, k)));
+          float4 gws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            gws[r] = __bfloat1642float4(load_nontemporal_bfloat164(addr(GWs[r], k)));
+          }
+          float4 uws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            uws[r] = __bfloat1642float4(load_nontemporal_bfloat164(addr(UWs[r], k)));
+          }
+
           float4 nw = __bfloat1642float4(*(const bfloat164*)(addr(NW, k))) + weights_offset;
 
-          float4 gw0 = __bfloat1642float4(load_nontemporal_bfloat164(addr(GW0, k)));
-          float4 gw1 = __bfloat1642float4(load_nontemporal_bfloat164(addr(GW1, k)));
-          float4 uw0 = __bfloat1642float4(load_nontemporal_bfloat164(addr(UW0, k)));
-          float4 uw1 = __bfloat1642float4(load_nontemporal_bfloat164(addr(UW1, k)));
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float4 x = __bfloat1642float4(*(const bfloat164*)(addr(Xps[b], k)));
 
-          // accumulate for the variance
-          dot4(var_x, x, x);
+            // accumulate for the variance
+            dot4(var_xs[b], x, x);
 
-          // multiply with normalization weights
-          x.x = x.x * nw.x;
-          x.y = x.y * nw.y;
-          x.z = x.z * nw.z;
-          x.w = x.w * nw.w;
+            // multiply with normalization weights
+            x.x = x.x * nw.x;
+            x.y = x.y * nw.y;
+            x.z = x.z * nw.z;
+            x.w = x.w * nw.w;
 
-          dot4(gacc0, gw0, x);
-          dot4(gacc1, gw1, x);
-          dot4(uacc0, uw0, x);
-          dot4(uacc1, uw1, x);
+            for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+              dot4(gaccs[b][r], gws[r], x);
+              dot4(uaccs[b][r], uws[r], x);
+            }
+          }
 
           k += 4;
         }
+
         if (k + 1 < K) {
           // vectorized
-          float2 x = __bfloat1622float2(*(const __hip_bfloat162*)(addr(X, k)));
+          float2 gws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            gws[r] = __bfloat1622float2(load_nontemporal_bfloat162(addr(GWs[r], k)));
+          }
+          float2 uws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            uws[r] = __bfloat1622float2(load_nontemporal_bfloat162(addr(UWs[r], k)));
+          }
+  
           float2 nw = __bfloat1622float2(*(const __hip_bfloat162*)(addr(NW, k))) + weights_offset;
 
-          float2 gw0 = __bfloat1622float2(load_nontemporal_bfloat162(addr(GW0, k)));
-          float2 gw1 = __bfloat1622float2(load_nontemporal_bfloat162(addr(GW1, k)));
-          float2 uw0 = __bfloat1622float2(load_nontemporal_bfloat162(addr(UW0, k)));
-          float2 uw1 = __bfloat1622float2(load_nontemporal_bfloat162(addr(UW1, k)));
-  
-          // accumulate for the variance
-          dot2(var_x, x, x);
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float2 x = __bfloat1622float2(*(const __hip_bfloat162*)(addr(Xps[b], k)));
 
-          // multiply with normalization weights
-          x.x = x.x * nw.x;
-          x.y = x.y * nw.y;
+            // accumulate for the variance
+            dot2(var_xs[b], x, x);
 
-          dot2(gacc0, gw0, x);
-          dot2(gacc1, gw1, x);
-          dot2(uacc0, uw0, x);
-          dot2(uacc1, uw1, x);
+            // multiply with normalization weights
+            x.x = x.x * nw.x;
+            x.y = x.y * nw.y;
+
+            for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+              dot2(gaccs[b][r], gws[r], x);
+              dot2(uaccs[b][r], uws[r], x);
+            }
+          }
 
           k += 2;
         }
 
         if (k < K) {
           // remainder
-          float x = __bfloat162float(*addr(X,k));
+
+          float gws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            gws[r] = __bfloat162float(*addr(GWs[r], k));
+          }
+          float uws[FUSED_ROWS_PER_BLOCK];
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            uws[r] = __bfloat162float(*addr(UWs[r], k));
+          }
+
           float nw = __bfloat162float(*addr(NW,k)) + weights_offset;
 
-          float gw0 = __bfloat162float(*addr(GW0,k));
-          float gw1 = __bfloat162float(*addr(GW1,k));
-          float uw0 = __bfloat162float(*addr(UW0,k));
-          float uw1 = __bfloat162float(*addr(UW1,k));
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            float x = __bfloat162float(*addr(Xps[b], k));
 
-          // accumulate for the variance
-          var_x += x * x;
+            // accumulate for the variance
+            var_xs[b] += x * x;
 
-          // multiply with normalization weights
-          x *= nw;
+            // multiply with normalization weights
+            x *= nw;
 
-          gacc0 += gw0 * x;
-          gacc1 += gw1 * x;
-          uacc0 += uw0 * x;
-          uacc1 += uw1 * x;
+            for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+              gaccs[b][r] += gws[r] * x;
+              uaccs[b][r] += uws[r] * x;
+            }
+          }
         }
       }
 
       // warp reduce
-      var_x = warpReduce(var_x);
-      gacc0 = warpReduce(gacc0);
-      gacc1 = warpReduce(gacc1);
-      uacc0 = warpReduce(uacc0);
-      uacc1 = warpReduce(uacc1);
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        var_xs[b] = warpReduce(var_xs[b]);
+        for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+          gaccs[b][r] = warpReduce(gaccs[b][r]);
+          uaccs[b][r] = warpReduce(uaccs[b][r]);
+        }
+      }
 
       // reduce accross warps
       if (laneId == 0) {
-        atomicAdd(&shared_var_x, var_x);
-        atomicAdd(&shared_gaccs[0], gacc0);
-        atomicAdd(&shared_gaccs[1], gacc1);
-        atomicAdd(&shared_uaccs[0], uacc0);
-        atomicAdd(&shared_uaccs[1], uacc1);
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          atomicAdd(&shared_var_x[b], var_xs[b]);
+          for (int r = 0; r < FUSED_ROWS_PER_BLOCK; r++) {
+            atomicAdd(&shared_gaccs[b][r], gaccs[b][r]);
+            atomicAdd(&shared_uaccs[b][r], uaccs[b][r]);
+          }
+        }
       }
     } else {
       for (int i = 0; i < FUSED_ROWS_PER_BLOCK; i++) {
@@ -556,55 +691,81 @@ __global__ void muillm_gateupmlp_gemv_norm_inputs_bf16_kernel(
 
         const __hip_bfloat16* GW_ = &GW[current_row * K];
         const __hip_bfloat16* UW_ = &UW[current_row * K];
-      
-        // do the dot product
-        float gacc = 0.f;
-        float uacc = 0.f;
 
+        const __hip_bfloat16* Xps[BATCH_SIZE];
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          Xps[b] = &X[b * K];
+        }
+      
+        float gaccs[BATCH_SIZE];
+        float uaccs[BATCH_SIZE];
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          gaccs[b] = 0.f;
+          uaccs[b] = 0.f;
+        }
+
+        // do the dot product
         if (i == 0) {
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
-            float x =  __bfloat162float(X[k]);
-            float nw = __bfloat162float(NW[k]) + weights_offset;
-
-            // accumuate the variance
-            var_x += x * x;
-
-            // multiply with normalization weights
-            x *= nw;
-
             float gw = __bfloat162float(GW_[k]);
             float uw = __bfloat162float(UW_[k]);
-            gacc += gw * x;
-            uacc += uw * x;
+            float nw = __bfloat162float(NW[k]) + weights_offset;
+
+            for (int b = 0; b < BATCH_SIZE; b++) {
+              float x = __bfloat162float(*addr(Xps[b], k));
+
+              // accumuate the variance
+              var_xs[b] += x * x;
+
+              // multiply with normalization weights
+              x *= nw;
+
+              gaccs[b] += gw * x;
+              uaccs[b] += uw * x;
+            }
           }
         } else {
           for (int k = threadIdx.x; k < K; k += THREADS_PER_BLOCK) {
-            float x =  __bfloat162float(X[k]);
-            float nw = __bfloat162float(NW[k]) + weights_offset;
-
-            // don't accumulate the variance (we already have done it with i == 0)
-
-            // multiply with normalization weights
-            x *= nw;
-
             float gw = __bfloat162float(GW_[k]);
             float uw = __bfloat162float(UW_[k]);
+            float nw = __bfloat162float(NW[k]) + weights_offset;
 
-            gacc += gw * x;
-            uacc += uw * x;
+            for (int b = 0; b < BATCH_SIZE; b++) {
+              float x = __bfloat162float(*addr(Xps[b], k));
+
+              // don't accumulate the variance (we already have done it with i == 0)
+
+              // multiply with normalization weights
+              x *= nw;
+
+              gaccs[b] += gw * x;
+              uaccs[b] += uw * x;
+            }
           }
         }
 
         // warp reduce
-        var_x = warpReduce(var_x);
-        gacc = warpReduce(gacc);
-        uacc = warpReduce(uacc);
+        if (i == 0) {
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            var_xs[b] = warpReduce(var_xs[b]);
+          }
+        }
+        for (int b = 0; b < BATCH_SIZE; b++) {
+          gaccs[b] = warpReduce(gaccs[b]);
+          uaccs[b] = warpReduce(uaccs[b]);
+        }
 
         // reduce accross warps
         if (laneId == 0) {
-          atomicAdd(&shared_var_x, var_x);
-          atomicAdd(&shared_gaccs[i], gacc);
-          atomicAdd(&shared_uaccs[i], uacc);
+          if (i == 0) {
+            for (int b = 0; b < BATCH_SIZE; b++) {
+              atomicAdd(&shared_var_x[b], var_xs[b]);
+            }
+          }
+          for (int b = 0; b < BATCH_SIZE; b++) {
+            atomicAdd(&shared_gaccs[b][i], gaccs[b]);
+            atomicAdd(&shared_uaccs[b][i], uaccs[b]);
+          }
         }
       }
     }
@@ -616,36 +777,388 @@ __global__ void muillm_gateupmlp_gemv_norm_inputs_bf16_kernel(
 
   // write out the results
   {
-    float rsqrt_var = rsqrtf(shared_var_x * scale);
-
     if (threadIdx.x >= FUSED_ROWS_PER_BLOCK)
       return;
 
     int current_row = blockIdx.x * FUSED_ROWS_PER_BLOCK + threadIdx.x;
 
     if (current_row < N) {
-      float gacc = shared_gaccs[threadIdx.x] * rsqrt_var; // read the fully reduced value and scale
-      float uacc = shared_uaccs[threadIdx.x] * rsqrt_var; // read the fully reduced value and scale
-      float acc;
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        float rsqrt_var = rsqrtf(shared_var_x[b] * scale);
+        float gacc = shared_gaccs[b][threadIdx.x] * rsqrt_var; // read the fully reduced value and scale
+        float uacc = shared_uaccs[b][threadIdx.x] * rsqrt_var; // read the fully reduced value and scale
+        float acc;
 
-      if (activation == MuiGateUpMLPActivation::SILU) {
-        acc = silu(gacc) * uacc;
-      } else if (activation == MuiGateUpMLPActivation::GELU_TANH) {
-        acc = gelu_tanh(gacc) * uacc;
-      } else {
-        // unsupported activation
-        acc = 0.f;
+        if (activation == MuiGateUpMLPActivation::SILU) {
+          acc = silu(gacc) * uacc;
+        } else if (activation == MuiGateUpMLPActivation::GELU_TANH) {
+          acc = gelu_tanh(gacc) * uacc;
+        } else {
+          // unsupported activation
+          acc = 0.f;
+        }
+
+        // write the output value
+        Y[(b * N) + current_row] = __float2bfloat16(acc);
       }
-
-      // write the output value
-      Y[current_row] = __float2bfloat16(acc);
     }
+  }
+}
+
+template<int BATCH_SIZE, int FUSED_ROWS_PER_BLOCK>
+__global__ void muillm_gateupmlp_gemv_norm_inputs_bf16_kernel(
+    const __hip_bfloat16* __restrict__ NW, // input normalization weights matrix - size K
+    const __hip_bfloat16* __restrict__ GW, // weight matrix - size N x K
+    const __hip_bfloat16* __restrict__ UW, // weight matrix - size N x K
+    const __hip_bfloat16* __restrict__ X, // input = size B x K
+    __hip_bfloat16* __restrict__ Y, // output - size B x N
+    unsigned N,
+    unsigned K,
+    float epsilon,
+    float weights_offset,
+    float scale,
+    MuiGateUpMLPActivation activation
+) {
+  if (warpSize == 32) {
+    constexpr int THREADS_PER_BLOCK = 32 * 4;
+    muillm_gateupmlp_gemv_norm_inputs_bf16_func<THREADS_PER_BLOCK, BATCH_SIZE, FUSED_ROWS_PER_BLOCK>(
+      NW, GW, UW, X, Y, N, K, epsilon, weights_offset, scale, activation);
+  } else if (warpSize == 64) {
+    constexpr int THREADS_PER_BLOCK = 64 * 4;
+    muillm_gateupmlp_gemv_norm_inputs_bf16_func<THREADS_PER_BLOCK, BATCH_SIZE, FUSED_ROWS_PER_BLOCK>(
+      NW, GW, UW, X, Y, N, K, epsilon, weights_offset, scale, activation);
+  }
+}
+
+template<int BATCH_SIZE_OFFSET, int FUSED_ROWS_PER_BLOCK>
+static inline void call_gateup_gemv_norm_kernel(
+    int num_blocks,
+    int threads_per_blocks,
+    hipStream_t stream,
+    const __hip_bfloat16* norm_weights,
+    const __hip_bfloat16* gate_weights,
+    const __hip_bfloat16* up_weights,
+    const __hip_bfloat16* x,
+    __hip_bfloat16* y,
+    unsigned B,
+    unsigned N,
+    unsigned K,
+    float epsilon,
+    float norm_weights_offset,
+    float scale,
+    MuiGateUpMLPActivation activation
+) {
+  if (B == (BATCH_SIZE_OFFSET + 1)) {
+    constexpr int BATCH_SIZE = (BATCH_SIZE_OFFSET + 1);
+    muillm_gateupmlp_gemv_norm_inputs_bf16_kernel<BATCH_SIZE, FUSED_ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      norm_weights,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset,
+      scale,
+      activation
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 2)) {
+    constexpr int BATCH_SIZE = (BATCH_SIZE_OFFSET + 2);
+    muillm_gateupmlp_gemv_norm_inputs_bf16_kernel<BATCH_SIZE, FUSED_ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      norm_weights,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset,
+      scale,
+      activation
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 3)) {
+    constexpr int BATCH_SIZE = (BATCH_SIZE_OFFSET + 3);
+    muillm_gateupmlp_gemv_norm_inputs_bf16_kernel<BATCH_SIZE, FUSED_ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      norm_weights,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset,
+      scale,
+      activation
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 4)) {
+    constexpr int BATCH_SIZE = (BATCH_SIZE_OFFSET + 4);
+    muillm_gateupmlp_gemv_norm_inputs_bf16_kernel<BATCH_SIZE, FUSED_ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      norm_weights,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset,
+      scale,
+      activation
+    );
+  } else {
+    throw std::runtime_error("Unsupported batch size for muillm_gateupmlp_gemv_norm_inputs_bf16_kernel");
+  }
+}
+
+template<int BATCH_SIZE_OFFSET, int FUSED_ROWS_PER_BLOCK>
+static inline void call_gateup_gemv_kernel(
+    int num_blocks,
+    int threads_per_blocks,
+    hipStream_t stream,
+    const __hip_bfloat16* gate_weights,
+    const __hip_bfloat16* up_weights,
+    const __hip_bfloat16* x,
+    __hip_bfloat16* y,
+    unsigned B,
+    unsigned N,
+    unsigned K,
+    MuiGateUpMLPActivation activation
+) {
+  if (B == (BATCH_SIZE_OFFSET + 1)) {
+    constexpr int BATCH_SIZE = (BATCH_SIZE_OFFSET + 1);
+    muillm_gateupmlp_gemv_bf16_kernel<BATCH_SIZE, FUSED_ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      N,
+      K,
+      activation
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 2)) {
+    constexpr int BATCH_SIZE = (BATCH_SIZE_OFFSET + 2);
+    muillm_gateupmlp_gemv_bf16_kernel<BATCH_SIZE, FUSED_ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      N,
+      K,
+      activation
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 3)) {
+    constexpr int BATCH_SIZE = (BATCH_SIZE_OFFSET + 3);
+    muillm_gateupmlp_gemv_bf16_kernel<BATCH_SIZE, FUSED_ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      N,
+      K,
+      activation
+    );
+  } else if (B == (BATCH_SIZE_OFFSET + 4)) {
+    constexpr int BATCH_SIZE = (BATCH_SIZE_OFFSET + 4);
+    muillm_gateupmlp_gemv_bf16_kernel<BATCH_SIZE, FUSED_ROWS_PER_BLOCK><<<num_blocks, threads_per_blocks, 0, stream>>>(
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      N,
+      K,
+      activation
+    );
+  } else {
+    throw std::runtime_error("Unsupported batch size for muillm_gateupmlp_gemv_bf16_kernel");
+  }
+}
+
+template<int FUSED_ROWS_PER_BLOCK>
+static inline void call_gateup_gemv_norm_kernel_batch_mux(
+    int num_blocks,
+    int threads_per_blocks,
+    hipStream_t stream,
+    const __hip_bfloat16* norm_weights,
+    const __hip_bfloat16* gate_weights,
+    const __hip_bfloat16* up_weights,
+    const __hip_bfloat16* x,
+    __hip_bfloat16* y,
+    unsigned B,
+    unsigned N,
+    unsigned K,
+    float epsilon,
+    float norm_weights_offset,
+    float scale,
+    MuiGateUpMLPActivation activation
+) {
+  if (B <= 4) {
+    constexpr int BATCH_SIZE_OFFSET = 0;
+    call_gateup_gemv_norm_kernel<BATCH_SIZE_OFFSET, FUSED_ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      B,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset,
+      scale,
+      activation
+    );
+  } else if (B <= 8) {
+    constexpr int BATCH_SIZE_OFFSET = 4;
+    call_gateup_gemv_norm_kernel<BATCH_SIZE_OFFSET, FUSED_ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      B,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset,
+      scale,
+      activation
+    );
+  } else if (B <= 12) {
+    constexpr int BATCH_SIZE_OFFSET = 8;
+    call_gateup_gemv_norm_kernel<BATCH_SIZE_OFFSET, FUSED_ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      B,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset,
+      scale,
+      activation
+    );
+  } else if (B <= 16) {
+    constexpr int BATCH_SIZE_OFFSET = 12;
+    call_gateup_gemv_norm_kernel<BATCH_SIZE_OFFSET, FUSED_ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      B,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset,
+      scale,
+      activation
+    );
+  } else {
+    throw std::runtime_error("Unsupported batch size for muillm_gateupmlp_gemv_norm_inputs_bf16_kernel");
+  }
+}
+
+
+template<int FUSED_ROWS_PER_BLOCK>
+static inline void call_gateup_gemv_kernel_batch_mux(
+    int num_blocks,
+    int threads_per_blocks,
+    hipStream_t stream,
+    const __hip_bfloat16* gate_weights,
+    const __hip_bfloat16* up_weights,
+    const __hip_bfloat16* x,
+    __hip_bfloat16* y,
+    unsigned B,
+    unsigned N,
+    unsigned K,
+    MuiGateUpMLPActivation activation
+) {
+  if (B <= 4) {
+    constexpr int BATCH_SIZE_OFFSET = 0;
+    call_gateup_gemv_kernel<BATCH_SIZE_OFFSET, FUSED_ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      B,
+      N,
+      K,
+      activation
+    );
+  } else if (B <= 8) {
+    constexpr int BATCH_SIZE_OFFSET = 4;
+    call_gateup_gemv_kernel<BATCH_SIZE_OFFSET, FUSED_ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      B,
+      N,
+      K,
+      activation
+    );
+  } else if (B <= 12) {
+    constexpr int BATCH_SIZE_OFFSET = 8;
+    call_gateup_gemv_kernel<BATCH_SIZE_OFFSET, FUSED_ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      B,
+      N,
+      K,
+      activation
+    );
+  } else if (B <= 16) {
+    constexpr int BATCH_SIZE_OFFSET = 12;
+    call_gateup_gemv_kernel<BATCH_SIZE_OFFSET, FUSED_ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      B,
+      N,
+      K,
+      activation
+    );
+  } else {
+    throw std::runtime_error("Unsupported batch size for muillm_gateupmlp_gemv_bf16_kernel");
   }
 }
 
 void muillm_gateupmlp_forward_bf16(
   hipStream_t stream,
   MuiGateUpMLPActivation activation,
+  unsigned B,
   unsigned N,
   unsigned K,
   const __hip_bfloat16* norm_weights,
@@ -655,13 +1168,15 @@ void muillm_gateupmlp_forward_bf16(
   const __hip_bfloat16* up_weights,
   const __hip_bfloat16* x,
   __hip_bfloat16* y,
-  int simd_lanes
+  int warp_size
 ) {
 
   bool normalize = norm_weights != nullptr;
 
+  constexpr int FUSED_ROWS_PER_BLOCK = 2;
+
   const int num_blocks = DIV_ROUND_UP(N, FUSED_ROWS_PER_BLOCK);
-  int threads_per_blocks = GEMV_THREADS_PER_BLOCK;
+  int threads_per_blocks = 4 * warp_size;
 
 
   // try to occupy enough to saturate memory bandwidth
@@ -674,81 +1189,36 @@ void muillm_gateupmlp_forward_bf16(
   if (normalize) {
     float scale = 1.f / K;
 
-    if (threads_per_blocks == 64) {
-      muillm_gateupmlp_gemv_norm_inputs_bf16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        norm_weights,
-        gate_weights,
-        up_weights,
-        x,
-        y,
-        N,
-        K,
-        epsilon,
-        norm_weights_offset,
-        scale,
-        activation
-      );
-    } else if (threads_per_blocks == 128) {
-      muillm_gateupmlp_gemv_norm_inputs_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        norm_weights,
-        gate_weights,
-        up_weights,
-        x,
-        y,
-        N,
-        K,
-        epsilon,
-        norm_weights_offset,
-        scale,
-        activation
-      );
-    } else if (threads_per_blocks == 256) {
-      muillm_gateupmlp_gemv_norm_inputs_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        norm_weights,
-        gate_weights,
-        up_weights,
-        x,
-        y,
-        N,
-        K,
-        epsilon,
-        norm_weights_offset,
-        scale,
-        activation
-      );
-    }
+    call_gateup_gemv_norm_kernel_batch_mux<FUSED_ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      norm_weights,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      B,
+      N,
+      K,
+      epsilon,
+      norm_weights_offset,
+      scale,
+      activation
+    );
   } else {
-
-    if (threads_per_blocks == 64) {
-      muillm_gateupmlp_gemv_bf16_kernel<64><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        gate_weights,
-        up_weights,
-        x,
-        y,
-        N,
-        K,
-        activation
-      );
-    } else if (threads_per_blocks == 128) {
-      muillm_gateupmlp_gemv_bf16_kernel<128><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        gate_weights,
-        up_weights,
-        x,
-        y,
-        N,
-        K,
-        activation
-      );
-    } else if (threads_per_blocks == 256) {
-      muillm_gateupmlp_gemv_bf16_kernel<256><<<num_blocks, threads_per_blocks, 0, stream>>>(
-        gate_weights,
-        up_weights,
-        x,
-        y,
-        N,
-        K,
-        activation
-      );
-    }
+    call_gateup_gemv_kernel_batch_mux<FUSED_ROWS_PER_BLOCK>(
+      num_blocks,
+      threads_per_blocks,
+      stream,
+      gate_weights,
+      up_weights,
+      x,
+      y,
+      B,
+      N,
+      K,
+      activation
+    );
   }
 }

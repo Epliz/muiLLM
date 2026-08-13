@@ -55,7 +55,7 @@ torch::Tensor MuiLLMLlama4Decoder::forward(
 
   auto mlp_out = this->mlp->forward(
     attention_out,
-    mlp_residual
+    /* residual */ mlp_residual
   );
 
   return mlp_out;

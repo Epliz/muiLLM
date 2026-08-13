@@ -53,7 +53,12 @@ torch::Tensor MuiLLMParallelGateUpDownMLPMoE::forward(
     TORCH_CHECK(false, "MuiLLMParallelGateUpDownMLPMoE not dispatchable");
   }
 
-  auto router_logits = this->router->forward(inputs, residual);
+  auto undef_tensor = torch::Tensor();
+  auto router_logits = this->router->forward(
+    inputs,
+    /* mul_residual */ undef_tensor,
+    /* residual */ residual
+  );
 
   auto [router_scores, router_indices] = muillm_topk_sigmoid_forward(
     router_logits,

@@ -58,7 +58,13 @@ torch::Tensor MuiLLMParallelLlama4Attention::forward(
 
 
   // o proj
-  auto proj_attn_output = this->o_proj->forward(attn_output, residual, /*collect_outputs*/ true);
+  auto undef_tensor = torch::Tensor();
+  auto proj_attn_output = this->o_proj->forward(
+    attn_output,
+    /* mul_residual */ undef_tensor,
+    /* residual */ residual,
+    /*collect_outputs*/ true
+  );
   return proj_attn_output;
 }
 

@@ -3,7 +3,8 @@
 
 enum mui_activation {
     Identity = 0,
-    Silu = 1
+    Silu = 1,
+    Gelu_Tanh = 2
 };
 
 #endif // __MUILLM_LINEAR_ACTIVATION_H__

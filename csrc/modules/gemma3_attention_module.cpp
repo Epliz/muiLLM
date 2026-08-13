@@ -50,7 +50,11 @@ torch::Tensor MuiLLMGemma3Attention::forward(
 
   // o proj
   auto undef_tensor = torch::Tensor();
-  auto proj_attn_output = this->o_proj->forward(attn_output, /* residual */ undef_tensor);
+  auto proj_attn_output = this->o_proj->forward(
+    attn_output,
+    /* mul_residual */ undef_tensor,
+    /* residual */ undef_tensor
+  );
   return proj_attn_output;
 }
 

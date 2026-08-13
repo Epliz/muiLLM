@@ -14,8 +14,8 @@ at::Tensor muillm_parallel_linear_forward_trampoline(
   std::optional<torch::Tensor> norm_weights_,
   float epsilon,
   float norm_weights_offset,
-  std::optional<torch::Tensor> mul_bias_,
   std::optional<torch::Tensor> add_bias_,
+  std::optional<torch::Tensor> mul_residual_,
   std::optional<torch::Tensor> residual_,
   int sharding_dim,
   bool reduce) {
@@ -24,7 +24,7 @@ at::Tensor muillm_parallel_linear_forward_trampoline(
   torch::Tensor empty_tensor_list;
 
   torch::Tensor& norm_weights = norm_weights_.has_value() ? norm_weights_.value() : empty_tensor_list;
-  torch::Tensor& mul_biases = mul_bias_.has_value() ? mul_bias_.value() : empty_tensor_list;
+  torch::Tensor& mul_residual = mul_residual_.has_value() ? mul_residual_.value() : empty_tensor_list;
   torch::Tensor& add_biases = add_bias_.has_value() ? add_bias_.value() : empty_tensor_list;
   torch::Tensor residual = residual_.has_value() ? residual_.value() : undef_tensor;
 
@@ -36,8 +36,8 @@ at::Tensor muillm_parallel_linear_forward_trampoline(
       norm_weights_offset,
       weights,
       mui_activation::Identity,
-      mul_biases,
       add_biases,
+      mul_residual,
       residual,
       sharding_dim,
       reduce,
@@ -57,8 +57,8 @@ at::Tensor muillm_parallel_linear_activ_forward(
     float norm_weights_offset,
     torch::Tensor& weights,
     mui_activation activ,
-    torch::Tensor& mul_bias,
     torch::Tensor& add_bias,
+    torch::Tensor& mul_residual,
     torch::Tensor& residual,
     int sharding_dim, // 0 for row-wise, 1 for column-wise
     bool reduce,
@@ -85,12 +85,14 @@ at::Tensor muillm_parallel_linear_activ_forward(
 
 
     const auto N = weights.size(0);
+    const auto B = x.numel() / x.size(x.dim() - 1);
 
     // for both row-wise sharding and column wise sharding,
     // we need the reduction/collection buffer to be big enough to hold the output of the linear layers
     // not the final output size (which for row-wise sharding is bigger)
     size_t in_count = N;
-    size_t output_count = sharding_dim == 1 ? N : (N * tp_level);
+    size_t output_count = sharding_dim == 1 ? in_count : (in_count * tp_level);
+    size_t reduce_count = B * output_count;
   
     auto dtype = x.dtype();
 
@@ -105,7 +107,7 @@ at::Tensor muillm_parallel_linear_activ_forward(
       TORCH_CHECK(false, "Unsupported dtype for all_reduce_sum");
     }
 
-    if ((muillm_error = muillm_comm_get_buffers(comm, in_count, datatype, &buffers, stream)) != MUILLM_COMM_SUCCESS) {
+    if ((muillm_error = muillm_comm_get_buffers(comm, reduce_count, datatype, &buffers, stream)) != MUILLM_COMM_SUCCESS) {
       TORCH_CHECK(false, "failed to get reduction buffers");
     }
 
@@ -130,9 +132,9 @@ at::Tensor muillm_parallel_linear_activ_forward(
       norm_weights_offset,
       weights,
       activ,
-      mul_bias,
       add_bias,
       // we apply the residual only on device 0
+      rank == 0 ? mul_residual : undef_tensor,
       rank == 0 ? residual : undef_tensor,
       x,
       buffers[rank],
@@ -149,7 +151,7 @@ at::Tensor muillm_parallel_linear_activ_forward(
         comm,
         (const void**) buffers,
         output_ptr,
-        output_count,
+        reduce_count,
         datatype,
         stream
         )) != MUILLM_COMM_SUCCESS) {
@@ -168,9 +170,9 @@ at::Tensor muillm_parallel_linear_activ_forward(
         norm_weights_offset,
         weights,
         activ,
-        mul_bias,
         add_bias,
         // we apply the residual only on device 0
+        rank == 0 ? mul_residual : undef_tensor,
         rank == 0 ? residual : undef_tensor,
         x
     );
