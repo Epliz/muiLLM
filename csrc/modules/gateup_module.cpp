@@ -56,19 +56,6 @@ torch::Tensor MuiLLMGateUpDownMLP::forward(
       residual,
       inputs
     );
-  } else if (this->method == gateupmlp_SPLIT) {
-    return muillm_gateupmlp_split_forward(
-      this->engine,
-      this->activation,
-      this->norm_weights,
-      this->variance_epsilon,
-      this->norm_weights_offset,
-      this->gate_weights,
-      this->up_weights,
-      this->down_weights,
-      residual,
-      inputs
-    );
   } else {
     TORCH_CHECK(false, "Unsupported method");
   }

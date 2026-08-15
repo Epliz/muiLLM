@@ -52,10 +52,6 @@ class _MuiGateUpMLPMethod(IntEnum):
     GATEUPMLP_UNFUSED = 0
     # Method where the Gate/Up projections + mul are all fused
     GATEUPMLP_FUSED = 1
-    # Method where the Gate/Up projections are done in the same kernel
-    # but split between blocks to have more blocks.
-    # A final reduction is done in an epilogue kernel
-    GATEUPMLP_SPLIT = 2
 
 
 class _MuiGateUpMLP(torch.autograd.Function):

@@ -230,41 +230,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::arg("reduce") = true
   );
 
-  m.def("muillm_gateupmlp_split_forward", &muillm_gateupmlp_split_forward_trampoline, "muillm gate up silu split K forward");
-  m.def("muillm_parallel_gateupmlp_split_forward", &muillm_parallel_gateupmlp_split_forward_trampoline, "muillm parallel gate up silu split K forward", 
-    // args
-    py::arg("engine"),
-    py::arg("comm"),
-    py::arg("activation"),
-    py::arg("norm_weights"),
-    py::arg("epsilon"),
-    py::arg("norm_weights_offset"),
-    py::arg("gate_weights"),
-    py::arg("up_weights"),
-    py::arg("down_weights"),
-    py::arg("residual"),
-    py::arg("x"),
-    py::arg("reduce") = true
-  );
-  m.def("muillm_parallel_gateupmlpmoe_split_forward", &muillm_parallel_gateupmlpmoe_split_forward_trampoline, "muillm parallel gate up silu moe split K forward",
-    // args
-    py::arg("engine"),
-    py::arg("comm"),
-    py::arg("num_shared_experts"),
-    py::arg("num_dynamic_experts"),
-    py::arg("norm_weights"),
-    py::arg("epsilon"),
-    py::arg("norm_weights_offset"),
-    py::arg("gate_weights"),
-    py::arg("up_weights"),
-    py::arg("down_weights"),
-    py::arg("residual"),
-    py::arg("x"),
-    py::arg("router_scores"),
-    py::arg("router_indices"),
-    py::arg("reduce") = true
-  );
-
   m.def("muillm_int8_gateupmlp_dequantize_forward", &muillm_int8_gateupmlp_dequantize_forward, "muillm int8 gate up dequantize");
   m.def("muillm_int8_gateupmlp_forward", &muillm_int8_gateupmlp_forward, "muillm int8 gate up silu forward");
   m.def("muillm_l2norm_forward", &muillm_l2norm_forward_trampoline, "muillm l2norm forward", py::arg("inputs"), py::arg("residual") = py::none(), py::arg("epsilon") = 0.f);
