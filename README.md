@@ -93,7 +93,7 @@ And install the library (creating a virtual environment beforehand is recommende
 pip install --upgrade build
 pip install wheel
 
-pip install -e . --no-build-isolation
+pip install -e . --no-build-isolation --build-temp ./temp/ -v
 ```
 
 To install optional dependencies required for the OpenAI-compatible FastAPI server:
@@ -111,6 +111,11 @@ Then you can run the tests, or one of the examples.
 
 The compilation can be accelerated by specifying for what GPU architecture you want to build instead of the default which is to compile for all supported targets.
 To do so, you can specify the `PYTORCH_ROCM_ARCH` environment variable, for example specifying `PYTORCH_ROCM_ARCH="gfx908,gfx942"` to compile only for MI100 and MI300.
+
+To build and save temporary compiler files (for debugging):
+```shell
+MUILLM_KEEP_TEMPS=1 python setup.py build_ext --inplace --build-temp ./temp/ -v
+```
 
 ## Tests
 
