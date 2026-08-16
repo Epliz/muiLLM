@@ -354,7 +354,9 @@ class MuiLlamaModel(LlamaPreTrainedModel, MuiModule):
             self.mdtype == torch.bfloat16
         )
         no_outputs = (not output_hidden_states) and (not output_attentions)
-        dispatchable_input = (batch_size == 1) and (q_len == 1) and dispatchable_dtype
+        # we can dispatch to C++ for all batch sizes (C++ module will fallback to torch if necessary),
+        # but q_len must be 1, and the cache to be of the right type
+        dispatchable_input = (q_len == 1) and dispatchable_dtype
         dispatchable_to_stack = (
             (self.cpp_module is not None)
             and no_outputs

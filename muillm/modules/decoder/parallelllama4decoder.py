@@ -239,9 +239,10 @@ class MuiParallelLlama4TextDecoderLayer(MuiModule):
             hidden_states = hidden_states[0]
 
         bsz, q_len, _ = hidden_states.size()
+        # we can dispatch to C++ for all batch sizes (C++ module will fallback to torch if necessary),
+        # but q_len must be 1, and the cache to be of the right type
         if (
             self.dispatchable
-            and (bsz == 1)
             and (q_len == 1)
             and isinstance(past_key_value, MuiCache)
         ):
