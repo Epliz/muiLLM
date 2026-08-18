@@ -1,4 +1,5 @@
 #include "../linear/linear.cuh"
+#include "../norm/rmsnorm.cuh"
 #include "gateup.cuh"
 
 #include <ATen/cuda/CUDAContext.h>
@@ -72,6 +73,16 @@ void muillm_gateupmlp_forward_bf16(
   int warp_size
 );
 
+at::Tensor muillm_rmsnorm_forward(
+    torch::Tensor weights,
+    torch::Tensor x,
+    torch::Tensor residual, // optional
+    float epsilon,
+    float weight_offset
+);
+
+#define MUILLM_PRENORM_BATCH_SIZE_THRESHOLD 4
+
 void muillm_gateupmlp_forward_placed_output(
     muillm_engine_t* engine,
     MuiGateUpMLPActivation activation,
@@ -106,6 +117,7 @@ void muillm_gateupmlp_forward_placed_output(
   const auto K = gate_weights.size(1);
   const auto Kx = x.size(x.dim() - 1);
   TORCH_CHECK(K == Kx, "gate_weights.size(1) must match x.size(-1)");
+
   const auto B = x.numel() / K;
   TORCH_CHECK(B <= MUILLM_GATEUP_KERNELS_MAX_BATCH_SIZE, "Unsupported batch size for fused gateup kernels");
 
@@ -114,9 +126,16 @@ void muillm_gateupmlp_forward_placed_output(
     TORCH_CHECK(K == norm_k, "fused normalization is not supported when sharding on dim 1 (K != norm_weights.size(0))");
   }
 
+  auto undef_tensor = torch::Tensor();
+
+  // for bigger batch sizes, we pre-normalize the input as otherwise it is a lot of redundant
+  // normalization computations, and also it makes the kernels consume a lot of VGPRs
+  auto x_ = (normalize && B > MUILLM_PRENORM_BATCH_SIZE_THRESHOLD) ? muillm_rmsnorm_forward(norm_weights, x, undef_tensor, epsilon, norm_weights_offset): x;
+  normalize = (normalize && B > MUILLM_PRENORM_BATCH_SIZE_THRESHOLD) ? false : normalize;
+
   // y has the same dimensions as x, except the last dim that is given by
   // the out_features of weights
-  auto output_sizes = x.sizes().vec();
+  auto output_sizes = x_.sizes().vec();
   output_sizes[output_sizes.size() - 1] = N;
 
   auto y = torch::empty(output_sizes, output_options);
@@ -135,7 +154,7 @@ void muillm_gateupmlp_forward_placed_output(
         norm_weights_offset,
         (const half*)gate_weights.data_ptr(),
         (const half*)up_weights.data_ptr(),
-        (const half*)x.data_ptr(),
+        (const half*)x_.data_ptr(),
         (half*)y.data_ptr(),
         warp_size
     );
@@ -151,7 +170,7 @@ void muillm_gateupmlp_forward_placed_output(
         norm_weights_offset,
         (const __hip_bfloat16*)gate_weights.data_ptr(),
         (const __hip_bfloat16*)up_weights.data_ptr(),
-        (const __hip_bfloat16*)x.data_ptr(),
+        (const __hip_bfloat16*)x_.data_ptr(),
         (__hip_bfloat16*)y.data_ptr(),
         warp_size
     );
@@ -160,7 +179,6 @@ void muillm_gateupmlp_forward_placed_output(
   }
 
   // down proj
-  auto undef_tensor = torch::Tensor();
 
   muillm_linear_activ_forward_placed_output(
       engine,
