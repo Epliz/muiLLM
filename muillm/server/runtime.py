@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+import json
 import multiprocessing as mp
 import os
 import threading
@@ -12,7 +13,7 @@ import torch.distributed as dist
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from muillm.engine import init_engine
-from muillm.server.chatcompletion import ChatCompletionFunctionTool, ChatCompletionRequest, ChatCompletionResult, ChatMessage
+from muillm.server.chatcompletion import ChatCompletionFunctionTool, ChatCompletionJsonSchemaResponseFormat, ChatCompletionRequest, ChatCompletionResult, ChatMessage
 from muillm.server.defaults import DEFAULT_MAX_CONTEXT_LENGTH, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_TEMPERATURE, DEFAULT_TOP_P
 from muillm.server.filehelpers import read_file_content
 from muillm.server.idutils import generate_id
@@ -26,12 +27,18 @@ def detect_tp_size(requested: Optional[int]) -> int:
         return max(1, torch.cuda.device_count())
     return 1
 
-def _messages_to_prompt(tokenizer: Any, messages: Sequence[ChatMessage], tools: Optional[List[ChatCompletionFunctionTool]]) -> str:
+def _messages_to_prompt(
+        tokenizer: Any,
+        messages: Sequence[ChatMessage],
+        tools: Optional[List[ChatCompletionFunctionTool]],
+        output_schema: Optional[str] = None
+) -> str:
     if hasattr(tokenizer, "apply_chat_template"):
         try:
             return tokenizer.apply_chat_template(
                 convert_to_hf_messages(messages),
                 tools=convert_to_hf_tools(tools),
+                output_schema=output_schema,
                 tokenize=False,
                 add_generation_prompt=True,
             )
@@ -46,17 +53,37 @@ def get_num_completions(payload: ChatCompletionRequest) -> int:
 
     return 1
 
-def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest], device: torch.device, rank: int, profile: bool) -> List[List[str]]:
+def get_output_schema(payload: ChatCompletionRequest) -> Optional[str]:
+    if payload.response_format is not None and isinstance(payload.response_format, ChatCompletionJsonSchemaResponseFormat):
+        return json.dumps(payload.response_format.output_json_schema)
+
+    return None
+
+def get_structured_output_format(payload: ChatCompletionRequest) -> Optional[ChatCompletionJsonSchemaResponseFormat]:
+    if payload.response_format is not None and isinstance(payload.response_format, ChatCompletionJsonSchemaResponseFormat):
+        return payload.response_format
+
+    return None
+
+def validate_structured_output(content: str, output_json_schema: dict) -> None:
+    from jsonschema import validate, ValidationError
+
+    try:
+        validate(instance=json.loads(content), schema=output_json_schema)
+    except ValidationError as e:
+        raise ValueError(f"Parsed content does not match the output schema: {e.message}")
+
+def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest], device: torch.device, rank: int, profile: bool) -> List[str]:
     # TODO: check that all generation args are the same
     generation_args = build_generation_args(payloads[0])
 
-    # apply the chat template to each prompt, and replicate prompts according to N
-    # for each requests
+    # apply the chat template
     prompts = [
         _messages_to_prompt(
             tokenizer,
             payload.messages,
             payload.tools,
+            get_output_schema(payload)
         )
         for payload in payloads
         for _ in range(get_num_completions(payload))
@@ -211,9 +238,19 @@ def _worker_entrypoint(
             # Only rank 0 returns the result
             all_parsed_responses: List[List[ChatMessage]] = []
             for r, response_texts in enumerate(response_texts_per_request):
+                payload = payloads[r]
+
+                output_schema = get_structured_output_format(payload)
+                strict_output_schema = output_schema.strict if output_schema is not None else False
+
                 parsed_responses: List[ChatMessage] = []
                 for response_text in response_texts:
                     parsed_response = output_parser.parse(response_text)
+
+                    if strict_output_schema:
+                        # check that the parsed response matches the output schema
+                        validate_structured_output(parsed_response.content, output_schema.output_json_schema)
+
                     parsed_responses.append(parsed_response)
 
                 print(f"Request {r} parsed responses: {parsed_responses}")

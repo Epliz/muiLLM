@@ -160,6 +160,7 @@ setup(
         "server": [
             "fastapi>=0.110.0",
             "uvicorn>=0.29.0",
+            "jsonschema", # for structured output validation
             "peft", # for LoRa support
         ]
     },

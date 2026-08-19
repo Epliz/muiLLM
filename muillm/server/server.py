@@ -129,6 +129,7 @@ def build_app(manager: ModelWorkerManager) -> FastAPI:
             model=request.model or manager.served_model_id,
             messages=request.messages,
             tools=request.tools,
+            response_format=request.response_format,
             tool_choice=request.tool_choice,
             n=request.n,
             max_tokens=manager.max_tokens(request.max_tokens),
