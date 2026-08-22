@@ -82,6 +82,8 @@ class ChatCompletionRequest(BaseModel):
     tools: Optional[List[Annotated[ToolUnion, Field(discriminator="type")]]] = None
     tool_choice: Optional[Literal["none", "auto", "manual"]] = "auto"
 
+    # number of completions to generate for each prompt
+    n: Optional[int] = None
     # generation parameters
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
@@ -91,4 +93,5 @@ class ChatCompletionRequest(BaseModel):
 class ChatCompletionResult(BaseModel):
     request_id: Optional[str] = None
 
-    response: Annotated[ChatMessageTypes, Field(discriminator="role")]
+    # N completions are returned for each request, where N is the value of the `n` parameter in the request
+    responses: List[Annotated[ChatMessageTypes, Field(discriminator="role")]] = Field(default_factory=list)

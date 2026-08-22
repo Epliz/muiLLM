@@ -40,15 +40,30 @@ def _messages_to_prompt(tokenizer: Any, messages: Sequence[ChatMessage], tools: 
 
     return "\n".join(f"{message['role']}: {message['content']}" for message in messages)
 
-def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest], device: torch.device, rank: int, profile: bool) -> List[str]:
+def get_num_completions(payload: ChatCompletionRequest) -> int:
+    if payload.n is not None and payload.n > 0:
+        return payload.n
+
+    return 1
+
+def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest], device: torch.device, rank: int, profile: bool) -> List[List[str]]:
     # TODO: check that all generation args are the same
     generation_args = build_generation_args(payloads[0])
 
-    # apply the chat template
-    prompts = [_messages_to_prompt(tokenizer, payload.messages, payload.tools) for payload in payloads]
+    # apply the chat template to each prompt, and replicate prompts according to N
+    # for each requests
+    prompts = [
+        _messages_to_prompt(
+            tokenizer,
+            payload.messages,
+            payload.tools,
+        )
+        for payload in payloads
+        for _ in range(get_num_completions(payload))
+    ]
 
     print("-----")
-    print(f"Prompts:")
+    print(f"Flattened prompts:")
     for i, prompt in enumerate(prompts):
         print("--")
         print(f"Prompt {i}: {prompt}")
@@ -96,8 +111,15 @@ def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest],
         print("--")
     print("-----")
 
-    # output will be parsed on rank 0
-    return texts
+    # outputs will be parsed on rank 0
+    offset = 0
+    outputs = []
+    for payload in payloads:
+        n = get_num_completions(payload)
+        outputs.append(texts[offset:offset + n])
+        offset += n
+
+    return outputs
 
 def build_generation_args(payload: ChatCompletionRequest) -> Dict[str, Any]:
     max_tokens = payload.max_tokens
@@ -183,26 +205,29 @@ def _worker_entrypoint(
         if payloads is None:
             break
 
-        response_texts = _generate(model, tokenizer, payloads, device, rank, profile)
+        response_texts_per_request = _generate(model, tokenizer, payloads, device, rank, profile)
 
         if rank == 0:
             # Only rank 0 returns the result
-            parsed_responses = []
-            for response_text in response_texts:
-                parsed_response = output_parser.parse(response_text)
-                parsed_responses.append(parsed_response)
+            all_parsed_responses: List[List[ChatMessage]] = []
+            for r, response_texts in enumerate(response_texts_per_request):
+                parsed_responses: List[ChatMessage] = []
+                for response_text in response_texts:
+                    parsed_response = output_parser.parse(response_text)
+                    parsed_responses.append(parsed_response)
 
-                print(f"Parsed response: {parsed_response}")
+                print(f"Request {r} parsed responses: {parsed_responses}")
+                all_parsed_responses.append(parsed_responses)
 
-            responses = [
+            all_responses = [
                 ChatCompletionResult(
                     request_id=payload.request_id,
-                    response=parsed_response
+                    responses=parsed_responses
                 )
-                for payload, parsed_response in zip(payloads, parsed_responses)
+                for payload, parsed_responses in zip(payloads, all_parsed_responses)
             ]
 
-            response_queue.put(responses)
+            response_queue.put(all_responses)
 
 def create_output_parser(model, output_parser_name: Optional[str]) -> OutputParser:
     return OutputParser.create_output_parser(model.__class__.__name__, output_parser_name)
