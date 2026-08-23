@@ -8,6 +8,8 @@ _LLAMA3_THINKING_START = "<thoughts>"
 _LLAMA3_THINKING_END = "</thoughts>"
 _LLAMA3_THINKING_TOOL_CALL_START = "<tool_call>"
 _LLAMA3_THINKING_TOOL_CALL_END = "</tool_call>"
+_LLAMA3_THINKING_STRUCTURED_OUTPUT_START = "<structured_output>"
+_LLAMA3_THINKING_STRUCTURED_OUTPUT_END = "</structured_output>"
 _LLAMA3_THINKING_END_OF_TURN = "<|eot_id|>"
 
 class Llama3ThinkingOutputParser(OutputParser):
@@ -96,16 +98,48 @@ class Llama3ThinkingOutputParser(OutputParser):
 
         return content.strip(), tool_calls
 
+    def _extract_structured_output(self, content: str) -> tuple[str, dict]:
+        """
+        Extract the structured output from the text, if present.
+        """
+        structured_output = None
+
+        start_index = content.find(_LLAMA3_THINKING_STRUCTURED_OUTPUT_START)
+        end_index = content.find(_LLAMA3_THINKING_STRUCTURED_OUTPUT_END)
+
+        if start_index != -1 and end_index != -1:
+            # There is both the beginning and end tags
+            structured_output_content = content[start_index + len(_LLAMA3_THINKING_STRUCTURED_OUTPUT_START):end_index].strip()
+
+            try:
+                structured_output = json.loads(structured_output_content)
+            except Exception as e:
+                print(f"Error parsing structured output JSON: {e}. Content: {structured_output_content}")
+
+            # remove the structured output from the content string
+            content = content[:start_index] + content[end_index + len(_LLAMA3_THINKING_STRUCTURED_OUTPUT_END):]
+
+        return content.strip(), structured_output
+
     def parse(self, content: str) -> ChatMessage:
         # Remove end markers if present
         content = self._remove_end_of_turn_markers(content)
+        # Keep a copy of the original content (before parsing tool calls and structured output)
+        unparsed_content = content
 
         # Extract the reasoning content from the text
         reasoning_content, content = self._extract_reasoning_content(content)
 
         content, tool_calls = self._extract_tool_calls(content)
 
+        content, structured_output = self._extract_structured_output(content)
+
+        if structured_output is not None:
+            # If the structured output is present, it replaces the content of the message
+            content = json.dumps(structured_output)
+
         return ChatCompletionAssistantMessage(
+            unparsed_content=unparsed_content,
             reasoning_content=reasoning_content,
             content=content,
             tool_calls=tool_calls,

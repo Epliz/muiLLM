@@ -2,7 +2,7 @@ from abc import ABC
 from typing import Annotated, ClassVar, List, Literal, Optional, Union
 from typing_extensions import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ChatCompletionToolCall(BaseModel, ABC):
@@ -30,6 +30,11 @@ class ChatMessage(BaseModel, ABC):
 
     reasoning_content: Optional[str] = None
     content: str
+
+    # unparsed_content is the original content before
+    # parsing tool calls and structured output
+    # useful during training to precisely reconstruct the model output
+    unparsed_content: Optional[str] = None
 
 class ChatCompletionSystemMessage(ChatMessage):
     role: Literal["system"] = "system"
@@ -71,6 +76,28 @@ class ChatCompletionFunctionTool(ChatCompletionTool):
 # Union of all tool types
 ToolUnion = Union[ChatCompletionFunctionTool]
 
+class ChatCompletionResponseFormat(BaseModel, ABC):
+    type: ClassVar[str]
+
+class ChatCompletionTextResponseFormat(ChatCompletionResponseFormat):
+    type: Literal["text"] = "text"
+
+class ChatCompletionJsonSchemaResponseFormat(ChatCompletionResponseFormat):
+    model_config = ConfigDict(populate_by_name=True)
+
+    type: Literal["json_schema"] = "json_schema"
+
+    output_schema_name: Optional[str] = Field(default=None, alias="name")
+    description: Optional[str] = None
+
+    # JSON schema for the response,
+    # following OpenAI's function calling spec
+    output_json_schema: Optional[dict] = Field(default=None, alias="json_schema")
+
+    strict: Optional[bool] = False
+
+ResponseFormatUnion = Union[ChatCompletionTextResponseFormat, ChatCompletionJsonSchemaResponseFormat]
+
 class ChatCompletionRequest(BaseModel):
     request_id: Optional[str] = None
 
@@ -82,6 +109,11 @@ class ChatCompletionRequest(BaseModel):
     tools: Optional[List[Annotated[ToolUnion, Field(discriminator="type")]]] = None
     tool_choice: Optional[Literal["none", "auto", "manual"]] = "auto"
 
+    response_format: Optional[Annotated[ResponseFormatUnion, Field(discriminator="type")]] = ChatCompletionTextResponseFormat()
+
+    # number of completions to generate for each prompt
+    n: Optional[int] = None
+
     # generation parameters
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
@@ -91,4 +123,5 @@ class ChatCompletionRequest(BaseModel):
 class ChatCompletionResult(BaseModel):
     request_id: Optional[str] = None
 
-    response: Annotated[ChatMessageTypes, Field(discriminator="role")]
+    # N completions are returned for each request, where N is the value of the `n` parameter in the request
+    responses: List[Annotated[ChatMessageTypes, Field(discriminator="role")]] = Field(default_factory=list)

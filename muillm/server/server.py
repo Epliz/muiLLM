@@ -129,7 +129,9 @@ def build_app(manager: ModelWorkerManager) -> FastAPI:
             model=request.model or manager.served_model_id,
             messages=request.messages,
             tools=request.tools,
+            response_format=request.response_format,
             tool_choice=request.tool_choice,
+            n=request.n,
             max_tokens=manager.max_tokens(request.max_tokens),
             temperature=manager.temperature(request.temperature),
             top_p=manager.top_p(request.top_p),
@@ -153,8 +155,8 @@ def build_app(manager: ModelWorkerManager) -> FastAPI:
 
         result = results[0]
 
-        generation_response = result.response
-        print(f"response text {generation_response}")
+        generation_responses = result.responses
+        print(f"response text {generation_responses}")
 
         response = {
             "id": prepared_request.request_id,
@@ -163,10 +165,10 @@ def build_app(manager: ModelWorkerManager) -> FastAPI:
             "model": prepared_request.model,
             "choices": [
                 {
-                    "index": 0,
-                    "message": result.response.model_dump(),
+                    "index": i,
+                    "message": response.model_dump(),
                     "finish_reason": "stop",
-                }
+                } for i, response in enumerate(generation_responses)
             ],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
@@ -194,10 +196,11 @@ def build_app(manager: ModelWorkerManager) -> FastAPI:
             "model": prepared_request.model,
             "choices": [
                 {
-                    "index": 0,
-                    "message": result.response.model_dump(),
+                    "index": i,
+                    "message": response.model_dump(),
                     "finish_reason": "stop",
                 }
+                for i, response in enumerate(result.responses)
             ],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         } for prepared_request, result in zip(prepared_requests, results)]
