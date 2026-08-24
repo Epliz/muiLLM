@@ -209,8 +209,8 @@ def _worker_entrypoint(
     os.environ["MASTER_PORT"] = "29500"
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["RANK"] = str(rank)
+    os.environ["LOCAL_SIZE"] = str(world_size)
     os.environ["LOCAL_RANK"] = str(rank)
-
     if torch.cuda.is_available():
         torch.cuda.set_device(rank)
 
