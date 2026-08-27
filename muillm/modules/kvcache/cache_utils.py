@@ -55,6 +55,15 @@ def _get_num_key_value_heads(config: PretrainedConfig):
 class MuiCache:
     pass
 
+    def close(self) -> None:
+        self._deinit_cpp_module()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except (AttributeError, ImportError):
+            pass
+
     def sync_back(self):
         pass
 
@@ -692,7 +701,7 @@ class MuiStaticCache(StaticCache, MuiCache):
             # Note: `mark_static_address` is used to tag the cache as an fixed data pointer, preventing cuda graph
             # breaks when updating the cache.
 
-            # TODO: maybe unmark the previous cache?
+            # TODO: maybe unmark the previous cache if it creates memory leaks?
             torch._dynamo.mark_static_address(new_layer_key_cache)
             torch._dynamo.mark_static_address(new_layer_value_cache)
 
