@@ -79,9 +79,14 @@ def parse_args():
     group.add_argument("--max-output-length", dest="max_output_length", type=int, help="Maximum output length of one completion")
 
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--profile", dest="profile", action="store_true", help="Enable profiling")
-    group.add_argument("--no-profile", dest="profile", action="store_false", help="Disable profiling")
+    group.add_argument("--profile", dest="profile", action="store_true", help="Enable profiling for completion requests")
+    group.add_argument("--no-profile", dest="profile", action="store_false", help="Disable profiling for completion requests")
     parser.set_defaults(profile=None)
+
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--profile-loading", dest="profile_loading", action="store_true", help="Enable profiling for model loading")
+    group.add_argument("--no-profile-loading", dest="profile_loading", action="store_false", help="Disable profiling for model loading")
+    parser.set_defaults(profile_loading=None)
 
     args, _ = parser.parse_known_args()
 

@@ -128,7 +128,7 @@ def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest],
             if torch.cuda.is_available():
                 torch.cuda.synchronize(device)
     finally:
-        save_trace(profile_ctx, rank, batch_size)
+        save_completion_trace(profile_ctx, rank, batch_size)
 
     end_time = time.time()
 
@@ -174,8 +174,7 @@ def build_generation_args(payload: ChatCompletionRequest) -> Dict[str, Any]:
         generation_args["top_p"] = top_p
     return generation_args
 
-def create_profiling_context(profile: bool):
-
+def create_profiling_context(profile: bool, with_stacks: bool = False):
     if profile:
         print("Starting profiling...")
         activities = [torch.profiler.ProfilerActivity.CPU]
@@ -184,23 +183,36 @@ def create_profiling_context(profile: bool):
 
         profile_ctx = torch.profiler.profile(
             activities=activities,
+            with_stack=with_stacks
         )
     else:
         profile_ctx = nullcontext()
 
     return profile_ctx
 
-def save_trace(profile_ctx, rank: int, batch_size: int):
+def save_trace(profile_ctx, trace_file: str):
     if (profile_ctx is not None) and isinstance(profile_ctx, torch.profiler.profile):
         profile_output_dir = "profiler"
         os.makedirs(profile_output_dir, exist_ok=True)
 
-        trace_id = generate_id("trace_", length=6)
-        trace_file = os.path.join(profile_output_dir, f"trace_{trace_id}_bs{batch_size}_rank{rank}.json")
+        trace_file = os.path.join(profile_output_dir, trace_file)
 
         print(f"Profiling trace saved to: {trace_file}")
         profile_ctx.export_chrome_trace(trace_file)
 
+def save_completion_trace(profile_ctx, rank: int, batch_size: int):
+    if (profile_ctx is not None) and isinstance(profile_ctx, torch.profiler.profile):
+        trace_id = generate_id("trace_", length=6)
+        trace_file = f"{trace_id}_bs{batch_size}_rank{rank}.json"
+
+        save_trace(profile_ctx=profile_ctx, trace_file=trace_file)
+
+def save_loading_trace(profile_ctx, rank: int):
+    if (profile_ctx is not None) and isinstance(profile_ctx, torch.profiler.profile):
+        trace_id = generate_id("loading_trace_", length=6)
+        trace_file = f"{trace_id}_rank{rank}.json"
+
+        save_trace(profile_ctx=profile_ctx, trace_file=trace_file)
 
 def _process_rss_bytes() -> Optional[int]:
     try:
@@ -251,6 +263,7 @@ def _worker_entrypoint(
     response_queue: Any,
     ready_queue: Any,
     profile: bool,
+    profile_loading: bool,
 ) -> None:
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = "29500"
@@ -268,7 +281,7 @@ def _worker_entrypoint(
 
     tokenizer = load_tokenizer(tokenizer_path, chat_template_path)
 
-    model = load_model(rank, model_path, lora_path, model_dtype, device)
+    model = load_model(rank, model_path, lora_path, model_dtype, device, profile_loading)
 
     output_parser = create_output_parser(model, output_parser_name)
 
@@ -320,34 +333,41 @@ def _worker_entrypoint(
 def create_output_parser(model, output_parser_name: Optional[str]) -> OutputParser:
     return OutputParser.create_output_parser(model.__class__.__name__, output_parser_name)
 
-def load_model(rank, model_path, lora_path, model_dtype, device):
+def load_model(rank, model_path, lora_path, model_dtype, device, profile_loading: bool):
     print(f"Loading model on rank {rank}...")
 
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            tp_plan="auto",
-            torch_dtype=model_dtype,
-        )
-    except TypeError:
-        model = AutoModelForCausalLM.from_pretrained(model_path)
+        with create_profiling_context(profile_loading, with_stacks=True) as profile_ctx:
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    tp_plan="auto",
+                    torch_dtype=model_dtype,
+                )
+            except TypeError:
+                model = AutoModelForCausalLM.from_pretrained(model_path)
 
-    if lora_path is not None:
-        from peft import PeftModelForCausalLM
+            if lora_path is not None:
+                from peft import PeftModelForCausalLM
 
-        print(f"Applying LoRA weights from {lora_path}...")
-        model = PeftModelForCausalLM.from_pretrained(model, lora_path)
+                print(f"Applying LoRA weights from {lora_path}...")
+                model = PeftModelForCausalLM.from_pretrained(model, lora_path)
 
-    if torch.cuda.is_available():
-        # put the dtype again here in case LoRa weights were loaded in a different dtype
-        model = model.to(device=device, dtype=model_dtype)
+            if torch.cuda.is_available():
+                # put the dtype again here in case LoRa weights were loaded in a different dtype
+                model = model.to(device=device, dtype=model_dtype)
 
-    if lora_path is not None:
-        # merge the LoRA weights into the base model
-        print(f"Merging LoRA weights into base model...")
-        model = model.merge_and_unload()
+            if lora_path is not None:
+                # merge the LoRA weights into the base model
+                print(f"Merging LoRA weights into base model...")
+                model = model.merge_and_unload()
 
-    model = init_engine(model, tensor_parallelism=None)
+            model = init_engine(model, tensor_parallelism=None)
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+    finally:
+        save_loading_trace(profile_ctx, rank)
 
     print(f"Model loaded on rank {rank}.")
 
@@ -393,6 +413,7 @@ class ModelWorkerManager:
         self.output_parser_name = args.output_parser
 
         self.profile = args.profile
+        self.profile_loading = args.profile_loading
 
         # load the model configuration to determine the maximum context length and output length
         model_config = AutoConfig.from_pretrained(args.model_path)
@@ -465,6 +486,7 @@ class ModelWorkerManager:
                     self.response_queue,
                     self.ready_queue,
                     self.profile,
+                    self.profile_loading,
                 ),
             )
             process.start()
