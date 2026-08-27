@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+import gc
 import json
 import multiprocessing as mp
 import os
@@ -18,6 +19,12 @@ from muillm.server.defaults import DEFAULT_MAX_CONTEXT_LENGTH, DEFAULT_MAX_OUTPU
 from muillm.server.filehelpers import read_file_content
 from muillm.server.idutils import generate_id
 from muillm.server.outputparsers.outputparser import OutputParser
+
+
+class _MemoryStatsRequest:
+    def __init__(self, collect: bool, reset_peak: bool) -> None:
+        self.collect = collect
+        self.reset_peak = reset_peak
 
 
 def detect_tp_size(requested: Optional[int]) -> int:
@@ -192,6 +199,42 @@ def save_trace(profile_ctx, rank: int, batch_size: int):
         profile_ctx.export_chrome_trace(trace_file)
 
 
+def _process_rss_bytes() -> Optional[int]:
+    try:
+        with open("/proc/self/status", encoding="utf-8") as status_file:
+            for line in status_file:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+
+    return None
+
+
+def _memory_stats(device: torch.device, collect: bool, reset_peak: bool) -> Dict[str, Any]:
+    if collect:
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+            torch.cuda.empty_cache()
+
+    stats: Dict[str, Any] = {"process_rss_bytes": _process_rss_bytes()}
+    if torch.cuda.is_available():
+        allocator_stats = torch.cuda.memory_stats(device)
+        stats["cuda"] = {
+            "allocated_bytes": torch.cuda.memory_allocated(device),
+            "reserved_bytes": torch.cuda.memory_reserved(device),
+            "max_allocated_bytes": torch.cuda.max_memory_allocated(device),
+            "max_reserved_bytes": torch.cuda.max_memory_reserved(device),
+            "allocation_retries": allocator_stats.get("num_alloc_retries", 0),
+            "ooms": allocator_stats.get("num_ooms", 0),
+        }
+        if reset_peak:
+            torch.cuda.reset_peak_memory_stats(device)
+
+    return stats
+
+
 def _worker_entrypoint(
     rank: int,
     world_size: int,
@@ -229,9 +272,13 @@ def _worker_entrypoint(
     ready_queue.put(rank)
 
     while True:
-        payloads: List[ChatCompletionRequest] = request_queue.get()
+        payloads = request_queue.get()
         if payloads is None:
             break
+
+        if isinstance(payloads, _MemoryStatsRequest):
+            response_queue.put(("memory_stats", rank, _memory_stats(device, payloads.collect, payloads.reset_peak)))
+            continue
 
         response_texts_per_request = _generate(model, tokenizer, payloads, device, rank, profile)
 
@@ -463,3 +510,21 @@ class ModelWorkerManager:
                     raise RuntimeError("Received mismatched response from worker queue")
 
             return responses
+
+    def memory_stats(self, collect: bool = False, reset_peak: bool = False) -> List[Dict[str, Any]]:
+        if not self._started:
+            raise RuntimeError("Workers have not been started")
+
+        with self._dispatch_lock:
+            request = _MemoryStatsRequest(collect=collect, reset_peak=reset_peak)
+            for queue in self.request_queues:
+                queue.put(request)
+
+            stats_by_rank: List[Optional[Dict[str, Any]]] = [None] * self.tp_size
+            for _ in range(self.tp_size):
+                response_type, rank, stats = self.response_queue.get()
+                if response_type != "memory_stats" or not 0 <= rank < self.tp_size:
+                    raise RuntimeError("Received unexpected response while collecting memory statistics")
+                stats_by_rank[rank] = stats
+
+            return [stats for stats in stats_by_rank if stats is not None]

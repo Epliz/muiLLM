@@ -98,6 +98,21 @@ def build_app(manager: ModelWorkerManager) -> FastAPI:
     def healthz() -> Dict[str, Any]:
         return {"status": "ok", "workers": manager.tp_size}
 
+    @app.get("/debug/memory")
+    def memory(
+        collect: bool = False,
+        reset_peak: bool = False,
+    ) -> Dict[str, Any]:
+        try:
+            return {
+                "workers": manager.memory_stats(
+                    collect=collect,
+                    reset_peak=reset_peak,
+                )
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
     @app.get("/v1/models")
     def list_models() -> JSONResponse:
         model_info = {
