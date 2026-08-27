@@ -120,6 +120,9 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = None
     stream: bool = False
 
+    # debugging parameters
+    profile: Optional[bool] = False
+
 class ChatCompletionResult(BaseModel):
     request_id: Optional[str] = None
 

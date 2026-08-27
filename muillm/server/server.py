@@ -150,6 +150,7 @@ def build_app(manager: ModelWorkerManager) -> FastAPI:
             max_tokens=manager.max_tokens(request.max_tokens),
             temperature=manager.temperature(request.temperature),
             top_p=manager.top_p(request.top_p),
+            profile=request.profile,
         )
 
     @app.post("/v1/chat/completions")

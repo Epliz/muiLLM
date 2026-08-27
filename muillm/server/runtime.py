@@ -81,6 +81,9 @@ def validate_structured_output(content: str, output_json_schema: dict) -> None:
         raise ValueError(f"Parsed content does not match the output schema: {e.message}")
 
 def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest], device: torch.device, rank: int, profile: bool) -> List[str]:
+    # if a request has profiling enabled, we profile the entire batch
+    profile = profile or any(payload.profile for payload in payloads)
+
     batch_size = len(payloads)
 
     # TODO: check that all generation args are the same
