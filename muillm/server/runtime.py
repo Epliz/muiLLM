@@ -80,7 +80,15 @@ def validate_structured_output(content: str, output_json_schema: dict) -> None:
     except ValidationError as e:
         raise ValueError(f"Parsed content does not match the output schema: {e.message}")
 
-def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest], device: torch.device, rank: int, profile: bool) -> List[str]:
+def _generate(
+        model: Any,
+        tokenizer: Any,
+        payloads: List[ChatCompletionRequest],
+        device: torch.device,
+        rank: int,
+        profile: bool,
+        detailed_request_logging: bool,
+    ) -> List[str]:
     # if a request has profiling enabled, we profile the entire batch
     profile = profile or any(payload.profile for payload in payloads)
 
@@ -101,12 +109,13 @@ def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest],
         for _ in range(get_num_completions(payload))
     ]
 
-    print("-----")
-    print(f"Flattened prompts:")
-    for i, prompt in enumerate(prompts):
-        print("--")
-        print(f"Prompt {i}: {prompt}")
-        print("--")
+    if detailed_request_logging:
+        print("-----")
+        print(f"Flattened prompts:")
+        for i, prompt in enumerate(prompts):
+            print("--")
+            print(f"Prompt {i}: {prompt}")
+            print("--")
 
     start_time = time.time()
 
@@ -140,14 +149,15 @@ def _generate(model: Any, tokenizer: Any, payloads: List[ChatCompletionRequest],
     total_tokens = batch_size * output_len
 
     tokens_per_seconds = total_tokens / (end_time - start_time)
-    print(f"Output tokens: {output_len} Batch size: {batch_size} Total tokens {total_tokens} ({tokens_per_seconds} total tokens/s)")
+    print(f"Input tokens: {prompt_len} Output tokens: {output_len} Batch size: {batch_size} Total tokens {total_tokens} ({tokens_per_seconds} total tokens/s)")
 
-    print(f"Outputs:")
-    for i, text in enumerate(texts):
-        print("--")
-        print(f"Output {i}: {text}")
-        print("--")
-    print("-----")
+    if detailed_request_logging:
+        print(f"Outputs:")
+        for i, text in enumerate(texts):
+            print("--")
+            print(f"Output {i}: {text}")
+            print("--")
+        print("-----")
 
     # outputs will be parsed on rank 0
     offset = 0
@@ -264,6 +274,7 @@ def _worker_entrypoint(
     ready_queue: Any,
     profile: bool,
     profile_loading: bool,
+    detailed_request_logging: bool,
 ) -> None:
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = "29500"
@@ -296,7 +307,7 @@ def _worker_entrypoint(
             response_queue.put(("memory_stats", rank, _memory_stats(device, payloads.collect, payloads.reset_peak)))
             continue
 
-        response_texts_per_request = _generate(model, tokenizer, payloads, device, rank, profile)
+        response_texts_per_request = _generate(model, tokenizer, payloads, device, rank, profile, detailed_request_logging)
 
         if rank == 0:
             # Only rank 0 returns the result
@@ -414,6 +425,7 @@ class ModelWorkerManager:
 
         self.profile = args.profile
         self.profile_loading = args.profile_loading
+        self.detailed_request_logging = args.detailed_request_logging
 
         # load the model configuration to determine the maximum context length and output length
         model_config = AutoConfig.from_pretrained(args.model_path)
@@ -446,7 +458,9 @@ class ModelWorkerManager:
         print("----")
 
         if self.profile:
-            print("Profiling is enabled. Profiling traces will be saved in the 'profiler' directory.")
+            print("Profiling is enabled. Profile traces will be saved in the 'profiler' directory.")
+        if self.profile_loading:
+            print("Loading profiling is enabled. Loading profile traces will be saved in the 'profiler' directory.")
 
     def max_tokens(self, requested: Optional[int]) -> int:
         if requested is not None and requested > 0:
@@ -487,6 +501,7 @@ class ModelWorkerManager:
                     self.ready_queue,
                     self.profile,
                     self.profile_loading,
+                    self.detailed_request_logging,
                 ),
             )
             process.start()

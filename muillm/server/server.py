@@ -88,6 +88,11 @@ def parse_args():
     group.add_argument("--no-profile-loading", dest="profile_loading", action="store_false", help="Disable profiling for model loading")
     parser.set_defaults(profile_loading=None)
 
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--detailed-request-logging", dest="detailed_request_logging", action="store_true", help="Enable detailed request logging (prompts, outputs)")
+    group.add_argument("--no-detailed-request-logging", dest="detailed_request_logging", action="store_false", help="Disable detailed request logging")
+    parser.set_defaults(profile_loading=None)
+
     args, _ = parser.parse_known_args()
 
     if not args.model_path and not args.served_model_id:
