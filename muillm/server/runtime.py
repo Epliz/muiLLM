@@ -346,6 +346,7 @@ def create_output_parser(model, output_parser_name: Optional[str]) -> OutputPars
 
 def load_model(rank, model_path, lora_path, model_dtype, device, profile_loading: bool):
     print(f"Loading model on rank {rank}...")
+    start_time = time.time()
 
     try:
         with create_profiling_context(profile_loading, with_stacks=True) as profile_ctx:
@@ -380,7 +381,9 @@ def load_model(rank, model_path, lora_path, model_dtype, device, profile_loading
     finally:
         save_loading_trace(profile_ctx, rank)
 
-    print(f"Model loaded on rank {rank}.")
+    end_time = time.time()
+    total_loading_time = end_time - start_time
+    print(f"Model loaded on rank {rank} in {total_loading_time:.2f} seconds.")
 
     return model
 
