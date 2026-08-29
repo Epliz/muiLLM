@@ -292,7 +292,7 @@ def _worker_entrypoint(
 
     tokenizer = load_tokenizer(tokenizer_path, chat_template_path)
 
-    model = load_model(rank, model_path, lora_path, model_dtype, device, profile_loading)
+    model = load_model(world_size, rank, model_path, lora_path, model_dtype, device, profile_loading)
 
     output_parser = create_output_parser(model, output_parser_name)
 
@@ -344,17 +344,24 @@ def _worker_entrypoint(
 def create_output_parser(model, output_parser_name: Optional[str]) -> OutputParser:
     return OutputParser.create_output_parser(model.__class__.__name__, output_parser_name)
 
-def load_model(rank, model_path, lora_path, model_dtype, device, profile_loading: bool):
+def load_model(world_size: int, rank: int, model_path, lora_path, model_dtype, device, profile_loading: bool):
     print(f"Loading model on rank {rank}...")
     start_time = time.time()
 
     try:
         with create_profiling_context(profile_loading, with_stacks=True) as profile_ctx:
             try:
+                hf_loading_kwargs = {}
+                if world_size > 1:
+                    # We avoid using tp_plan when world_size == 1
+                    # as it makes loading slower
+                    # (it makes loading slower also when world_size > 1 but in that case it is useful for memory consumption)
+                    hf_loading_kwargs["tp_plan"] = "auto"
+
                 model = AutoModelForCausalLM.from_pretrained(
                     model_path,
-                    tp_plan="auto",
                     torch_dtype=model_dtype,
+                    **hf_loading_kwargs,
                 )
             except TypeError:
                 model = AutoModelForCausalLM.from_pretrained(model_path)
